@@ -809,6 +809,10 @@ function validateThreadListItem(value: unknown): MailThreadListItem {
   const hasNewSender =
     isPlainRecord(value) &&
     Object.prototype.hasOwnProperty.call(value, "newSender");
+  // The sender a waiting thread names comes only with a thread that waits.
+  const hasNewSenderFrom =
+    isPlainRecord(value) &&
+    Object.prototype.hasOwnProperty.call(value, "newSenderFrom");
   if (
     !isRecordWithExactFields(value, [
       ...baseFields,
@@ -816,7 +820,9 @@ function validateThreadListItem(value: unknown): MailThreadListItem {
       ...(hasListMessage ? ["listMessage", "sizeBytes"] : []),
       ...(hasCategory ? ["category"] : []),
       ...(hasNewSender ? ["newSender"] : []),
+      ...(hasNewSenderFrom ? ["newSenderFrom"] : []),
     ]) ||
+    (hasNewSenderFrom && value.newSender !== true) ||
     !SAFE_ACCOUNT_ID.test(typeof value.accountId === "string" ? value.accountId : "") ||
     !SAFE_RESOURCE_ID.test(typeof value.threadId === "string" ? value.threadId : "") ||
     !Array.isArray(value.participants) ||
@@ -856,6 +862,7 @@ function validateThreadListItem(value: unknown): MailThreadListItem {
       ? (value.category as MailThreadCategory)
       : "people",
     newSender: hasNewSender ? (value.newSender as boolean) : false,
+    ...(hasNewSenderFrom ? { newSenderFrom: validateAddress(value.newSenderFrom) } : {}),
   });
 }
 

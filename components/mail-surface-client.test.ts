@@ -345,6 +345,35 @@ describe("defaultMailSurfaceClient system mailboxes", () => {
     }
   });
 
+  it("reads the sender a waiting thread names, and only on a waiting thread", async () => {
+    const list = (items: readonly unknown[]) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          response({
+            apiVersion: 1,
+            items,
+            nextCursor: null,
+            sync: { status: "idle", lastSuccessfulAt: 1_700_000_000_000 },
+          }),
+        ),
+      );
+      return defaultMailSurfaceClient.listThreads({ accountId: ACCOUNT_ID });
+    };
+    const from = { name: "Lena Okafor", address: "lena@okafor.example" };
+
+    await expect(
+      list([{ ...thread, newSender: true, newSenderFrom: from }]),
+    ).resolves.toMatchObject({ items: [{ newSender: true, newSenderFrom: from }] });
+    for (const invalid of [
+      { ...thread, newSender: false, newSenderFrom: from },
+      { ...thread, newSender: true, newSenderFrom: null },
+      { ...thread, newSender: true, newSenderFrom: { name: null, address: "nobody" } },
+    ]) {
+      await expect(list([invalid])).rejects.toThrow("invalid mail thread");
+    }
+  });
+
   it("reads a thread through the selected mailbox boundary", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       response({

@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { domainToASCII } from "node:url";
 
 import type {
+  MailAddress,
   MailBlockedSenders,
   MailMailboxThreadPage,
   MailSearchThreadPage,
@@ -1024,6 +1025,9 @@ export class SqliteMailSenderStore {
 
 /** A cached thread's first message, as the cache holds it. */
 export interface MailThreadFirstSender {
+  /** The From display name as cached. It is handed to the UI on a waiting
+   *  thread so a row and a toast can say who wrote, and never stored here. */
+  readonly name: string | null;
   /** The From address exactly as cached; the screen normalizes it. */
   readonly address: string | null;
   readonly firstMessageAt: number | null;
@@ -1225,7 +1229,7 @@ export class MailSenderScreen implements MailSenderScreenService {
     try {
       const gateMoment = this.readGateMoment(accountId);
       if (gateMoment === null) {
-        return Object.freeze(items.map((item) => withNewSender(item, false)));
+        return Object.freeze(items.map((item) => withNewSender(item, null)));
       }
       const own = await this.readOwn();
       const senders = await this.mail.readThreadFirstSenders(
@@ -1270,7 +1274,12 @@ export class MailSenderScreen implements MailSenderScreenService {
         ) {
           gated = await this.followsStranger(accountId, sender, first.references, gateMoment);
         }
-        annotated.push(withNewSender(item, gated));
+        annotated.push(
+          withNewSender(
+            item,
+            gated && sender !== null ? { name: first?.name ?? null, address: sender } : null,
+          ),
+        );
       }
       return Object.freeze(annotated);
     } catch {
@@ -1279,7 +1288,7 @@ export class MailSenderScreen implements MailSenderScreenService {
         accountId,
         errorCode: "mail_senders_unavailable",
       });
-      return Object.freeze(items.map((item) => withNewSender(item, false)));
+      return Object.freeze(items.map((item) => withNewSender(item, null)));
     }
   }
 
@@ -1981,8 +1990,19 @@ function normalizeAll(raw: readonly string[]): string[] {
   });
 }
 
-function withNewSender(item: MailThreadListItem, newSender: boolean): MailThreadListItem {
-  return item.newSender === newSender ? item : Object.freeze({ ...item, newSender });
+/** A waiting thread carries the sender it waits on; any other carries none,
+ *  whatever the item it was built from said. */
+function withNewSender(
+  item: MailThreadListItem,
+  waitsOn: MailAddress | null,
+): MailThreadListItem {
+  if (waitsOn === null) {
+    if (!item.newSender && item.newSenderFrom === undefined) return item;
+    const rest: MailThreadListItem = { ...item, newSender: false };
+    delete (rest as { newSenderFrom?: MailAddress }).newSenderFrom;
+    return Object.freeze(rest);
+  }
+  return Object.freeze({ ...item, newSender: true, newSenderFrom: Object.freeze({ ...waitsOn }) });
 }
 
 function isPermanentMutationFailure(error: unknown): boolean {

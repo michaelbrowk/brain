@@ -545,7 +545,13 @@ the highest one the build knows, so a later client still gets every field
 this service has; a service from before tier 5 reads `5` as the original
 shape, which strips stars and categories for as long as a release that pairs
 a new Brain with an old service lasts. A failure reading the screen answers
-`false` for the page rather than failing the list.
+`false` for the page rather than failing the list. A waiting thread also
+carries `newSenderFrom`, its first message's From with the address normalized
+as a decision reads it and the display name as cached, and no other thread
+carries one: a decision names that sender, and neither the first entry of
+`participants` nor a Reply-To is that. It is tier 5 with `newSender` and
+leaves with it in every lower projection. The name is passed through for the
+UI to say and is never written to `senders.sqlite3`.
 
 **Replies.** A first message that carries `In-Reply-To` or `References`
 answers someone, and cold outreach carries neither, so a reply-shaped letter

@@ -1697,6 +1697,40 @@ describe("the new-senders screen", () => {
 
     expect(await newSenders(world, ACCOUNT_A, ["fresh"])).toEqual([false]);
   });
+
+  it("names the first sender on a waiting thread and on no other", async () => {
+    const world = await readyWorld();
+    world.mail.addThread(ACCOUNT_A, {
+      threadId: "lena",
+      from: "Lena Okafor <Lena@Okafor.Example>",
+      at: LATER,
+    });
+    world.mail.addThread(ACCOUNT_A, {
+      threadId: "parcel",
+      from: "Parcel <parcel@example.net>",
+      at: LATER,
+      category: "notification",
+    });
+
+    const [lena, parcel] = await world.screen.annotateItems(ACCOUNT_A, [
+      world.mail.item(ACCOUNT_A, "lena"),
+      // A thread that stopped waiting drops the sender it carried.
+      {
+        ...world.mail.item(ACCOUNT_A, "parcel"),
+        newSender: true,
+        newSenderFrom: { name: "Parcel", address: "parcel@example.net" },
+      },
+    ]);
+
+    // The address as the decision routes will read it: the first message's
+    // From, normalized, never a later participant or a Reply-To.
+    expect(lena).toMatchObject({
+      newSender: true,
+      newSenderFrom: { name: "Lena Okafor", address: "lena@okafor.example" },
+    });
+    expect(parcel!.newSender).toBe(false);
+    expect(parcel).not.toHaveProperty("newSenderFrom");
+  });
 });
 
 interface FakeMessage {
@@ -1782,6 +1816,12 @@ function createFakeMail(initial: Readonly<Record<string, string>>) {
             [
               threadId,
               {
+                // The cache keeps the display name apart from the address;
+                // the fake's From is one header line, so it splits it here.
+                name:
+                  first.from === null
+                    ? null
+                    : (/^\s*(.+?)\s*<[^<>]+>\s*$/.exec(first.from)?.[1] ?? null),
                 address: first.from,
                 firstMessageAt: first.sentAt,
                 startsConversation: !first.isReply,

@@ -438,6 +438,39 @@ describe("Mail message boundary codec", () => {
     }
   });
 
+  it("reads the sender a waiting thread names, and only on a waiting thread", () => {
+    const from = { name: "Lena Okafor", address: "lena@okafor.example" };
+    const page = (item: Record<string, unknown>) =>
+      validateMailThreadPage({
+        apiVersion: 1,
+        items: [item],
+        nextCursor: null,
+        sync: { status: "idle", lastSuccessfulAt: 123 },
+      });
+
+    expect(
+      page({ ...threadFixture(), newSender: true, newSenderFrom: from }).items[0],
+    ).toMatchObject({ newSender: true, newSenderFrom: from });
+    expect(
+      page({ ...threadFixture(), newSender: true }).items[0]!.newSenderFrom,
+    ).toBeUndefined();
+
+    for (const invalid of [
+      // A sender named on a thread nobody is waiting on is a contradiction.
+      { ...threadFixture(), newSender: false, newSenderFrom: from },
+      { ...threadFixture(), newSenderFrom: from },
+      { ...threadFixture(), newSender: true, newSenderFrom: null },
+      { ...threadFixture(), newSender: true, newSenderFrom: "lena@okafor.example" },
+      {
+        ...threadFixture(),
+        newSender: true,
+        newSenderFrom: { name: null, address: "not an address" },
+      },
+    ]) {
+      expect(() => page(invalid)).toThrow("mail_response_invalid");
+    }
+  });
+
   it("holds the new-senders requests and answers to their exact shapes", () => {
     expect(
       validateMailSenderDecisionInput({

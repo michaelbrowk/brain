@@ -55,6 +55,16 @@ export interface MailThreadListItem {
    * cache never stores it.
    */
   readonly newSender: boolean;
+  /**
+   * Tier-5 field, present exactly when `newSender` is true: the sender the
+   * thread waits on, which is its first message's From with the address
+   * normalized the way a decision reads it. A decision has to name that
+   * sender, and `participants` cannot: its first entry is whoever the
+   * provider listed first, and a Reply-To is someone else again. The name is
+   * passed through from the cache for the UI to say; the screen never
+   * stores it.
+   */
+  readonly newSenderFrom?: MailAddress;
 }
 
 /**

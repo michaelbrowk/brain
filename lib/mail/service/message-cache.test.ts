@@ -5832,6 +5832,7 @@ describe("the cache's answers for the new-senders screen", () => {
 
     expect(Object.fromEntries(senders)).toEqual({
       "thread-reply": {
+        name: "First",
         address: "first@example.test",
         firstMessageAt: 1_000,
         startsConversation: false,
@@ -5840,6 +5841,7 @@ describe("the cache's answers for the new-senders screen", () => {
         references: [],
       },
       "thread-sent": {
+        name: null,
         address: "me@example.test",
         firstMessageAt: 500,
         startsConversation: true,

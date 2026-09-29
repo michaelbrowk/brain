@@ -4,14 +4,44 @@ import { MAX_MAIL_ACCOUNTS } from "./account-types";
 import type { MailBackgroundSyncStep } from "./message-service";
 
 const DEFAULT_INITIAL_DELAY_MS = 5_000;
-const DEFAULT_INTERVAL_MS = 60_000;
+export const DEFAULT_INTERVAL_MS = 60_000;
+export const DEFAULT_GMAIL_INTERVAL_MS = 20_000;
 const DEFAULT_CONTINUATION_DELAY_MS = 250;
 const DEFAULT_MAX_ITEMS = 5;
 const MAX_PROVIDER_PAGES_PER_BURST = 6;
+/**
+ * The least time between two passes IDLE asks for on one account. A server
+ * that reports an update every time IDLE starts would otherwise cost a login
+ * a second; hints inside the window fold into the one pass at its end.
+ */
+const IDLE_PASS_FLOOR_MS = 5_000;
 const SAFE_ACCOUNT_ID = /^account-a[0-9a-f]{32}$/;
+
+/**
+ * Every time this scheduler keeps is on the monotonic clock. A due time on
+ * the wall clock stops all sync for as long as NTP or a restored VM sets the
+ * clock back, and a forward jump leaves the armed timer looking earlier than
+ * a request that should replace it.
+ */
+function monotonicNow(): number {
+  return performance.now();
+}
+
+export type MailBackgroundSyncProvider = "gmail" | "imap";
+
+export interface MailBackgroundSyncAccount {
+  readonly accountId: string;
+  readonly providerKind: MailBackgroundSyncProvider;
+}
 
 export interface MailBackgroundSyncPort {
   listAccountIds(): Promise<readonly string[]>;
+  /**
+   * The same accounts with their provider. A port without it runs every
+   * account on the fallback interval, which is what the scheduler did for
+   * every account before Gmail had a cadence of its own.
+   */
+  listSyncAccounts?(): Promise<readonly MailBackgroundSyncAccount[]>;
   runBackgroundSyncStep(
     accountId: string,
     input: { readonly maxItems: number },
@@ -34,9 +64,10 @@ export interface MailBackgroundSearchIndexPort {
 }
 
 /**
- * The new-senders screen's step. `syncSucceeded` says whether this page's
- * sync reached the provider and came back healthy: the archiver and the
- * restores only touch the provider after one that did.
+ * The new-senders screen's step. `syncSucceeded` says whether the account's
+ * last provider sync came back healthy, on this visit or on the one that last
+ * asked the provider: the archiver and the restores only touch the provider
+ * while it is, and a backlog keeps draining on the visits in between.
  */
 export interface MailBackgroundSenderPort {
   runBackgroundSenderStep(
@@ -47,26 +78,65 @@ export interface MailBackgroundSenderPort {
 }
 
 /**
+ * IMAP IDLE as the scheduler drives it (`imap-idle.ts`). IDLE asks for passes
+ * through `requestSync`; the scheduler tells it when an IMAP account's sync
+ * has caught up, which accounts still sync, and when Mail stops or starts.
+ */
+export interface MailBackgroundIdlePort {
+  afterSync(accountId: string): void;
+  retain(accountIds: readonly string[]): void;
+  start(): void;
+  stop(): Promise<void>;
+}
+
+/**
  * One serialized poller for the isolated service. A failed account never
  * prevents the remaining accounts from syncing, and a slow pass cannot overlap
  * the next one. Provider-specific backoff stays inside the sync service.
+ *
+ * The provider is asked only when an account's sync is due: on its cadence,
+ * which is `gmailIntervalMs` for Gmail (one `history.list` against a stored
+ * history id) and `intervalMs` for everything else; when IDLE asks, at most
+ * once every `IDLE_PASS_FLOOR_MS`; or because the previous page said there is
+ * more. Everything else that brings the scheduler round (a kick from the
+ * content cache, a continuation for the privacy cache, the search index or
+ * the senders screen) runs the cache steps and leaves the provider alone, so
+ * an owner reading mail and a cohort of bodies downloading cost the provider
+ * nothing beyond the cadence. The scheduler is one loop, so no account ever
+ * has two passes in flight.
  */
 export class MailBackgroundSyncScheduler {
   private readonly port: MailBackgroundSyncPort;
   private readonly initialDelayMs: number;
   private readonly intervalMs: number;
+  private readonly gmailIntervalMs: number;
   private readonly continuationDelayMs: number;
   private readonly maxItems: number;
   private readonly privacyCache: MailBackgroundPrivacyCachePort | null;
   private readonly searchIndex: MailBackgroundSearchIndexPort | null;
   private readonly senders: MailBackgroundSenderPort | null;
+  private readonly idle: MailBackgroundIdlePort | null;
   private readonly accountQueue: string[] = [];
-  private readonly nextEligibleAt = new Map<string, number>();
-  private readonly syncBackoffUntil = new Map<string, number>();
+  /** When each account's provider sync is next due; absent means now. */
+  private readonly syncDueAt = new Map<string, number>();
+  /** Accounts whose last sync page said there is more to fetch. */
+  private readonly syncPending = new Set<string>();
+  /** Accounts whose due time IDLE brought forward and that have not synced since. */
+  private readonly idleRequested = new Set<string>();
+  /** When IDLE last had a pass of each account, for the floor. */
+  private readonly lastIdlePassAt = new Map<string, number>();
+  private readonly providers = new Map<string, MailBackgroundSyncProvider | null>();
+  /** Accounts IDLE asked for while a pass was in flight. */
+  private readonly requested = new Set<string>();
+  /** Accounts whose last provider sync came back healthy. */
+  private readonly syncHealthy = new Set<string>();
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private timerDueAt = 0;
   private controller: AbortController | null = null;
   private inFlight: Promise<void> | null = null;
   private started = false;
+  /** The next pass visits every account for its cache steps. */
+  private visitAll = false;
   private kickRequested = false;
 
   constructor(
@@ -74,11 +144,13 @@ export class MailBackgroundSyncScheduler {
     options: {
       readonly initialDelayMs?: number;
       readonly intervalMs?: number;
+      readonly gmailIntervalMs?: number;
       readonly continuationDelayMs?: number;
       readonly maxItems?: number;
       readonly privacyCache?: MailBackgroundPrivacyCachePort;
       readonly searchIndex?: MailBackgroundSearchIndexPort;
       readonly senders?: MailBackgroundSenderPort;
+      readonly idle?: MailBackgroundIdlePort;
     } = {},
   ) {
     this.port = port;
@@ -86,6 +158,14 @@ export class MailBackgroundSyncScheduler {
       options.initialDelayMs ?? DEFAULT_INITIAL_DELAY_MS,
     );
     this.intervalMs = validateDelay(options.intervalMs ?? DEFAULT_INTERVAL_MS);
+    // The fallback is the slowest any account syncs, Gmail included.
+    this.gmailIntervalMs = validateDelay(
+      options.gmailIntervalMs ??
+        Math.min(DEFAULT_GMAIL_INTERVAL_MS, this.intervalMs),
+    );
+    if (this.gmailIntervalMs > this.intervalMs) {
+      throw new Error("mail background interval is invalid");
+    }
     this.continuationDelayMs = validateDelay(
       options.continuationDelayMs ?? DEFAULT_CONTINUATION_DELAY_MS,
     );
@@ -111,14 +191,17 @@ export class MailBackgroundSyncScheduler {
       throw new Error("mail background senders step is invalid");
     }
     this.senders = options.senders ?? null;
+    this.idle = options.idle ?? null;
   }
 
   start(): void {
     if (this.started) return;
     this.started = true;
+    this.idle?.start();
     this.schedule(this.initialDelayMs);
   }
 
+  /** Pause and shutdown: the pass in flight drains and IDLE closes. */
   async stop(): Promise<void> {
     this.started = false;
     this.kickRequested = false;
@@ -126,18 +209,43 @@ export class MailBackgroundSyncScheduler {
     this.timer = null;
     this.controller?.abort();
     await this.inFlight?.catch(() => undefined);
+    await this.idle?.stop();
     this.accountQueue.length = 0;
-    this.nextEligibleAt.clear();
-    this.syncBackoffUntil.clear();
+    this.syncDueAt.clear();
+    this.syncPending.clear();
+    this.idleRequested.clear();
+    this.lastIdlePassAt.clear();
+    this.providers.clear();
+    this.requested.clear();
+    this.syncHealthy.clear();
+    this.visitAll = false;
+  }
+
+  /**
+   * IDLE saw INBOX change (or restarted): the account's sync is due now, or
+   * at the end of the floor after IDLE's last pass, whichever is later. A
+   * request during a pass is applied when that pass settles, so the pass that
+   * was already reading the account cannot swallow it.
+   */
+  requestSync(accountId: string): void {
+    if (!this.started) return;
+    if (this.inFlight !== null) {
+      this.requested.add(accountId);
+      return;
+    }
+    const dueAt = this.bringSyncForward(accountId);
+    this.schedule(Math.max(0, dueAt - monotonicNow()));
   }
 
   /**
    * Coalesced fast-forward for freshly observed work (an owner content demand
-   * or a new ready commit): runs a pass now, or schedules one continuation
-   * right after the pass that is already in flight.
+   * or a new ready commit): the cache steps of every account run now, or right
+   * after the pass that is already in flight. No provider is asked on its
+   * account: that waits for the account's own due time.
    */
   kick(): void {
     if (!this.started) return;
+    this.visitAll = true;
     if (this.inFlight !== null) {
       this.kickRequested = true;
       return;
@@ -151,26 +259,43 @@ export class MailBackgroundSyncScheduler {
     this.timer = null;
     const controller = new AbortController();
     this.controller = controller;
-    let nextDelayMs = this.intervalMs;
+    let hasContinuation = false;
     const task = this.runPass(controller.signal)
-      .then((hasContinuation) => {
-        if (hasContinuation) nextDelayMs = this.continuationDelayMs;
+      .then((continuation) => {
+        hasContinuation = continuation;
       })
       .finally(() => {
         if (this.controller === controller) this.controller = null;
         if (this.inFlight === task) this.inFlight = null;
         if (this.kickRequested) {
           this.kickRequested = false;
-          nextDelayMs = Math.min(nextDelayMs, this.continuationDelayMs);
+          hasContinuation = true;
         }
-        if (this.started) this.schedule(nextDelayMs);
+        for (const accountId of this.requested) {
+          this.bringSyncForward(accountId);
+        }
+        this.requested.clear();
+        if (this.started) {
+          this.schedule(
+            hasContinuation
+              ? this.continuationDelayMs
+              : this.delayUntilNextDue(),
+          );
+        }
       });
     this.inFlight = task;
     return task;
   }
 
+  /** The earliest timer wins: a later request never pushes a pass back. */
   private schedule(delayMs: number): void {
-    if (!this.started || this.timer !== null) return;
+    if (!this.started) return;
+    const dueAt = monotonicNow() + delayMs;
+    if (this.timer !== null) {
+      if (this.timerDueAt <= dueAt) return;
+      clearTimeout(this.timer);
+    }
+    this.timerDueAt = dueAt;
     this.timer = setTimeout(() => {
       this.timer = null;
       void this.runNow();
@@ -178,45 +303,103 @@ export class MailBackgroundSyncScheduler {
     this.timer.unref?.();
   }
 
+  private delayUntilNextDue(): number {
+    if (this.providers.size === 0) return this.intervalMs;
+    const now = monotonicNow();
+    let earliest = Number.POSITIVE_INFINITY;
+    for (const accountId of this.providers.keys()) {
+      earliest = Math.min(earliest, this.syncDueAt.get(accountId) ?? now);
+    }
+    return Math.max(this.continuationDelayMs, earliest - now);
+  }
+
+  private cadenceOf(accountId: string): number {
+    return this.providers.get(accountId) === "gmail"
+      ? this.gmailIntervalMs
+      : this.intervalMs;
+  }
+
+  private isSyncDue(accountId: string, now: number): boolean {
+    return (this.syncDueAt.get(accountId) ?? 0) <= now;
+  }
+
+  /** Makes the account's sync due for IDLE; answers when it now is. */
+  private bringSyncForward(accountId: string): number {
+    const now = monotonicNow();
+    const floorAt =
+      (this.lastIdlePassAt.get(accountId) ?? Number.NEGATIVE_INFINITY) +
+      IDLE_PASS_FLOOR_MS;
+    const dueAt = Math.max(now, floorAt);
+    const current = this.syncDueAt.get(accountId) ?? now;
+    if (current > dueAt) this.syncDueAt.set(accountId, dueAt);
+    this.idleRequested.add(accountId);
+    return Math.min(current, dueAt);
+  }
+
+  private async listAccounts(): Promise<
+    readonly {
+      readonly accountId: string;
+      readonly providerKind: MailBackgroundSyncProvider | null;
+    }[]
+  > {
+    if (this.port.listSyncAccounts !== undefined) {
+      return validateSyncAccounts(await this.port.listSyncAccounts());
+    }
+    return validateAccountIds(await this.port.listAccountIds()).map(
+      (accountId) => Object.freeze({ accountId, providerKind: null }),
+    );
+  }
+
   private async runPass(signal: AbortSignal): Promise<boolean> {
-    let accountIds: readonly string[];
+    let accounts: Awaited<ReturnType<MailBackgroundSyncScheduler["listAccounts"]>>;
+    const visitAll = this.visitAll;
+    this.visitAll = false;
     try {
-      accountIds = validateAccountIds(await this.port.listAccountIds());
+      accounts = await this.listAccounts();
     } catch {
       this.accountQueue.length = 0;
-      this.nextEligibleAt.clear();
+      // With no accounts known the next pass is a fallback interval away;
+      // the stale list would have it due every continuation instead.
+      this.providers.clear();
       return false;
     }
     if (signal.aborted) return false;
-    if (this.accountQueue.length === 0) {
-      this.accountQueue.push(...accountIds);
-    } else {
-      const active = new Set(accountIds);
-      const retained = this.accountQueue.filter((accountId) =>
-        active.has(accountId),
-      );
-      const queued = new Set(retained);
-      const now = Date.now();
-      for (const accountId of accountIds) {
-        if (
-          !queued.has(accountId) &&
-          (this.nextEligibleAt.get(accountId) ?? 0) <= now
-        ) {
-          retained.push(accountId);
-        }
-      }
-      this.accountQueue.splice(0, this.accountQueue.length, ...retained);
-      for (const accountId of this.nextEligibleAt.keys()) {
-        if (!active.has(accountId)) {
-          this.nextEligibleAt.delete(accountId);
-        }
-      }
-      for (const accountId of this.syncBackoffUntil.keys()) {
-        if (!active.has(accountId)) {
-          this.syncBackoffUntil.delete(accountId);
-        }
+    const accountIds = accounts.map((account) => account.accountId);
+    const active = new Set(accountIds);
+    this.providers.clear();
+    for (const account of accounts) {
+      this.providers.set(account.accountId, account.providerKind);
+    }
+    const retained = this.accountQueue.filter((accountId) =>
+      active.has(accountId),
+    );
+    const queued = new Set(retained);
+    const now = monotonicNow();
+    // The accounts whose sync is due, or every account after a kick: a Gmail
+    // account on its 20 s cadence must not drag the others along with it.
+    for (const accountId of accountIds) {
+      if (!queued.has(accountId) && (visitAll || this.isSyncDue(accountId, now))) {
+        retained.push(accountId);
       }
     }
+    this.accountQueue.splice(0, this.accountQueue.length, ...retained);
+    for (const state of [
+      this.syncDueAt,
+      this.syncPending,
+      this.idleRequested,
+      this.lastIdlePassAt,
+      this.syncHealthy,
+    ]) {
+      for (const accountId of state.keys()) {
+        if (!active.has(accountId)) state.delete(accountId);
+      }
+    }
+    // An account removed, disconnected or parked for reauth loses its IDLE.
+    this.idle?.retain(
+      accounts
+        .filter((account) => account.providerKind === "imap")
+        .map((account) => account.accountId),
+    );
 
     let pages = 0;
     while (
@@ -227,13 +410,17 @@ export class MailBackgroundSyncScheduler {
       const accountId = this.accountQueue.shift();
       if (accountId === undefined) return false;
       pages += 1;
-      // The privacy cache runs on every page, whatever the provider said.
-      // A provider that is failing or has pages to spare must not starve
-      // it: a failure rests the provider for one interval while the cache
+      // The cache steps run on every visit, whatever the provider said; the
+      // provider only when its sync is due or its last page had more. A
+      // failure rests the provider for one fallback interval while the cache
       // keeps draining, and a busy provider interleaves with it.
       let syncHasMore = false;
       let syncSucceeded = false;
-      if ((this.syncBackoffUntil.get(accountId) ?? 0) <= Date.now()) {
+      if (this.syncPending.has(accountId) || this.isSyncDue(accountId, monotonicNow())) {
+        if (this.idleRequested.delete(accountId)) {
+          this.lastIdlePassAt.set(accountId, monotonicNow());
+        }
+        let failed = false;
         try {
           const step = validateBackgroundSyncStep(
             await this.port.runBackgroundSyncStep(
@@ -247,8 +434,28 @@ export class MailBackgroundSyncScheduler {
             step.result.status === "idle" || step.result.status === "syncing";
         } catch {
           if (signal.aborted) return false;
-          this.syncBackoffUntil.set(accountId, Date.now() + this.intervalMs);
+          failed = true;
         }
+        if (syncSucceeded) this.syncHealthy.add(accountId);
+        else this.syncHealthy.delete(accountId);
+        if (syncHasMore) {
+          this.syncPending.add(accountId);
+        } else {
+          this.syncPending.delete(accountId);
+          this.syncDueAt.set(
+            accountId,
+            monotonicNow() + (failed ? this.intervalMs : this.cadenceOf(accountId)),
+          );
+        }
+        if (signal.aborted) return false;
+        // Straight after the sync rather than after the cache steps below, so
+        // IDLE is back on INBOX while the bodies download. A failed sync gets
+        // here too, which keeps IDLE's own backoff moving on the poll.
+        if (!syncHasMore && this.providers.get(accountId) === "imap") {
+          this.idle?.afterSync(accountId);
+        }
+      } else {
+        syncSucceeded = this.syncHealthy.has(accountId);
       }
       if (signal.aborted) return false;
       let privacyHasMore = false;
@@ -299,8 +506,6 @@ export class MailBackgroundSyncScheduler {
       if (signal.aborted) return false;
       if (syncHasMore || privacyHasMore || indexHasMore || sendersHasMore) {
         this.accountQueue.push(accountId);
-      } else {
-        this.nextEligibleAt.set(accountId, Date.now() + this.intervalMs);
       }
     }
     const hasContinuation = !signal.aborted && this.accountQueue.length > 0;
@@ -364,6 +569,32 @@ function validateAccountIds(value: readonly string[]): readonly string[] {
     throw new Error("mail background account list is invalid");
   }
   return Object.freeze([...value]);
+}
+
+function validateSyncAccounts(
+  value: readonly MailBackgroundSyncAccount[],
+): readonly MailBackgroundSyncAccount[] {
+  if (
+    !Array.isArray(value) ||
+    value.some(
+      (account) =>
+        account === null ||
+        typeof account !== "object" ||
+        Object.keys(account).sort().join(",") !== "accountId,providerKind" ||
+        (account.providerKind !== "gmail" && account.providerKind !== "imap"),
+    )
+  ) {
+    throw new Error("mail background account list is invalid");
+  }
+  validateAccountIds(value.map((account) => account.accountId));
+  return Object.freeze(
+    value.map((account) =>
+      Object.freeze({
+        accountId: account.accountId,
+        providerKind: account.providerKind,
+      }),
+    ),
+  );
 }
 
 function validateDelay(value: number): number {

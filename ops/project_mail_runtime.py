@@ -74,6 +74,7 @@ REQUIRED_FILES = (
     Path("service/dns.js"),
     Path("service/drafts.js"),
     Path("service/http.js"),
+    Path("service/imap-idle.js"),
     Path("service/imapflow-adapter.js"),
     Path("service/limits.js"),
     Path("service/mail-html-sanitizer.js"),

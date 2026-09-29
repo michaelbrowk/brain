@@ -304,7 +304,7 @@ The service socket is not bound to TCP. Nginx and Cloudflare never expose it. A 
 
 PR2 fixes the service-shell limits below. The process fails closed unless systemd passes exactly one descriptor named `brain-mail` as file descriptor 3. It never binds a path, listens on TCP, or unlinks the socket.
 
-The immutable Brain release remains `root:brain` and is never made readable by the `brain-mail` identity. Immediately before service start, a root-owned helper resolves one immutable release and projects exactly 63 allowlisted compiled Mail files across four allowlisted directories into `/run/brain-mail-runtime/current`. The frozen release also carries generated third-party notices. The set includes twelve Gmail OAuth, API, sync, send, and content modules under `providers/gmail`, the custom-domain Inbox sync, thread-mutation, and raw-message content adapter under `providers/imap`, plus the provider-neutral message cache, background sync, durable outbox, dormant draft contracts, local search, content cache, bounded raster inspector, MIME client modules, the owner's sync pause, and the optional SMTP runtime bundle. ImapFlow, `ws`, and the SMTP transport are bundled into audited runtime artifacts, and `jose` is bundled into the Gmail OAuth module, so the isolated runtime does not read the application `node_modules` tree. That projection is `root:brain-mail-runtime`, directories are `0550`, files are `0440`, and the service has read-only membership in that dedicated group. The same group receives execute-only traversal on `/opt/brain` so the process can reach the separately root-owned Node runtime, but it cannot list the directory or traverse the `root:brain` release and notes directories. `/etc/brain` and `/opt/brain/notes` are also hidden from the Mail namespace. The main Brain unit remains unchanged until the staged `brain-mail-client` drop-in is deliberately installed through the operations gate.
+The immutable Brain release remains `root:brain` and is never made readable by the `brain-mail` identity. Immediately before service start, a root-owned helper resolves one immutable release and projects exactly 64 allowlisted compiled Mail files across four allowlisted directories into `/run/brain-mail-runtime/current`. The frozen release also carries generated third-party notices. The set includes twelve Gmail OAuth, API, sync, send, and content modules under `providers/gmail`, the custom-domain Inbox sync, thread-mutation, and raw-message content adapter under `providers/imap`, plus the provider-neutral message cache, background sync, durable outbox, dormant draft contracts, local search, content cache, bounded raster inspector, MIME client modules, the owner's sync pause, and the optional SMTP runtime bundle. ImapFlow, `ws`, and the SMTP transport are bundled into audited runtime artifacts, and `jose` is bundled into the Gmail OAuth module, so the isolated runtime does not read the application `node_modules` tree. That projection is `root:brain-mail-runtime`, directories are `0550`, files are `0440`, and the service has read-only membership in that dedicated group. The same group receives execute-only traversal on `/opt/brain` so the process can reach the separately root-owned Node runtime, but it cannot list the directory or traverse the `root:brain` release and notes directories. `/etc/brain` and `/opt/brain/notes` are also hidden from the Mail namespace. The main Brain unit remains unchanged until the staged `brain-mail-client` drop-in is deliberately installed through the operations gate.
 
 | Boundary | Limit |
 | --- | ---: |
@@ -426,6 +426,8 @@ storage:
     outbox.sqlite3   durable idempotent send operations and MIME payloads,
                      plus dormant local draft records and mutation receipts
   local.sqlite3       current account metadata and encrypted credentials
+  senders.sqlite3     the new-senders screen: known addresses, the owner's
+                      accept and block decisions, and what each block archived
   cache.sqlite3       future protocol-neutral mailbox index
   blobs/
     local/            durable locally-created MIME and draft attachments
@@ -447,7 +449,7 @@ Rules:
 1. `/var/lib/brain-mail` is owned by `brain-mail:brain-mail` with mode `0700`.
 2. `/run/brain-mail` is root-owned with group `brain-mail-client` and mode `0710`; `brain-mail.sock` uses group `brain-mail-client` and mode `0660`, so the Brain client can traverse only to the socket.
 3. Databases never live inside an immutable Brain release.
-4. `local.sqlite3`, every account-local `outbox.sqlite3`, and `blobs/local` are backed up together from one consistent snapshot.
+4. `local.sqlite3`, `senders.sqlite3`, every account-local `outbox.sqlite3`, and `blobs/local` are backed up together from one consistent snapshot. `senders.sqlite3` is owner state, not cache: its decisions are the owner's own words and nothing rebuilds them.
 5. `cache.sqlite3` and `blobs/cache` may be deleted and rebuilt from IMAP.
 6. Blob names are content hashes, not sender filenames.
 7. A database row becomes visible only after its blob is durably written and verified.
@@ -476,6 +478,208 @@ cursor. The every-account route shares its fan-out and merge order with the
 MCP tool `search_mail` through `lib/mail/search-all.ts`, so an agent and the
 palette read the same rows in the same order for the same query; the
 single-account route calls the service's search directly.
+
+### New senders
+
+A first letter from a stranger waits for one decision, Accept or Block,
+instead of landing among people the owner already writes with. The service
+owns the rule; Brain only shows it.
+
+**Identity.** A sender is the normalized address of the From on a thread's
+first message: lowercased, an international domain written in punycode
+(`node:url` `domainToASCII`), display name, angle brackets and RFC 5322
+comments dropped. Its domain is everything after the last `@`.
+`normalizeSenderAddress` in [`senders.ts`](../lib/mail/service/senders.ts) is
+the only reading. Three things it deliberately does not do: it keeps a plus
+tag and Gmail's dots (`a.b@gmail.com` and `ab@gmail.com` are two senders), a
+From that does not normalize is never known, decided or gated, and a domain
+decision covers that domain only, not its subdomains.
+
+**The owner.** The owner's own addresses are every account's address plus
+every address the owner has been seen sending from: the From of each cached
+message Gmail marks as sent (its `SENT` label), learned into `own_senders`.
+Only Gmail teaches aliases; an IMAP account syncs its Inbox alone and carries
+no sent mark, so an alias used only from IMAP stays unknown to the screen. A
+decision about an own address (address scope) or an own domain (domain
+scope) is refused with `mail_sender_own_address`, and a thread whose first
+message is the owner's, by the sent mark or by its From being an own
+address, is never gated and never archived, on every provider. The address
+has to be enough: a letter the owner sends from one of his accounts to
+another carries no sent mark where it lands, and since no decision can be
+made about an own address, holding it would hold it for good. The residual is
+a forgery: spam that puts the owner's own address in its From passes the
+screen, and catching it stays the provider's spam filter's job, as it was
+before the screen existed. Domain scope is also refused for the big
+mail providers (`MAIL_SENDER_DOMAIN_SCOPE_REFUSED`, with
+`mail_sender_domain_scope_refused`), and the state answer lists those
+domains and the owner's own as `domainScopeRefused`, so the UI never offers
+"Everyone at <domain>" for them.
+
+**The store.** `senders.sqlite3` sits beside `local.sqlite3` rather than
+under `cache/`, because the cache root holds account directories and nothing
+else, and one decision covers every account. It opens with the caches' WAL,
+`synchronous = FULL`, `secure_delete` and mode `0600`, and is schema-versioned
+the same way: `user_version` 1, and a newer file is refused. Its tables are
+`screen_state(enabled, enabled_at)`, `known_senders(address, source,
+added_at)`, `own_senders(address, added_at)`, `sender_decisions(decision_id,
+key, kind, decision, decided_at, replaced_by)` (one standing decision per key;
+a verdict a later one replaced stays, marked, with its own effects),
+`decision_effects` (the known entry an accept added, and every thread a block
+archived or claimed as a copy of one it archived, with the newest date of a
+letter the owner did not send and its first message's Message-ID at the time,
+each `pending` until the provider has answered), `backfill_progress` (each account's cursors and the moment its
+backfill finished) and `pending_restores`. Only addresses, domains, thread ids and
+times are stored. A file that cannot be opened leaves the service running
+without the screen: every thread ungated, the routes answering
+`mail_senders_unavailable`.
+
+**The flag.** Every thread item the service answers (a list, a mailbox page,
+a search page, a detail, a mutation result) carries `newSender`, computed when
+it is read and never cached. It is true when the switch is on and this
+account's backfill has finished, the thread is in the Inbox and its category
+is `people`, its first message is dated after the account's gating moment and
+starts a conversation, and the sender is neither the owner, known, nor decided
+at the address or the domain. It is tier 5 of the thread-state contract
+(`x-brain-mail-thread-state: 5`). The tier is read as a number and clamped to
+the highest one the build knows, so a later client still gets every field
+this service has; a service from before tier 5 reads `5` as the original
+shape, which strips stars and categories for as long as a release that pairs
+a new Brain with an old service lasts. A failure reading the screen answers
+`false` for the page rather than failing the list.
+
+**Replies.** A first message that carries `In-Reply-To` or `References`
+answers someone, and cold outreach carries neither, so a reply-shaped letter
+passes unless it is a stranger's follow-up: it still waits when a Message-ID
+it names resolves in the cache to a letter from the same sender, or when that
+sender already has a letter waiting in the account (IMAP keeps one message a
+thread, so a cold sequence arrives as separate reply-shaped threads). A fresh
+stranger who forges `In-Reply-To` passes; nothing the cache holds says who
+they are, and that residual is accepted. The cache keeps the shape in
+`messages.is_reply`, set by both adapters (Gmail from the two headers, IMAP
+from the envelope's In-Reply-To), beside `messages.from_owner` for the sent
+mark, and looks messages up by Message-ID through `messages_rfc_message_idx`.
+IMAP does not fetch `References`: its length is the sender's to choose, a
+reply without In-Reply-To is gated like a first letter, the safe way, and the
+list-header parser steps over any field it does not read, so a long header
+never hides `List-Id`. Both columns and the index are additive on schema v1,
+so an older runtime ignores them and writes the column defaults. On upgrade
+no resync is needed: `is_reply` is repaired from the stored references on
+every open, which is exact for IMAP and misses only a Gmail reply that sent
+In-Reply-To alone, and `from_owner` fills as each thread is refreshed by a
+sync.
+
+**Known.** Switching the screen on is the moment known is computed. Each
+account's backfill, one scheduler step per account page beside the search
+index, reads the From of every cached message, then the To and Cc of every
+message the owner sent or that sits in a Sent-mailbox thread, in windows of a
+thousand rows, from the cache and never from a provider. It finishes only
+after the account's initial sync has finished (an active generation and
+nothing staged), and the moment it finishes is when that account starts
+gating: the later of `enabled_at` and that moment. An account whose backfill
+has not finished gates nothing, and the others go on gating; that is also
+what an account whose cache cannot be read does. Once an account gates, its
+From phase stops, so a stranger stays a stranger; its Sent phase goes on
+reading new rows. On Gmail, whose Sent mailbox is cached, that makes the
+people the owner writes to from any client known and teaches new aliases. An
+IMAP account caches its Inbox alone, so it learns only through Brain's own
+sends and the letters that reach its Inbox: someone the owner writes to from
+his phone over IMAP is known only once they write back or once the owner
+writes to them through Brain. A send that reaches `sent` through Brain, on
+either transport, makes its To and Cc known (the outbox store's `onSent`,
+which never sees Bcc), whether the owner or an agent sending in the owner's
+name wrote it. An Accept makes its address known.
+`backfillComplete` in the state answer turns true when every connected
+account has finished. The screen is on by default: the first start of a
+service that has it creates the file switched on.
+
+**Decisions.** One standing decision per address or domain, global across
+accounts. Making the same decision again answers the one that stands. A
+changed verdict stands in its place under a new id, and the one it replaced
+is kept, marked, with its own effects, so that undoing the new verdict gives
+the old one back (below). An address's
+own decision outranks its domain's, and a known address outranks a domain
+block: only a block of the address itself archives a known sender's mail. A
+block archives every Inbox thread whose sender it governs, in every account,
+inside the request: at most 200, stopping before the provider deadline, with
+`pending: true` when any are left, and `archived` naming only the threads
+whose archive is on record. The rest, and every later letter from a blocked
+sender, are archived by the scheduler after a sync pass that reached the
+provider, 25 a step. A thread the owner moved back to the Inbox by hand stays
+there until a newer letter from someone other than the owner arrives in it;
+his own reply in it does not count, however his address is written (addresses
+are compared normalized, an international domain in its ASCII form). The
+thread's own archive record decides. An IMAP message comes back under a new
+UID and so a new thread id with no record of its own, and copies of one letter
+delivered in the same second cannot be told apart either, so they are
+counted: the Inbox threads a decision governs with the same first Message-ID
+and the same newest date stay while the finished archives of that Message-ID
+and date whose threads have left the Inbox number at least as many as those
+threads without a record of their own. The first copy archived claims the
+others with a `pending` record, so a walk that stops between two copies
+leaves the second to be archived rather than matched to the first. Two
+residuals follow: a same-second copy delivered after its twin was archived
+stays in the Inbox, and an IMAP letter with no Message-ID that the owner
+moves back cannot be told from a new one and is archived again. It only archives,
+never deletes and never marks spam. A thread the provider would not archive
+is left alone for an hour. Each step that archives writes
+`mail_sender_blocked_archived` with the account, `phase` (`decision` or
+`sync`) and `threadCount`, and nothing else.
+
+**One queue.** Recording or removing a decision, and each single archive or
+restore, run one at a time in the screen. Work whose caller gave up while it
+waited (an aborted request, a stopping scheduler) is answered at once with
+`mail_senders_unavailable` and dropped unstarted, as the message service's own
+mutation queue does, and request work that reaches its turn too close to its
+deadline writes nothing and leaves the thread to the scheduler. When an
+archive's turn comes it asks again whether this decision still speaks for the
+thread (a domain block may meet an address that became known meanwhile) and
+whether the thread is already archived by it with nothing newer since, and
+only then writes its intent as a `pending` effect, asks the provider, and
+marks the effect done. So an Undo that lands between two archives stops the
+rest, one that lands during an archive waits for it and moves it back, and a
+process that stops between the provider's archive and the record leaves a
+pending row an Undo still finds. A provider that refuses the archive outright
+leaves no row behind. Two residuals are accepted: a failure that says
+nothing (a dropped connection) keeps the intent, so an Undo may move back a
+thread the owner archived himself meanwhile, and on Gmail a block made while
+the cache still lists a thread the owner has just archived elsewhere records
+that archive as its own.
+
+**Undo and unblock.** `DELETE /v1/senders/decisions/:id` is the toast's Undo:
+the decision goes, with the known entry an accept added, and every thread
+archived under it, finished or pending, goes back to the Inbox, queued in
+`pending_restores` in the same transaction so a restore cut short is finished
+by the scheduler: 200 inside the request, the rest 25 a step. A restore the
+provider refuses for good (the thread is gone, the folder cannot take it) is
+dropped, one that fails in passing is tried again up to five times, and each
+drop writes `mail_sender_restore_failed` with the account, `phase` (`undo` or
+`sync`) and `threadCount`. A second Undo of the same decision answers
+`mail_sender_decision_not_found`, which the UI reads as already undone. The
+id of a verdict that was since changed answers `mail_sender_decision_changed`
+(409) and undoes nothing. Undoing a verdict that replaced another gives the
+other back as it was: undoing an accept that replaced a block leaves the block
+standing again with its archive where it was and moves nothing, and undoing a
+block that replaced an accept moves back the block's own archive and leaves
+the accept standing again with its known entry.
+`?restore=false` is the Blocked list's Unblock: the decision goes, future
+letters come in, and old mail stays where it is.
+
+**Routes.** On the socket: `GET` and `PUT /v1/senders/state` (`{ enabled }`,
+answering `{ enabled, enabledAt, backfillComplete, domainScopeRefused }`),
+`POST /v1/senders/decisions` (`{ address, scope: "address" | "domain",
+decision: "accept" | "block" }` answering `{ decisionId, archived, pending }`),
+`DELETE /v1/senders/decisions/:id` answering `{ restored, pending }`, and
+`GET /v1/senders/blocked` answering each blocked key with its scope, time and
+archived count. Brain proxies the same shapes under `/api/mail/senders/*`
+with the same-origin JSON door and the mail module gate, and the typed
+methods on `BrainMailClient` validate both directions. The decision and
+undo answers can name two hundred threads of up to 255 characters each, so
+the client reads them under a 128 KiB ceiling instead of its 32 KiB default.
+Five codes are new and relayed: `mail_sender_own_address` (400),
+`mail_sender_domain_scope_refused` (400), `mail_sender_decision_not_found`
+(404), `mail_sender_decision_changed` (409) and `mail_senders_unavailable`
+(503). No MCP tool reaches any of this:
+agents do not decide who may write to the owner.
 
 ### Draft API contract
 
@@ -991,7 +1195,7 @@ Allowed structured log fields:
 - operation ID
 - state phase
 - duration bucket
-- account, mailbox, message, attachment, recipient, queued-submission, remote-image, and remote-image-attempt counts
+- account, mailbox, message, thread, attachment, recipient, queued-submission, remote-image, and remote-image-attempt counts
 - raw-MIME, cache, temporary, and WAL byte counts
 - stable error code
 - refusal reason, a stable code naming which site raised the error code
@@ -1005,7 +1209,7 @@ A `phase` is a route family and its verb — `thread_patch`, `message_content_po
 
 The account id in a `mail_request_failed` record is the one the request named, and it is written only when it has the shape of one: `account-a` and thirty-two hex digits. The projection's own guard admits any 128-character identifier, which is wide enough for a token pasted into the query, so the router checks the shape before the record does and a request that names something else is recorded without an account.
 
-The service writes on two streams, and under one name each. `writeMailLogRecord` in [`security.ts`](../lib/mail/security.ts) puts an answered failure on stderr; `writeServiceLog` in [`main.ts`](../lib/mail/service/main.ts) puts the service's own lifecycle and worker events — `mail_service_started` (carrying `"phase": "running"` or `"phase": "paused"`, which is what that start did rather than what the stored flag says, and `"transport": "direct"` or `"authenticated_byte_relay"` when the flags composed an SMTP runtime, with no field for a relay URL or a provider host), `mail_service_stopping`, a worker's stop failure, the remote-image pipeline's `mail_remote_image_drain_started`, `mail_remote_image_settled` and `mail_remote_image_drain_finished` — on stdout. A settled image carries its outcome as the `phase` (`fetched`, `blocked`, `origin_refused`, `budget_exhausted`, `transient`), the fetcher's stable code as `errorCode`, and the bytes a fetched image added to the cache as `cacheBytes`; a transient retry is always one interval away, so the record does not repeat it. A drain starts with the images it means to take as `remoteImageCount` and finishes with the ones it attempted as `remoteImageAttemptCount`, which differ when teardown cut it short or another path settled an image first. No field names an image, a URL or a host. Both go through the same projection. The artifact smoke reads the two apart, which is why the router never imports the stderr writer under the stdout writer's name.
+The service writes on two streams, and under one name each. `writeMailLogRecord` in [`security.ts`](../lib/mail/security.ts) puts an answered failure on stderr; `writeServiceLog` in [`main.ts`](../lib/mail/service/main.ts) puts the service's own lifecycle and worker events — `mail_service_started` (carrying `"phase": "running"` or `"phase": "paused"`, which is what that start did rather than what the stored flag says, and `"transport": "direct"` or `"authenticated_byte_relay"` when the flags composed an SMTP runtime, with no field for a relay URL or a provider host), `mail_service_stopping`, a worker's stop failure, the remote-image pipeline's `mail_remote_image_drain_started`, `mail_remote_image_settled` and `mail_remote_image_drain_finished`, and the new-senders screen's `mail_sender_blocked_archived` and `mail_sender_restore_failed` (a `threadCount` per account each), `mail_sender_screen_failed` and `mail_service_senders_unavailable` — on stdout. A settled image carries its outcome as the `phase` (`fetched`, `blocked`, `origin_refused`, `budget_exhausted`, `transient`), the fetcher's stable code as `errorCode`, and the bytes a fetched image added to the cache as `cacheBytes`; a transient retry is always one interval away, so the record does not repeat it. A drain starts with the images it means to take as `remoteImageCount` and finishes with the ones it attempted as `remoteImageAttemptCount`, which differ when teardown cut it short or another path settled an image first. No field names an image, a URL or a host. Both go through the same projection. The artifact smoke reads the two apart, which is why the router never imports the stderr writer under the stdout writer's name.
 
 Brain's own proxy layer writes two events, because a failure it manufactures is one the service never saw and cannot record. `mail_proxy_request_failed` covers the three cases where the service's answer was never heard — `mail_service_timeout`, `mail_service_unavailable`, and `mail_service_invalid_response` — and `mail_api_action_failed` covers a route handler throwing something that is not a service answer at all. A cancelled request is not logged: the browser dropping a read it no longer needs happens on every thread switch. A code the service coined is not logged twice.
 

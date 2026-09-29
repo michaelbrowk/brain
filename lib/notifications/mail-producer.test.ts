@@ -20,6 +20,7 @@ function item(extra: Partial<MailThreadListItem>): MailThreadListItem {
     listMessage: false,
     sizeBytes: 0,
     category: "people",
+    newSender: false,
     ...extra,
   };
 }

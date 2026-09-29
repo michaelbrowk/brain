@@ -64,6 +64,13 @@ const MAX_BACKGROUND_SYNC_FAILURES = 31;
 const MAX_SEARCH_BACKFILL_THREADS = 500;
 const MAX_SEARCH_RESULTS = 500;
 const MAX_SEARCH_CURSOR_OFFSET = MAX_SEARCH_RESULTS - 1;
+/** The archiver of blocked senders reads at most this many Inbox threads,
+ *  newest first, per account and step. */
+const MAX_INBOX_SENDER_SCAN = 5_000;
+const MAX_SENDER_BACKFILL_WINDOW = 10_000;
+/** A first letter naming more parents than this is looked up by its first
+ *  ones; the rest cannot change the answer much. */
+const MAX_REFERENCES_LOOKED_UP = 100;
 
 export type MailCacheMailbox =
   | "all"
@@ -224,6 +231,8 @@ const SCHEMA_SQL = `
     rfc_message_id TEXT,
     references_json TEXT NOT NULL,
     has_attachments INTEGER NOT NULL CHECK(has_attachments IN (0, 1)),
+    is_reply INTEGER NOT NULL DEFAULT 0 CHECK(is_reply IN (0, 1)),
+    from_owner INTEGER NOT NULL DEFAULT 0 CHECK(from_owner IN (0, 1)),
     PRIMARY KEY(account_id, generation, message_id),
     FOREIGN KEY(account_id, generation, thread_id)
       REFERENCES threads(account_id, generation, thread_id)
@@ -232,6 +241,9 @@ const SCHEMA_SQL = `
 
   CREATE INDEX messages_thread_idx
     ON messages(account_id, generation, thread_id, sent_at ASC, message_id ASC);
+
+  CREATE INDEX messages_rfc_message_idx
+    ON messages(account_id, rfc_message_id);
 `;
 
 /**
@@ -506,12 +518,49 @@ export interface CachedProviderMessage extends MailMessageDto {
   readonly category: MailThreadCategory;
   /** Provider size estimate in bytes; null when the provider omits one. */
   readonly sizeEstimate: number | null;
+  /**
+   * The message carries In-Reply-To or References: it answers another. Only
+   * a letter that starts a conversation can wait as a new sender's. Absent
+   * reads as false, as it does for a row cached before the flag existed.
+   */
+  readonly isReply?: boolean;
+  /** The provider marks the message as sent by the account (Gmail's SENT
+   *  label). It is how the owner's own aliases are learned. */
+  readonly fromOwner?: boolean;
 }
 
 export interface MailReplyContext {
   readonly providerThreadId: string;
   readonly rfcMessageId: string | null;
   readonly references: readonly string[];
+}
+
+/** A thread's first message as the new-senders screen reads it. The address
+ *  is the cached one, not yet normalized. */
+export interface MailCacheThreadFirstSender {
+  readonly address: string | null;
+  readonly firstMessageAt: number | null;
+  readonly startsConversation: boolean;
+  readonly fromOwner: boolean;
+  readonly inInbox: boolean;
+  readonly references: readonly string[];
+}
+
+export interface MailCacheInboxThreadSender {
+  readonly threadId: string;
+  readonly address: string | null;
+  readonly fromOwner: boolean;
+  readonly lastForeignMessageAt: number | null;
+  readonly firstMessageId: string | null;
+}
+
+export interface MailCacheSenderBackfillBatch {
+  readonly known: readonly string[];
+  readonly own: readonly string[];
+  readonly fromCursor: number;
+  readonly sentCursor: number;
+  readonly done: boolean;
+  readonly cacheReady: boolean;
 }
 
 export interface MailCacheSyncState {
@@ -2791,6 +2840,335 @@ export class SqliteMailMessageCache {
     });
   }
 
+  /**
+   * The first message of each named thread, for the new-senders screen: its
+   * From and date, whether it starts a conversation or answers another,
+   * whether the provider marks it as the owner's, and whether the thread is
+   * in the Inbox. A page can come from the Inbox or from any hidden mailbox's
+   * snapshot, so each thread is looked for in the readable generation first
+   * and in the mailbox generations after it. A thread the cache does not hold
+   * is absent from the answer. The first message is the earliest dated one;
+   * an undated message only counts when none has a date.
+   */
+  readThreadFirstSenders(
+    threadIds: readonly string[],
+  ): ReadonlyMap<string, MailCacheThreadFirstSender> {
+    if (threadIds.length > MAX_THREADS_PER_PAGE) {
+      throw new MailCacheError("mail_cache_invalid");
+    }
+    const database = this.requireDatabase();
+    const generations = this.readSenderGenerations(database);
+    const statement = database.prepare(
+      `SELECT thread.in_inbox, message.from_json, message.sent_at,
+              message.is_reply, message.from_owner, message.references_json
+         FROM threads AS thread
+         JOIN messages AS message
+           ON message.account_id = thread.account_id
+          AND message.generation = thread.generation
+          AND message.thread_id = thread.thread_id
+        WHERE thread.account_id = ? AND thread.generation = ? AND thread.thread_id = ?
+        ORDER BY message.sent_at IS NULL ASC, message.sent_at ASC, message.message_id ASC
+        LIMIT 1`,
+    );
+    const senders = new Map<string, MailCacheThreadFirstSender>();
+    for (const value of threadIds) {
+      const threadId = validateProviderId(value);
+      for (const generation of generations) {
+        const row = statement.get(this.accountId, generation, threadId);
+        if (row === undefined) continue;
+        senders.set(threadId, firstSenderFromRow(row));
+        break;
+      }
+    }
+    return senders;
+  }
+
+  /**
+   * Every Inbox thread's first sender, newest first and bounded, for the
+   * archiver that moves a blocked sender's letters out of the Inbox and leaves
+   * alone the ones the owner put back. Its newest date counts only messages
+   * the owner did not send: neither marked as sent nor from an address
+   * `isOwnAddress` calls his, which is asked about each distinct From.
+   */
+  listInboxThreadFirstSenders(
+    isOwnAddress: (address: string) => boolean,
+  ): readonly MailCacheInboxThreadSender[] {
+    const generation = readableGeneration(this.readSyncState());
+    if (generation < 1) return Object.freeze([]);
+    const database = this.requireDatabase();
+    const rows = database
+      .prepare(
+        `SELECT thread.thread_id AS thread_id,
+                first.from_json AS from_json, first.from_owner AS from_owner,
+                first.rfc_message_id AS rfc_message_id
+           FROM threads AS thread
+           JOIN messages AS first
+             ON first.account_id = thread.account_id
+            AND first.generation = thread.generation
+            AND first.message_id = (
+              SELECT message.message_id FROM messages AS message
+               WHERE message.account_id = thread.account_id
+                 AND message.generation = thread.generation
+                 AND message.thread_id = thread.thread_id
+               ORDER BY message.sent_at IS NULL ASC, message.sent_at ASC,
+                        message.message_id ASC
+               LIMIT 1)
+          WHERE thread.account_id = ? AND thread.generation = ? AND thread.in_inbox = 1
+          ORDER BY COALESCE(thread.last_message_at, -1) DESC, thread.thread_id DESC
+          LIMIT ?`,
+      )
+      .all(this.accountId, generation, MAX_INBOX_SENDER_SCAN);
+    for (const row of rows) {
+      if (
+        typeof row.thread_id !== "string" ||
+        (row.from_json !== null && typeof row.from_json !== "string") ||
+        (row.from_owner !== 0 && row.from_owner !== 1) ||
+        (row.rfc_message_id !== null && typeof row.rfc_message_id !== "string")
+      ) {
+        throw new MailCacheError("mail_cache_invalid");
+      }
+    }
+    // The newest date of each distinct From in these threads; which of them
+    // are the owner's is decided outside SQL, where addresses are normalized.
+    const lastForeignAt = new Map<string, number>();
+    for (const row of database
+      .prepare(
+        `SELECT message.thread_id AS thread_id, message.from_json AS from_json,
+                MAX(message.sent_at) AS last_at
+           FROM messages AS message
+          WHERE message.account_id = ? AND message.generation = ?
+            AND message.from_owner = 0 AND message.sent_at IS NOT NULL
+            AND message.thread_id IN (SELECT value FROM json_each(?))
+          GROUP BY message.thread_id, message.from_json`,
+      )
+      .all(this.accountId, generation, JSON.stringify(rows.map((row) => row.thread_id)))) {
+      if (
+        typeof row.thread_id !== "string" ||
+        (row.from_json !== null && typeof row.from_json !== "string") ||
+        !Number.isSafeInteger(row.last_at)
+      ) {
+        throw new MailCacheError("mail_cache_invalid");
+      }
+      if (row.from_json !== null && isOwnAddress(parseAddressJson(row.from_json).address)) {
+        continue;
+      }
+      const lastAt = row.last_at as number;
+      lastForeignAt.set(row.thread_id, Math.max(lastForeignAt.get(row.thread_id) ?? lastAt, lastAt));
+    }
+    return Object.freeze(
+      rows.map((row) =>
+        Object.freeze({
+          threadId: validateProviderId(row.thread_id as string),
+          address: row.from_json === null ? null : parseAddressJson(row.from_json as string).address,
+          fromOwner: row.from_owner === 1,
+          lastForeignMessageAt: lastForeignAt.get(row.thread_id as string) ?? null,
+          firstMessageId: row.rfc_message_id as string | null,
+        }),
+      ),
+    );
+  }
+
+  /**
+   * The From of every cached message carrying one of these Message-IDs, in
+   * any generation. A reply-shaped first letter that answers its own
+   * sender's letter is a stranger's follow-up, not an answer to the owner.
+   */
+  readReferencedSenders(messageIds: readonly string[]): readonly string[] {
+    const ids = [...new Set(messageIds)].slice(0, MAX_REFERENCES_LOOKED_UP);
+    if (ids.length === 0) return Object.freeze([]);
+    const rows = this.requireDatabase()
+      .prepare(
+        `SELECT from_json FROM messages
+          WHERE account_id = ? AND rfc_message_id IN (${ids.map(() => "?").join(", ")})
+            AND from_json IS NOT NULL`,
+      )
+      .all(this.accountId, ...ids);
+    return Object.freeze(
+      rows.map((row) => {
+        if (typeof row.from_json !== "string") throw new MailCacheError("mail_cache_invalid");
+        return parseAddressJson(row.from_json).address;
+      }),
+    );
+  }
+
+  /**
+   * Whether this address started a conversation in the Inbox after a moment:
+   * a people thread whose first message is from it and names no parent. The
+   * address is compared without regard to case, which is how it is stored.
+   */
+  hasConversationStart(input: { readonly address: string; readonly after: number }): boolean {
+    const generation = readableGeneration(this.readSyncState());
+    if (generation < 1) return false;
+    return (
+      this.requireDatabase()
+        .prepare(
+          `SELECT 1 AS present
+             FROM threads AS thread
+             JOIN messages AS first
+               ON first.account_id = thread.account_id
+              AND first.generation = thread.generation
+              AND first.message_id = (
+                SELECT message.message_id FROM messages AS message
+                 WHERE message.account_id = thread.account_id
+                   AND message.generation = thread.generation
+                   AND message.thread_id = thread.thread_id
+                 ORDER BY message.sent_at IS NULL ASC, message.sent_at ASC,
+                          message.message_id ASC
+                 LIMIT 1)
+            WHERE thread.account_id = ? AND thread.generation = ? AND thread.in_inbox = 1
+              AND thread.category = 'people'
+              AND first.is_reply = 0 AND first.sent_at > ?
+              AND lower(json_extract(first.from_json, '$.address')) = lower(?)
+            LIMIT 1`,
+        )
+        .get(this.accountId, generation, validateTimestamp(input.after), input.address) !==
+      undefined
+    );
+  }
+
+  /**
+   * One step of the new-senders backfill: a window of message rows by rowid.
+   * The From phase, while `learnFrom` holds, walks every cached message; the
+   * Sent phase walks the same rows again for the To and Cc of every message
+   * the owner sent or that sits in a thread the Sent mailbox holds, and for
+   * the From of every message the provider marks as the owner's. The Sent
+   * phase goes on reading rows as they arrive. `cacheReady` says the account's
+   * initial sync has finished, so what was read is its history and not the
+   * first page of it. Rows are read, never written, and nothing reaches a
+   * provider.
+   */
+  readSenderBackfillBatch(input: {
+    readonly fromCursor: number;
+    readonly sentCursor: number;
+    readonly window: number;
+    readonly learnFrom: boolean;
+  }): MailCacheSenderBackfillBatch {
+    if (
+      !Number.isSafeInteger(input.fromCursor) ||
+      input.fromCursor < 0 ||
+      !Number.isSafeInteger(input.sentCursor) ||
+      input.sentCursor < 0 ||
+      !Number.isSafeInteger(input.window) ||
+      input.window < 1 ||
+      input.window > MAX_SENDER_BACKFILL_WINDOW ||
+      typeof input.learnFrom !== "boolean"
+    ) {
+      throw new MailCacheError("mail_cache_invalid");
+    }
+    const database = this.requireDatabase();
+    const state = this.readSyncState();
+    const cacheReady = state.activeGeneration > 0 && state.stagedGeneration === null;
+    const maxRowid = database
+      .prepare("SELECT COALESCE(MAX(rowid), 0) AS max_rowid FROM messages")
+      .get()?.max_rowid;
+    if (!Number.isSafeInteger(maxRowid)) throw new MailCacheError("mail_cache_invalid");
+    const last = maxRowid as number;
+    const fromDone = (cursor: number) => !input.learnFrom || cursor >= last;
+    if (input.learnFrom && input.fromCursor < last) {
+      const end = Math.min(input.fromCursor + input.window, last);
+      const rows = database
+        .prepare(
+          `SELECT from_json FROM messages
+            WHERE rowid > ? AND rowid <= ? AND account_id = ?
+              AND from_json IS NOT NULL`,
+        )
+        .all(input.fromCursor, end, this.accountId);
+      return Object.freeze({
+        known: Object.freeze(
+          rows.map((row) => {
+            if (typeof row.from_json !== "string") {
+              throw new MailCacheError("mail_cache_invalid");
+            }
+            return parseAddressJson(row.from_json).address;
+          }),
+        ),
+        own: Object.freeze([]),
+        fromCursor: end,
+        sentCursor: input.sentCursor,
+        done: end >= last && input.sentCursor >= last,
+        cacheReady,
+      });
+    }
+    if (input.sentCursor < last) {
+      const end = Math.min(input.sentCursor + input.window, last);
+      const rows = database
+        .prepare(
+          `SELECT message.from_json, message.to_json, message.cc_json, message.from_owner
+             FROM messages AS message
+            WHERE message.rowid > ? AND message.rowid <= ? AND message.account_id = ?
+              AND (message.from_owner = 1 OR EXISTS (
+                SELECT 1 FROM thread_mailboxes AS mailbox
+                 WHERE mailbox.account_id = message.account_id
+                   AND mailbox.mailbox_id = 'sent'
+                   AND mailbox.generation = message.generation
+                   AND mailbox.thread_id = message.thread_id))`,
+        )
+        .all(input.sentCursor, end, this.accountId);
+      const known: string[] = [];
+      const own: string[] = [];
+      for (const row of rows) {
+        if (
+          typeof row.to_json !== "string" ||
+          typeof row.cc_json !== "string" ||
+          (row.from_json !== null && typeof row.from_json !== "string") ||
+          (row.from_owner !== 0 && row.from_owner !== 1)
+        ) {
+          throw new MailCacheError("mail_cache_invalid");
+        }
+        for (const address of [
+          ...parseAddressesJson(row.to_json),
+          ...parseAddressesJson(row.cc_json),
+        ]) {
+          known.push(address.address);
+        }
+        if (row.from_owner === 1 && row.from_json !== null) {
+          own.push(parseAddressJson(row.from_json).address);
+        }
+      }
+      return Object.freeze({
+        known: Object.freeze(known),
+        own: Object.freeze(own),
+        fromCursor: input.fromCursor,
+        sentCursor: end,
+        done: fromDone(input.fromCursor) && end >= last,
+        cacheReady,
+      });
+    }
+    return Object.freeze({
+      known: Object.freeze([]),
+      own: Object.freeze([]),
+      fromCursor: input.fromCursor,
+      sentCursor: input.sentCursor,
+      done: true,
+      cacheReady,
+    });
+  }
+
+  /** The readable generation, then every mailbox snapshot's, each once. */
+  private readSenderGenerations(database: DatabaseSync): readonly number[] {
+    const generations: number[] = [];
+    const add = (value: unknown) => {
+      if (
+        Number.isSafeInteger(value) &&
+        (value as number) > 0 &&
+        !generations.includes(value as number)
+      ) {
+        generations.push(value as number);
+      }
+    };
+    add(readableGeneration(this.readSyncState()));
+    for (const row of database
+      .prepare(
+        `SELECT active_thread_generation, staged_thread_generation
+           FROM mailbox_sync_state WHERE account_id = ?`,
+      )
+      .all(this.accountId)) {
+      add(row.active_thread_generation);
+      add(row.staged_thread_generation);
+    }
+    return generations;
+  }
+
   private initializeSchema(database: DatabaseSync): void {
     const versionRow = database.prepare("PRAGMA user_version").get();
     const version = versionRow?.user_version;
@@ -2838,6 +3216,7 @@ export class SqliteMailMessageCache {
       this.initializeThreadViewColumns(database);
       this.initializeThreadCategoryColumn(database);
       this.initializeMessageReplyToColumn(database);
+      this.initializeMessageSenderColumns(database);
       this.initializeMailboxSchema(database);
       this.reconcileThreadStarredFromActiveMailbox(database);
       this.reconcileThreadSortSender(database);
@@ -3222,6 +3601,37 @@ export class SqliteMailMessageCache {
           WHERE account_id = ? AND generation = ?`,
       )
       .run(nextSearchRevision(state.revision), this.accountId, generation);
+  }
+
+  /**
+   * The new-senders flags, additive like the Reply-To columns before them:
+   * an older runtime ignores both and writes their defaults. `is_reply` has a
+   * local source, the stored references, and is repaired from it on every
+   * open, which is exact for IMAP (its references are the In-Reply-To) and
+   * misses only a Gmail reply that carried In-Reply-To alone. `from_owner`
+   * has none and fills as each thread is refreshed by a sync. Neither needs a
+   * resync.
+   */
+  private initializeMessageSenderColumns(database: DatabaseSync): void {
+    const columns = database.prepare("PRAGMA table_info(messages)").all();
+    if (!columns.some((column) => column.name === "is_reply")) {
+      database.exec(
+        "ALTER TABLE messages ADD COLUMN is_reply INTEGER NOT NULL DEFAULT 0 CHECK(is_reply IN (0, 1))",
+      );
+    }
+    if (!columns.some((column) => column.name === "from_owner")) {
+      database.exec(
+        "ALTER TABLE messages ADD COLUMN from_owner INTEGER NOT NULL DEFAULT 0 CHECK(from_owner IN (0, 1))",
+      );
+    }
+    database.exec(
+      "UPDATE messages SET is_reply = 1 WHERE is_reply = 0 AND references_json <> '[]'",
+    );
+    // A follow-up is recognised by the letter it answers, so the screen looks
+    // messages up by Message-ID.
+    database.exec(
+      "CREATE INDEX IF NOT EXISTS messages_rfc_message_idx ON messages(account_id, rfc_message_id)",
+    );
   }
 
   private initializeMessageReplyToColumn(database: DatabaseSync): void {
@@ -4515,8 +4925,8 @@ export class SqliteMailMessageCache {
          account_id, generation, message_id, thread_id, from_json, reply_to_json,
          reply_to_complete, to_json, cc_json, subject, sent_at, unread, in_inbox,
          snippet, text_body, html_body, rfc_message_id, references_json,
-         has_attachments
-       ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         has_attachments, is_reply, from_owner
+       ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(account_id, generation, message_id) DO UPDATE SET
          thread_id = excluded.thread_id,
          from_json = excluded.from_json,
@@ -4533,7 +4943,9 @@ export class SqliteMailMessageCache {
          html_body = excluded.html_body,
          rfc_message_id = excluded.rfc_message_id,
          references_json = excluded.references_json,
-         has_attachments = excluded.has_attachments`,
+         has_attachments = excluded.has_attachments,
+         is_reply = excluded.is_reply,
+         from_owner = excluded.from_owner`,
     );
     for (const message of thread.messages) {
       insertMessage.run(
@@ -4561,6 +4973,8 @@ export class SqliteMailMessageCache {
         message.rfcMessageId,
         JSON.stringify(message.references),
         message.hasAttachments ? 1 : 0,
+        message.isReply === true || message.references.length > 0 ? 1 : 0,
+        message.fromOwner === true ? 1 : 0,
       );
     }
     // Only the messages that left the thread go. Deleting and re-inserting the
@@ -4774,6 +5188,9 @@ export class SqliteMailMessageCache {
       listMessage: row.list_message === 1,
       sizeBytes: row.size_bytes as number,
       category: row.category,
+      // Provider truth has no opinion about senders; the screen sets this
+      // when the list is read.
+      newSender: false,
     });
   }
 
@@ -5916,6 +6333,27 @@ function validateTimestamp(value: number): number {
     throw new MailCacheError("mail_cache_invalid");
   }
   return value;
+}
+
+function firstSenderFromRow(row: Record<string, unknown>): MailCacheThreadFirstSender {
+  if (
+    (row.from_json !== null && typeof row.from_json !== "string") ||
+    (row.sent_at !== null && !Number.isSafeInteger(row.sent_at)) ||
+    (row.in_inbox !== 0 && row.in_inbox !== 1) ||
+    (row.is_reply !== 0 && row.is_reply !== 1) ||
+    (row.from_owner !== 0 && row.from_owner !== 1) ||
+    typeof row.references_json !== "string"
+  ) {
+    throw new MailCacheError("mail_cache_invalid");
+  }
+  return Object.freeze({
+    address: row.from_json === null ? null : parseAddressJson(row.from_json as string).address,
+    firstMessageAt: row.sent_at as number | null,
+    startsConversation: row.is_reply === 0,
+    fromOwner: row.from_owner === 1,
+    inInbox: row.in_inbox === 1,
+    references: parseReferencesJson(row.references_json),
+  });
 }
 
 function validateCredentialVersion(value: number): number {

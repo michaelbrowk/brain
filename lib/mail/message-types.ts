@@ -45,6 +45,16 @@ export interface MailThreadListItem {
    * non-"people" categories).
    */
   readonly category: MailThreadCategory;
+  /**
+   * Tier-5 field: absent on the wire below contract tier 5 and decoded as
+   * false. True when the thread waits for the owner's first decision about
+   * its sender: the screen is on and its backfill has finished, the thread is
+   * "people" mail whose first message arrived after the screen was switched
+   * on, and neither the sender's address nor its domain is known or decided.
+   * The service computes it at list time from `senders.sqlite3`; the message
+   * cache never stores it.
+   */
+  readonly newSender: boolean;
 }
 
 /**
@@ -278,4 +288,72 @@ export interface MailSendOperation {
   readonly status: MailSendStatus;
   /** The Sent copy's thread once a provider has one, so a caller can find it. */
   readonly threadId: string | null;
+}
+
+/**
+ * The new-senders screen. `enabledAt` is the moment the switch was last
+ * turned on, which is also the moment "known" was computed; it is null while
+ * the switch is off. `backfillComplete` says whether every connected account
+ * has finished teaching the screen who is already known; an account gates
+ * nothing until its own backfill has finished, and the others go on gating.
+ * `domainScopeRefused` names the domains a decision may not take whole: the
+ * big mail providers and the owner's own domains. The UI offers "Everyone at
+ * <domain>" for none of them.
+ */
+export interface MailSenderScreenState {
+  readonly apiVersion: 1;
+  readonly enabled: boolean;
+  readonly enabledAt: number | null;
+  readonly backfillComplete: boolean;
+  readonly domainScopeRefused: readonly string[];
+}
+
+export type MailSenderDecisionScope = "address" | "domain";
+export type MailSenderDecisionKind = "accept" | "block";
+
+/** The address may carry a display name; the service normalizes it. */
+export interface MailSenderDecisionInput {
+  readonly address: string;
+  readonly scope: MailSenderDecisionScope;
+  readonly decision: MailSenderDecisionKind;
+}
+
+export interface MailSenderThreadRef {
+  readonly accountId: string;
+  readonly threadId: string;
+}
+
+/**
+ * `archived` names the Inbox threads a block moved to the archive within the
+ * request. `pending` is true when more were found than the request could move
+ * (more than 200, or the deadline came first); the service's scheduler
+ * archives the rest after the next sync.
+ */
+export interface MailSenderDecisionResult {
+  readonly apiVersion: 1;
+  readonly decisionId: string;
+  readonly archived: readonly MailSenderThreadRef[];
+  readonly pending: boolean;
+}
+
+/** An undo of a block names the threads it moved back to the Inbox. */
+export interface MailSenderUndoResult {
+  readonly apiVersion: 1;
+  readonly restored: readonly MailSenderThreadRef[];
+  readonly pending: boolean;
+}
+
+export interface MailBlockedSender {
+  readonly decisionId: string;
+  /** A normalized address, or a domain when `scope` is "domain". */
+  readonly key: string;
+  readonly scope: MailSenderDecisionScope;
+  readonly decidedAt: number;
+  /** Threads the service archived because of this block. */
+  readonly archivedCount: number;
+}
+
+export interface MailBlockedSenders {
+  readonly apiVersion: 1;
+  readonly blocked: readonly MailBlockedSender[];
 }

@@ -38,6 +38,11 @@ import {
 import { SqliteMailSendStore } from "./outbound-store";
 import { MailOutboundWorker } from "./outbound-worker";
 import { readMailServiceRuntimePaths } from "./runtime-config";
+import {
+  MailSenderScreen,
+  MailSenderScreenedMessageService,
+  SqliteMailSenderStore,
+} from "./senders";
 import { createMailSyncPause, mailSyncPauseWorkers } from "./sync-pause";
 import { UnixSocketMailMimeParser } from "./mime-parser-client";
 import { StoredGmailAccessTokenPort } from "../providers/gmail/access-token-port";
@@ -68,8 +73,10 @@ async function main(): Promise<void> {
       imapSessions,
     }),
   });
+  const senderScreen = await openSenderScreen(runtime.stateDirectory, messages);
   const outbox = new SqliteMailSendStore({
     cacheRoot: path.join(runtime.stateDirectory, "cache"),
+    onSent: (sent) => senderScreen?.screen.recordSentRecipients(sent),
   });
   await outbox.initialize();
   const smtpRuntime = await createOptionalProductionSmtpRuntime({
@@ -208,6 +215,7 @@ async function main(): Promise<void> {
   const backgroundSync = new MailBackgroundSyncScheduler(messages, {
     privacyCache: content,
     searchIndex: messages,
+    ...(senderScreen ? { senders: senderScreen.screen } : {}),
   });
   kickBackgroundSync = () => backgroundSync.kick();
   // Everything the pause turns off, in the order they are started below.
@@ -228,11 +236,14 @@ async function main(): Promise<void> {
     build,
     accounts,
     gmailOAuth,
-    messages,
+    messages: senderScreen
+      ? new MailSenderScreenedMessageService(messages, senderScreen.screen)
+      : messages,
     send,
     drafts,
     content,
     syncPause,
+    ...(senderScreen ? { senders: senderScreen.screen } : {}),
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -293,6 +304,7 @@ async function main(): Promise<void> {
         content,
         outbox,
         store,
+        senderStore: senderScreen?.store ?? null,
         deadline,
       });
     });
@@ -312,6 +324,7 @@ async function finishShutdown(options: {
   readonly content: MailContentCoordinator;
   readonly outbox: SqliteMailSendStore;
   readonly store: SqliteMailAccountStore;
+  readonly senderStore: SqliteMailSenderStore | null;
   readonly deadline: ReturnType<typeof setTimeout>;
 }): Promise<void> {
   let failed = options.error !== undefined;
@@ -362,6 +375,15 @@ async function finishShutdown(options: {
     });
   }
   try {
+    options.senderStore?.close();
+  } catch {
+    failed = true;
+    writeServiceLog({
+      event: "mail_service_stop_failed",
+      errorCode: "senders_close_failed",
+    });
+  }
+  try {
     options.store.close();
   } catch {
     failed = true;
@@ -373,6 +395,32 @@ async function finishShutdown(options: {
     clearTimeout(options.deadline);
   }
   if (failed) process.exitCode = 1;
+}
+
+/**
+ * The new-senders screen is a layer over mail, not a condition of it: a
+ * `senders.sqlite3` that cannot be opened leaves the service running without
+ * the screen, with every thread ungated and the routes answering
+ * `mail_senders_unavailable`, and the journal says so once.
+ */
+async function openSenderScreen(
+  stateDirectory: string,
+  messages: MultiAccountMailMessageService,
+): Promise<{ readonly store: SqliteMailSenderStore; readonly screen: MailSenderScreen } | null> {
+  const store = new SqliteMailSenderStore({ stateDirectory });
+  try {
+    await store.initialize();
+  } catch {
+    writeServiceLog({
+      event: "mail_service_senders_unavailable",
+      errorCode: "mail_senders_unavailable",
+    });
+    return null;
+  }
+  return Object.freeze({
+    store,
+    screen: new MailSenderScreen({ store, mail: messages, onEvent: writeServiceLog }),
+  });
 }
 
 function assertInheritedSystemdSocket(): void {

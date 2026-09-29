@@ -82,6 +82,7 @@ function makeThread(
     listMessage: false,
     sizeBytes: 0,
     category: "people",
+    newSender: false,
     ...overrides,
   };
 }

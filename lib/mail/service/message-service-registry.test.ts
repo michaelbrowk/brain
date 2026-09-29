@@ -20,6 +20,11 @@ import {
   createProductionMailProviderFactory,
   type MailProviderFactory,
 } from "./message-service-registry";
+import {
+  MailSenderScreen,
+  MailSenderScreenedMessageService,
+  SqliteMailSenderStore,
+} from "./senders";
 
 const ACCOUNT_ID = "account-a11111111111111111111111111111111";
 const roots: string[] = [];
@@ -124,6 +129,80 @@ describe("multi-account message registry", () => {
     await expect(
       service.listThreads({ accountId: ACCOUNT_ID, limit: 20 }),
     ).resolves.toMatchObject({ apiVersion: 1, items: [] });
+    await service.close();
+  });
+
+  it("answers the new-senders screen from its caches, end to end", async () => {
+    const stateDirectory = await mkdtemp(path.join(tmpdir(), "brain-mail-registry-"));
+    roots.push(stateDirectory);
+    const fromStranger = threadFrom("thread-stranger", "Stranger <Stranger@Example.net>", 5_000);
+    const fromFriend = threadFrom("thread-friend", "friend@example.net", 500);
+    const archived = Object.freeze({
+      ...fromStranger,
+      inInbox: false,
+      mailboxes: Object.freeze(["all" as const]),
+      messages: Object.freeze(
+        fromStranger.messages.map((message) => Object.freeze({ ...message, inInbox: false })),
+      ),
+    });
+    const provider = providerFixture({
+      listInitialThreads: vi.fn().mockResolvedValue({
+        threads: [fromFriend],
+        nextPageToken: null,
+      }),
+      listChanges: vi.fn().mockResolvedValue({
+        changedThreadIds: ["thread-stranger"],
+        nextPageToken: null,
+        resultingHistoryId: "101",
+      }),
+      getThread: vi.fn().mockResolvedValueOnce(fromStranger).mockResolvedValueOnce(archived),
+    });
+    const service = new MultiAccountMailMessageService({
+      stateDirectory,
+      store: storeFixture(),
+      providerFactory: { create: vi.fn().mockResolvedValue({ provider }) },
+    });
+    const store = new SqliteMailSenderStore({ stateDirectory, now: () => 1_000 });
+    await store.initialize();
+    const screen = new MailSenderScreen({ store, mail: service, backfillWindow: 1 });
+    const backfill = async () => {
+      for (let step = 0; step < 20; step += 1) {
+        const { hasMore } = await screen.runBackgroundSenderStep(
+          ACCOUNT_ID,
+          { syncSucceeded: false },
+          new AbortController().signal,
+        );
+        if (!hasMore) return;
+      }
+    };
+    // Before the initial sync the cache holds nothing yet, and a backfill
+    // that finished over it would gate the account's whole history.
+    await backfill();
+    expect(store.readBackfillProgress(ACCOUNT_ID)?.completedAt).toBeNull();
+    await service.sync({ accountId: ACCOUNT_ID, maxItems: 20 }, new AbortController().signal);
+    await backfill();
+    expect(store.readBackfillProgress(ACCOUNT_ID)?.completedAt).toBe(1_000);
+    await service.sync({ accountId: ACCOUNT_ID, maxItems: 20 }, new AbortController().signal);
+    const screened = new MailSenderScreenedMessageService(service, screen);
+
+    const page = await screened.listThreads({ accountId: ACCOUNT_ID, limit: 20 });
+    expect(
+      Object.fromEntries(page.items.map((item) => [item.threadId, item.newSender])),
+    ).toEqual({ "thread-stranger": true, "thread-friend": false });
+    await expect(service.listAccounts()).resolves.toEqual([
+      { accountId: ACCOUNT_ID, address: "reader@example.test", connected: true },
+    ]);
+
+    const block = await screen.decide(
+      { address: "stranger@example.net", scope: "address", decision: "block" },
+      { deadlineAt: Number.MAX_SAFE_INTEGER, signal: new AbortController().signal },
+    );
+
+    expect(block.archived).toEqual([{ accountId: ACCOUNT_ID, threadId: "thread-stranger" }]);
+    expect(provider.archiveThread).toHaveBeenCalledWith("thread-stranger", expect.any(AbortSignal));
+    const after = await screened.listThreads({ accountId: ACCOUNT_ID, limit: 20 });
+    expect(after.items.map((item) => item.threadId)).toEqual(["thread-friend"]);
+    store.close();
     await service.close();
   });
 
@@ -474,6 +553,7 @@ function cachedThreadFixture(threadId: string): CachedProviderThread {
       listMessage: false,
       sizeBytes: 0,
       category: "people" as const,
+      newSender: false,
     }),
     messages: Object.freeze([
       Object.freeze({
@@ -501,6 +581,25 @@ function cachedThreadFixture(threadId: string): CachedProviderThread {
     ]),
     inInbox: true,
     mailboxes: Object.freeze(["all" as const, "inbox" as const]),
+  });
+}
+
+function threadFrom(threadId: string, from: string, sentAt: number): CachedProviderThread {
+  const base = cachedThreadFixture(threadId);
+  const match = /^(?:(.*) )?<(.+)>$/.exec(from);
+  const sender = Object.freeze(
+    match ? { name: match[1] ?? null, address: match[2]! } : { name: null, address: from },
+  );
+  return Object.freeze({
+    ...base,
+    thread: Object.freeze({
+      ...base.thread,
+      participants: Object.freeze([sender]),
+      lastMessageAt: sentAt,
+    }),
+    messages: Object.freeze(
+      base.messages.map((message) => Object.freeze({ ...message, from: sender, sentAt })),
+    ),
   });
 }
 

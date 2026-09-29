@@ -368,6 +368,7 @@ export function gmailThreadToCached(
       : messages.some((message) => message.category === "notification")
         ? "notification"
         : "people",
+    newSender: false,
   });
   return Object.freeze({
     thread,
@@ -454,6 +455,12 @@ export function gmailMessageToDto(
     listMessage: category !== "people",
     category,
     sizeEstimate: source.sizeEstimate,
+    // Presence is the whole question: a letter that names a parent answers
+    // someone, and only one that names none can come from a new sender.
+    isReply:
+      headerValue(headers, "in-reply-to") !== null ||
+      headerValue(headers, "references") !== null,
+    fromOwner: source.labelIds.includes("SENT"),
   });
 }
 

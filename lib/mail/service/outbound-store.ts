@@ -37,6 +37,7 @@ import {
   type SubmissionPhase,
   type SubmissionRecord,
 } from "../send-state";
+import type { MailEnvelope } from "../ports";
 import { MAIL_RESOURCE_LIMITS, writeMailLogRecord } from "../security";
 import {
   mailSendAttachmentBytes,
@@ -418,6 +419,15 @@ interface RunnableMetadata {
   readonly createdAt: number;
 }
 
+/** The visible recipients of one send that reached `sent`. Blind copies are
+ *  left out on purpose: the owner chose not to show them, and nothing learned
+ *  from a send should be a place they surface. */
+export interface MailSendSentRecipients {
+  readonly accountId: string;
+  readonly to: readonly string[];
+  readonly cc: readonly string[];
+}
+
 /** A submission as `submission_json` holds it: the record with the message's
  *  two digests where the message would be. */
 type SubmissionWithoutMessage = Omit<StoredMailSendSubmission, "message"> & {
@@ -445,6 +455,7 @@ export class SqliteMailSendStore
   private readonly cacheRoot: string;
   private readonly now: () => number;
   private readonly onIntegrityCheck: ((accountId: string) => void) | undefined;
+  private readonly onSent: ((sent: MailSendSentRecipients) => void) | undefined;
   private readonly accountTails = new Map<string, Promise<void>>();
   private readonly invalidatedAccounts = new Set<string>();
   private readonly integrityVerifiedAccounts = new Set<string>();
@@ -460,17 +471,28 @@ export class SqliteMailSendStore
     readonly now?: () => number;
     /** Test/operations observer; never receives message or credential data. */
     readonly onIntegrityCheck?: (accountId: string) => void;
+    /**
+     * Told once, after the commit, when an operation's public status becomes
+     * `sent`, whichever transport carried it: the Gmail path's own
+     * compare-and-swap and the SMTP worker's mirrored acceptance both land
+     * here. It receives the visible recipients and nothing else, so the
+     * new-senders screen can learn who the owner writes to. A throw is
+     * logged and never undoes the send.
+     */
+    readonly onSent?: (sent: MailSendSentRecipients) => void;
   }) {
     this.cacheRoot = requireAbsolutePath(options.cacheRoot);
     if (
       (options.now !== undefined && typeof options.now !== "function") ||
       (options.onIntegrityCheck !== undefined &&
-        typeof options.onIntegrityCheck !== "function")
+        typeof options.onIntegrityCheck !== "function") ||
+      (options.onSent !== undefined && typeof options.onSent !== "function")
     ) {
       throw unavailable();
     }
     this.now = options.now ?? Date.now;
     this.onIntegrityCheck = options.onIntegrityCheck;
+    this.onSent = options.onSent;
   }
 
   async initialize(): Promise<void> {
@@ -629,6 +651,9 @@ export class SqliteMailSendStore
             afterCommit(next.accountId, () => {
               this.markRetentionSweep(next.accountId, sweptAt);
             });
+          }
+          if (next.status === "sent" && current.status !== "sent") {
+            this.notifySent(next.accountId, next.message.envelope);
           }
           return true;
         } catch (error) {
@@ -848,6 +873,9 @@ export class SqliteMailSendStore
             afterCommit(accountId, () => {
               this.markRetentionSweep(accountId, sweptAt);
             });
+          }
+          if (mirror?.status === "sent") {
+            this.notifySent(accountId, mirror.message.envelope);
           }
           return true;
         } catch (error) {
@@ -2090,6 +2118,20 @@ export class SqliteMailSendStore
 
   private databasePath(accountId: string): string {
     return path.join(this.cacheRoot, accountId, DATABASE_FILE);
+  }
+
+  private notifySent(accountId: string, envelope: MailEnvelope): void {
+    const onSent = this.onSent;
+    if (onSent === undefined) return;
+    afterCommit(accountId, () =>
+      onSent(
+        Object.freeze({
+          accountId,
+          to: Object.freeze([...envelope.to]),
+          cc: Object.freeze([...envelope.cc]),
+        }),
+      ),
+    );
   }
 
   private readNow(): number {

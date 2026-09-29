@@ -2,11 +2,16 @@ import { describe, expect, it } from "vitest";
 
 import {
   normalizeMailSearchQuery,
+  validateMailBlockedSenders,
   validateMailMailboxThreadPage,
   validateMailSearchAllInput,
   validateMailSearchInput,
   validateMailSearchThreadPage,
   validateMailSendInput,
+  validateMailSenderDecisionInput,
+  validateMailSenderDecisionResult,
+  validateMailSenderScreenState,
+  validateMailSenderUndoResult,
   validateMailThreadDetail,
   validateMailThreadListFilter,
   validateMailThreadMutationInput,
@@ -395,6 +400,136 @@ describe("Mail message boundary codec", () => {
         }),
       ).toThrow("mail_response_invalid");
     }
+  });
+
+  it("reads the tier-5 newSender and reads an older service's thread as not waiting", () => {
+    for (const newSender of [true, false]) {
+      expect(
+        validateMailThreadPage({
+          apiVersion: 1,
+          items: [{ ...threadFixture(), category: "people", newSender }],
+          nextCursor: null,
+          sync: { status: "idle", lastSuccessfulAt: 123 },
+        }).items[0],
+      ).toMatchObject({ newSender });
+    }
+    // A service from before the screen, or a tier-4 projection, never says.
+    expect(
+      validateMailThreadDetail({
+        apiVersion: 1,
+        thread: { ...threadFixture(), category: "people" },
+        messages: [messageFixture()],
+      }).thread.newSender,
+    ).toBe(false);
+
+    for (const invalid of [
+      { ...threadFixture(), newSender: "true" },
+      { ...threadFixture(), newSender: null },
+      { ...threadFixture(), newSender: true, newSenders: true },
+    ]) {
+      expect(() =>
+        validateMailThreadPage({
+          apiVersion: 1,
+          items: [invalid],
+          nextCursor: null,
+          sync: { status: "idle", lastSuccessfulAt: 123 },
+        }),
+      ).toThrow("mail_response_invalid");
+    }
+  });
+
+  it("holds the new-senders requests and answers to their exact shapes", () => {
+    expect(
+      validateMailSenderDecisionInput({
+        address: "Lena <lena@example.test>",
+        scope: "domain",
+        decision: "block",
+      }),
+    ).toEqual({ address: "Lena <lena@example.test>", scope: "domain", decision: "block" });
+    for (const invalid of [
+      { address: "", scope: "address", decision: "accept" },
+      { address: "lena@example.test", scope: "everyone", decision: "accept" },
+      { address: "lena@example.test", scope: "address", decision: "ignore" },
+      { address: "lena@example.test", scope: "address", decision: "accept", extra: 1 },
+      { address: 7, scope: "address", decision: "accept" },
+    ]) {
+      expect(() => validateMailSenderDecisionInput(invalid)).toThrow("mail_request_invalid");
+    }
+
+    const state = {
+      apiVersion: 1,
+      enabled: true,
+      enabledAt: 5,
+      backfillComplete: false,
+      domainScopeRefused: ["gmail.com", "example.test"],
+    };
+    expect(validateMailSenderScreenState(state)).toEqual(state);
+    for (const invalid of [
+      { ...state, enabledAt: null },
+      { ...state, enabled: false },
+      { ...state, enabled: false, enabledAt: null, backfillComplete: true },
+      { ...state, domainScopeRefused: "gmail.com" },
+      { ...state, domainScopeRefused: [7] },
+      { apiVersion: 1, enabled: true, enabledAt: 5, backfillComplete: false },
+    ]) {
+      expect(() => validateMailSenderScreenState(invalid)).toThrow("mail_response_invalid");
+    }
+
+    const decisionId = "decision-a0123456789abcdef0123456789abcdef";
+    const ref = { accountId, threadId: "thread_1" };
+    expect(
+      validateMailSenderDecisionResult({
+        apiVersion: 1,
+        decisionId,
+        archived: [ref],
+        pending: true,
+      }),
+    ).toEqual({ apiVersion: 1, decisionId, archived: [ref], pending: true });
+    for (const decisionId of [
+      "decision-1",
+      `decision-a${"z".repeat(32)}`,
+      "decision-a0123",
+      `decision-a${"0".repeat(33)}`,
+    ]) {
+      expect(() =>
+        validateMailSenderDecisionResult({
+          apiVersion: 1,
+          decisionId,
+          archived: [],
+          pending: false,
+        }),
+      ).toThrow("mail_response_invalid");
+    }
+    expect(
+      validateMailSenderUndoResult({ apiVersion: 1, restored: [ref], pending: false }),
+    ).toEqual({ apiVersion: 1, restored: [ref], pending: false });
+    expect(() =>
+      validateMailSenderUndoResult({
+        apiVersion: 1,
+        restored: [{ ...ref, subject: "x" }],
+        pending: false,
+      }),
+    ).toThrow("mail_response_invalid");
+    expect(
+      validateMailBlockedSenders({
+        apiVersion: 1,
+        blocked: [
+          {
+            decisionId,
+            key: "growth.test",
+            scope: "domain",
+            decidedAt: 9,
+            archivedCount: 3,
+          },
+        ],
+      }).blocked[0],
+    ).toEqual({
+      decisionId,
+      key: "growth.test",
+      scope: "domain",
+      decidedAt: 9,
+      archivedCount: 3,
+    });
   });
 
   it("requires search responses to disclose building and truncated windows", () => {

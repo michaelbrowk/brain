@@ -14,6 +14,7 @@ import {
   selectWorstMailSyncError,
   SqliteMailMessageCache,
 } from "./message-cache";
+import { normalizeSenderAddress } from "./senders";
 
 const ACCOUNT_ID = "account-a11111111111111111111111111111111";
 const roots: string[] = [];
@@ -5668,6 +5669,7 @@ function threadFixture(
     listMessage: false,
     sizeBytes: 0,
     category: "people",
+    newSender: false,
   });
   return Object.freeze({
     thread,
@@ -5797,4 +5799,337 @@ function withDatabase(
   } finally {
     database.close();
   }
+}
+
+describe("the cache's answers for the new-senders screen", () => {
+  it("names each thread's first message, whether it starts a conversation, whose it is, and where the thread is", async () => {
+    const { cache } = await createCache();
+    const generation = cache.beginInitial("100");
+    cache.putInitialPage(
+      generation,
+      [
+        conversationFixture("thread-reply", [
+          { from: "Late <late@example.test>", sentAt: 2_000 },
+          { from: "First <first@example.test>", sentAt: 1_000, isReply: true },
+          // The provider marks this one the owner's, under an address not named.
+          { from: "Alias <alias@example.test>", sentAt: 2_500, fromOwner: true },
+        ]),
+        conversationFixture(
+          "thread-sent",
+          [{ from: "me@example.test", sentAt: 500, fromOwner: true }],
+          ["all", "sent"],
+        ),
+      ],
+      null,
+      null,
+    );
+    cache.completeInitial(generation, 3_000);
+
+    const senders = cache.readThreadFirstSenders([
+      "thread-reply",
+      "thread-sent",
+      "thread-missing",
+    ]);
+
+    expect(Object.fromEntries(senders)).toEqual({
+      "thread-reply": {
+        address: "first@example.test",
+        firstMessageAt: 1_000,
+        startsConversation: false,
+        fromOwner: false,
+        inInbox: true,
+        references: [],
+      },
+      "thread-sent": {
+        address: "me@example.test",
+        firstMessageAt: 500,
+        startsConversation: true,
+        fromOwner: true,
+        inInbox: false,
+        references: [],
+      },
+    });
+    expect(cache.listInboxThreadFirstSenders(() => false)).toEqual([
+      {
+        threadId: "thread-reply",
+        address: "first@example.test",
+        fromOwner: false,
+        lastForeignMessageAt: 2_000,
+        firstMessageId: "<thread-reply-1@example.test>",
+      },
+    ]);
+    // The newest letter is the owner's once his address is named.
+    expect(cache.listInboxThreadFirstSenders((address) => address === "late@example.test"),
+    ).toMatchObject([
+      { threadId: "thread-reply", lastForeignMessageAt: 1_000 },
+    ]);
+  });
+
+  it("dates an Inbox thread by its newest letter in the generation it reads, not a rebuild under way", async () => {
+    const { cache } = await createCache();
+    const letters = [
+      { from: "a@example.test", sentAt: 1_000 },
+      { from: "m@example.test", sentAt: 3_000 },
+      { from: "z@example.test", sentAt: 2_000 },
+    ];
+    const first = cache.beginInitial("100");
+    cache.putInitialPage(first, [conversationFixture("thread-x", letters)], null, null);
+    cache.completeInitial(first, 4_000);
+    const rebuild = cache.beginInitial("200");
+    cache.putInitialPage(
+      rebuild,
+      [conversationFixture("thread-x", [...letters, { from: "b@example.test", sentAt: 9_000 }])],
+      null,
+      "next-rebuild-page",
+    );
+
+    expect(cache.listInboxThreadFirstSenders(() => false)).toMatchObject([
+      { threadId: "thread-x", lastForeignMessageAt: 3_000 },
+    ]);
+  });
+
+  it("knows the owner's own reply under an international domain written in its own script", async () => {
+    const { cache } = await createCache();
+    const generation = cache.beginInitial("100");
+    cache.putInitialPage(
+      generation,
+      [
+        conversationFixture("thread-idn", [
+          { from: "a@example.test", sentAt: 1_000 },
+          { from: "Me <Me@Bücher.test>", sentAt: 1_500 },
+        ]),
+      ],
+      null,
+      null,
+    );
+    cache.completeInitial(generation, 2_000);
+
+    expect(
+      cache.listInboxThreadFirstSenders(
+        (address) => normalizeSenderAddress(address) === normalizeSenderAddress("me@bücher.test"),
+      ),
+    ).toMatchObject([{ threadId: "thread-idn", lastForeignMessageAt: 1_000 }]);
+  });
+
+  it("reads every From, then every Sent recipient and the owner's own From, in bounded windows", async () => {
+    const { cache } = await createCache();
+    const generation = cache.beginInitial("100");
+    cache.putInitialPage(
+      generation,
+      [
+        conversationFixture("thread-old", [{ from: "old@example.test", sentAt: 900 }]),
+        conversationFixture("thread-new", [{ from: "new@example.test", sentAt: 1_100 }]),
+        conversationFixture(
+          "thread-sent",
+          [
+            {
+              from: "Me <alias@example.test>",
+              sentAt: 1_200,
+              to: ["colleague@example.test"],
+              cc: ["boss@example.test"],
+              fromOwner: true,
+            },
+          ],
+          ["all", "sent"],
+        ),
+      ],
+      null,
+      null,
+    );
+    expect(
+      cache.readSenderBackfillBatch({
+        fromCursor: 0,
+        sentCursor: 0,
+        window: 10,
+        learnFrom: true,
+      }).cacheReady,
+    ).toBe(false);
+    cache.completeInitial(generation, 3_000);
+
+    const known: string[] = [];
+    const own: string[] = [];
+    let fromCursor = 0;
+    let sentCursor = 0;
+    let steps = 0;
+    for (;;) {
+      const batch = cache.readSenderBackfillBatch({
+        fromCursor,
+        sentCursor,
+        window: 1,
+        learnFrom: true,
+      });
+      expect(batch.cacheReady).toBe(true);
+      known.push(...batch.known);
+      own.push(...batch.own);
+      fromCursor = batch.fromCursor;
+      sentCursor = batch.sentCursor;
+      steps += 1;
+      if (batch.done) break;
+      expect(steps).toBeLessThan(20);
+    }
+
+    expect(known.sort()).toEqual([
+      "alias@example.test",
+      "boss@example.test",
+      "colleague@example.test",
+      "new@example.test",
+      "old@example.test",
+    ]);
+    expect(own).toEqual(["alias@example.test"]);
+    expect(steps).toBeGreaterThan(2);
+    expect(
+      cache.readSenderBackfillBatch({ fromCursor, sentCursor, window: 1, learnFrom: true }),
+    ).toEqual({ known: [], own: [], fromCursor, sentCursor, done: true, cacheReady: true });
+
+    // After the account starts gating only the Sent phase reads on.
+    cache.replaceActiveThread(
+      conversationFixture("thread-later", [{ from: "stranger@example.test", sentAt: 5_000 }]),
+    );
+    expect(
+      cache.readSenderBackfillBatch({ fromCursor, sentCursor, window: 10, learnFrom: false }),
+    ).toMatchObject({ known: [], own: [], fromCursor, done: true });
+  });
+
+  it("finds the senders of referenced letters and a sender's conversation starts", async () => {
+    const { cache } = await createCache();
+    const generation = cache.beginInitial("100");
+    cache.putInitialPage(
+      generation,
+      [
+        conversationFixture("thread-cold", [{ from: "Rep <REP@sales.test>", sentAt: 2_000 }]),
+        conversationFixture("thread-follow", [
+          {
+            from: "rep@sales.test",
+            sentAt: 2_100,
+            references: ["<thread-cold-0@example.test>"],
+          },
+        ]),
+        conversationFixture("thread-list", [{ from: "news@sales.test", sentAt: 2_200 }]),
+        conversationFixture(
+          "thread-mixed",
+          [
+            { from: "me@example.test", sentAt: 1_000, fromOwner: true },
+            { from: "stranger@evil.test", sentAt: 1_100, to: ["me@example.test"] },
+          ],
+          ["all", "sent"],
+        ),
+      ],
+      null,
+      null,
+    );
+    cache.completeInitial(generation, 3_000);
+
+    expect(
+      cache.readReferencedSenders(["<thread-cold-0@example.test>", "<unknown@example.test>"]),
+    ).toEqual(["REP@sales.test"]);
+    expect(cache.hasConversationStart({ address: "rep@sales.test", after: 1_500 })).toBe(true);
+    expect(cache.hasConversationStart({ address: "rep@sales.test", after: 2_000 })).toBe(false);
+    expect(cache.hasConversationStart({ address: "nobody@sales.test", after: 0 })).toBe(false);
+    // A start that left the Inbox, or list mail, holds nobody's follow-up.
+    cache.replaceActiveThread(
+      conversationFixture("thread-archived", [{ from: "gone@sales.test", sentAt: 2_300 }], ["all"]),
+    );
+    const newsletter = conversationFixture("thread-news", [
+      { from: "digest@sales.test", sentAt: 2_400 },
+    ]);
+    cache.replaceActiveThread(
+      Object.freeze({
+        ...newsletter,
+        thread: Object.freeze({ ...newsletter.thread, category: "newsletter" as const }),
+      }),
+    );
+    expect(cache.hasConversationStart({ address: "gone@sales.test", after: 0 })).toBe(false);
+    expect(cache.hasConversationStart({ address: "digest@sales.test", after: 0 })).toBe(false);
+    // Only the owner's own message in a Sent thread names an own address.
+    const batch = cache.readSenderBackfillBatch({
+      fromCursor: 10_000,
+      sentCursor: 0,
+      window: 10_000,
+      learnFrom: false,
+    });
+    expect(batch.own).toEqual(["me@example.test"]);
+  });
+
+  it("marks cached replies from their references when a cache from before the flag opens", async () => {
+    const fixture = await createCache();
+    const generation = fixture.cache.beginInitial("100");
+    fixture.cache.putInitialPage(
+      generation,
+      [
+        conversationFixture("thread-answer", [
+          { from: "x@example.test", sentAt: 1_000, references: ["<parent@example.test>"] },
+        ]),
+        conversationFixture("thread-first", [{ from: "y@example.test", sentAt: 1_000 }]),
+      ],
+      null,
+      null,
+    );
+    fixture.cache.completeInitial(generation, 2_000);
+    fixture.cache.close();
+    const databasePath = cacheDatabasePath(fixture.cacheRoot);
+    const rollback = new DatabaseSync(databasePath);
+    rollback.exec("ALTER TABLE messages DROP COLUMN is_reply");
+    rollback.exec("ALTER TABLE messages DROP COLUMN from_owner");
+    rollback.close();
+
+    const reopened = new SqliteMailMessageCache({
+      cacheRoot: fixture.cacheRoot,
+      accountId: ACCOUNT_ID,
+    });
+    await reopened.initialize();
+
+    expect(
+      Object.fromEntries(
+        [...reopened.readThreadFirstSenders(["thread-answer", "thread-first"])].map(
+          ([threadId, sender]) => [threadId, sender.startsConversation],
+        ),
+      ),
+    ).toEqual({ "thread-answer": false, "thread-first": true });
+    reopened.close();
+  });
+});
+
+function conversationFixture(
+  threadId: string,
+  messages: readonly {
+    readonly from: string;
+    readonly sentAt: number;
+    readonly to?: readonly string[];
+    readonly cc?: readonly string[];
+    readonly isReply?: boolean;
+    readonly fromOwner?: boolean;
+    readonly references?: readonly string[];
+  }[],
+  mailboxes: readonly MailCacheMailbox[] = Object.freeze(["all", "inbox"]),
+): CachedProviderThread {
+  const base = threadFixture(threadId, messages[0]!.sentAt, mailboxes);
+  const address = (value: string) => {
+    const match = /^(?:(.*) )?<(.+)>$/.exec(value);
+    return Object.freeze(
+      match ? { name: match[1] ?? null, address: match[2]! } : { name: null, address: value },
+    );
+  };
+  const cached = messages.map((message, index) =>
+    Object.freeze({
+      ...base.messages[0]!,
+      messageId: `message-${threadId}-${index}`,
+      rfcMessageId: `<${threadId}-${index}@example.test>`,
+      from: address(message.from),
+      to: Object.freeze((message.to ?? ["reader@example.test"]).map(address)),
+      cc: Object.freeze((message.cc ?? []).map(address)),
+      sentAt: message.sentAt,
+      references: Object.freeze([...(message.references ?? [])]),
+      isReply: message.isReply ?? (message.references ?? []).length > 0,
+      fromOwner: message.fromOwner ?? false,
+    }),
+  );
+  return Object.freeze({
+    ...base,
+    thread: Object.freeze({
+      ...base.thread,
+      messageCount: cached.length,
+      lastMessageAt: Math.max(...messages.map((message) => message.sentAt)),
+    }),
+    messages: Object.freeze(cached),
+  });
 }

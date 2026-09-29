@@ -136,6 +136,7 @@ export function fakeThread(
     listMessage: false,
     sizeBytes: 0,
     category: "people",
+    newSender: false,
     ...overrides,
   };
 }
@@ -243,6 +244,17 @@ function defaultClient(): BrainMailClient {
     requestMessageContent: unavailable,
     downloadAttachment: unavailable,
     downloadRemoteImage: unavailable,
+    getSenderScreenState: async () => ({
+      apiVersion: 1,
+      enabled: true,
+      enabledAt: 0,
+      backfillComplete: true,
+      domainScopeRefused: ["gmail.com"],
+    }),
+    setSenderScreenEnabled: unavailable,
+    decideSender: unavailable,
+    undoSenderDecision: unavailable,
+    listBlockedSenders: async () => ({ apiVersion: 1, blocked: [] }),
   };
 }
 
@@ -255,7 +267,7 @@ export function createMailClientFake(
   for (const method of Object.keys(defaults) as Array<keyof BrainMailClient>) {
     // Every member is a function of its own argument list, and the recorder
     // has to accept all of them, so the call site is widened once here rather
-    // than twenty-seven times above.
+    // than once for every member above.
     const chosen = (overrides[method] ?? defaults[method]) as (
       ...args: unknown[]
     ) => unknown;

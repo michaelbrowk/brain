@@ -63,9 +63,16 @@ import {
   validateMailResourceId,
   validateMailSearchInput,
   validateMailSearchThreadPage,
+  validateMailBlockedSenders,
   validateMailSendInput,
   validateMailSendOperation,
   validateMailSendResult,
+  validateMailSenderDecisionId,
+  validateMailSenderDecisionInput,
+  validateMailSenderDecisionResult,
+  validateMailSenderScreenInput,
+  validateMailSenderScreenState,
+  validateMailSenderUndoResult,
   validateMailSyncEnabledInput,
   validateMailSyncInput,
   validateMailSyncPauseResult,
@@ -78,12 +85,17 @@ import {
   validateMailThreadPage,
 } from "./message-codec";
 import type {
+  MailBlockedSenders,
   MailMailboxThreadPage,
   MailSendInput,
   MailSendOperation,
   MailSendResult,
   MailSyncResult,
   MailSearchThreadPage,
+  MailSenderDecisionInput,
+  MailSenderDecisionResult,
+  MailSenderScreenState,
+  MailSenderUndoResult,
   MailSystemMailbox,
   MailThreadDetail,
   MailThreadMutationInput,
@@ -103,10 +115,16 @@ const MESSAGE_CONTENT_PATH = "/v1/message-content";
 const ATTACHMENTS_PATH = "/v1/attachments";
 const REMOTE_IMAGES_PATH = "/v1/remote-images";
 const SEARCH_PATH = "/v1/search";
+const SENDERS_PATH = "/v1/senders";
 const REQUEST_TIMEOUT_MS = 12_000;
 const MAX_RESPONSE_BYTES = 32 * 1024;
 const MAX_THREAD_LIST_RESPONSE_BYTES = 512 * 1024;
 const MAX_THREAD_DETAIL_RESPONSE_BYTES = 4 * 1024 * 1024;
+/** A block or an undo names at most two hundred threads, and the worst of
+ *  them costs 328 bytes as JSON: a 42-character account id, a 255-character
+ *  thread id and the keys around them. Two hundred of those is 65,600 bytes,
+ *  twice the default ceiling, so these two answers get room for twice that. */
+const MAX_SENDER_DECISION_RESPONSE_BYTES = 128 * 1024;
 const MAX_DRAFT_DETAIL_RESPONSE_BYTES =
   MAIL_SERVICE_HTTP_LIMITS.maxDraftBodyBytes;
 const MAX_CONNECTED_AT_FUTURE_SKEW_MS = 5 * 60 * 1000;
@@ -185,6 +203,11 @@ export const SAFE_SERVICE_ERROR_CODES = new Set([
   "mail_content_remote_image_refused",
   "mail_content_unavailable",
   "mail_attachment_range_unsupported",
+  "mail_sender_own_address",
+  "mail_sender_domain_scope_refused",
+  "mail_sender_decision_not_found",
+  "mail_sender_decision_changed",
+  "mail_senders_unavailable",
 ]);
 
 export type MailTlsMode = "implicit" | "starttls";
@@ -482,6 +505,24 @@ export interface BrainMailClient {
     remoteImageId: string,
     signal?: AbortSignal,
   ): Promise<MailAttachmentPayload>;
+  /** The new-senders screen: its switch, the owner's decisions, and the
+   *  Blocked list. `undoSenderDecision` with `restore: false` is the Blocked
+   *  list's unblock, which leaves archived mail where it is. */
+  getSenderScreenState(signal?: AbortSignal): Promise<MailSenderScreenState>;
+  setSenderScreenEnabled(
+    enabled: boolean,
+    signal?: AbortSignal,
+  ): Promise<MailSenderScreenState>;
+  decideSender(
+    input: MailSenderDecisionInput,
+    signal?: AbortSignal,
+  ): Promise<MailSenderDecisionResult>;
+  undoSenderDecision(
+    decisionId: string,
+    options: { readonly restore: boolean },
+    signal?: AbortSignal,
+  ): Promise<MailSenderUndoResult>;
+  listBlockedSenders(signal?: AbortSignal): Promise<MailBlockedSenders>;
 }
 
 export function createBrainMailClient(options?: {
@@ -1112,6 +1153,69 @@ export function createBrainMailClient(options?: {
         signal,
       );
     },
+    getSenderScreenState: async (signal?: AbortSignal) =>
+      requestMailService(
+        socketPath,
+        requestTimeoutMs,
+        `${SENDERS_PATH}/state`,
+        "GET",
+        undefined,
+        validateMailSenderScreenState,
+        signal,
+      ),
+    setSenderScreenEnabled: async (enabled: boolean, signal?: AbortSignal) =>
+      requestMailService(
+        socketPath,
+        requestTimeoutMs,
+        `${SENDERS_PATH}/state`,
+        "PUT",
+        validateMessageRequest(() => validateMailSenderScreenInput({ enabled })),
+        validateMailSenderScreenState,
+        signal,
+      ),
+    decideSender: async (input: MailSenderDecisionInput, signal?: AbortSignal) =>
+      requestMailService(
+        socketPath,
+        requestTimeoutMs,
+        `${SENDERS_PATH}/decisions`,
+        "POST",
+        validateMessageRequest(() => validateMailSenderDecisionInput(input)),
+        validateMailSenderDecisionResult,
+        signal,
+        MAX_SENDER_DECISION_RESPONSE_BYTES,
+      ),
+    undoSenderDecision: async (
+      decisionId: string,
+      options: { readonly restore: boolean },
+      signal?: AbortSignal,
+    ) => {
+      const safeDecisionId = validateMessageRequest(() =>
+        validateMailSenderDecisionId(decisionId),
+      );
+      const query = options.restore ? "" : "?restore=false";
+      return requestMailService(
+        socketPath,
+        requestTimeoutMs,
+        `${SENDERS_PATH}/decisions/${safeDecisionId}${query}`,
+        "DELETE",
+        undefined,
+        validateMailSenderUndoResult,
+        signal,
+        MAX_SENDER_DECISION_RESPONSE_BYTES,
+      );
+    },
+    listBlockedSenders: async (signal?: AbortSignal) =>
+      requestMailService(
+        socketPath,
+        requestTimeoutMs,
+        `${SENDERS_PATH}/blocked`,
+        "GET",
+        undefined,
+        validateMailBlockedSenders,
+        signal,
+        // A thousand blocked keys, each an address or a domain and a count.
+        MAX_THREAD_LIST_RESPONSE_BYTES,
+      ),
   });
 }
 
@@ -1235,7 +1339,7 @@ async function requestMailService<T>(
   socketPath: string,
   requestTimeoutMs: number,
   requestPath: string,
-  method: "GET" | "POST" | "PATCH" | "DELETE",
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   body: unknown | undefined,
   validateSuccess: (value: unknown) => T,
   signal: AbortSignal | undefined,

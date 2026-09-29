@@ -314,6 +314,91 @@ describe("Mail background sync scheduler", () => {
     await scheduler.stop();
   });
 
+  it("runs the senders step after each sync and says whether the sync reached the provider", async () => {
+    vi.useFakeTimers();
+    let providerCalls = 0;
+    const senderSteps: Array<{ accountId: string; syncSucceeded: boolean }> = [];
+    const scheduler = new MailBackgroundSyncScheduler(
+      {
+        listAccountIds: async () => [accountA],
+        runBackgroundSyncStep: async () => {
+          providerCalls += 1;
+          if (providerCalls === 2) throw new Error("provider unavailable");
+          if (providerCalls === 3) {
+            return Object.freeze({
+              result: Object.freeze({
+                apiVersion: 1 as const,
+                status: "backoff" as const,
+                changedCount: 0,
+                hasMore: false,
+              }),
+              hasMore: false,
+            });
+          }
+          return syncResult(false);
+        },
+      },
+      {
+        senders: {
+          async runBackgroundSenderStep(accountId, input, signal) {
+            expect(signal.aborted).toBe(false);
+            senderSteps.push({ accountId, syncSucceeded: input.syncSucceeded });
+            // The backfill keeps the account queued for one more page.
+            return { hasMore: senderSteps.length === 1 };
+          },
+        },
+        initialDelayMs: 10,
+        intervalMs: 1_000,
+        continuationDelayMs: 25,
+      },
+    );
+
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(10);
+    // The first sync succeeds and the backfill asks for more, so the burst
+    // runs the account again; that sync fails, and the senders step still
+    // runs, told that nothing reached the provider.
+    expect(senderSteps).toEqual([
+      { accountId: accountA, syncSucceeded: true },
+      { accountId: accountA, syncSucceeded: false },
+    ]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    // A sync the cache refused for backoff did not reach the provider either.
+    expect(senderSteps.at(-1)).toEqual({ accountId: accountA, syncSucceeded: false });
+    await scheduler.stop();
+  });
+
+  it("keeps syncing when a senders step fails", async () => {
+    vi.useFakeTimers();
+    let providerCalls = 0;
+    const scheduler = new MailBackgroundSyncScheduler(
+      {
+        listAccountIds: async () => [accountA],
+        runBackgroundSyncStep: async () => {
+          providerCalls += 1;
+          return syncResult(false);
+        },
+      },
+      {
+        senders: {
+          async runBackgroundSenderStep() {
+            throw new Error("senders unavailable");
+          },
+        },
+        initialDelayMs: 10,
+        intervalMs: 1_000,
+        continuationDelayMs: 25,
+      },
+    );
+
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(providerCalls).toBe(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(providerCalls).toBe(2);
+    await scheduler.stop();
+  });
+
   it("runs the privacy-cache step on every page, not only after the last one", async () => {
     vi.useFakeTimers();
     let providerCalls = 0;

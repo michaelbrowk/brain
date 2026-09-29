@@ -264,7 +264,31 @@ describe("IMAP metadata sync adapter", () => {
       references: ["<parent@example.test>"],
       textBody: null,
       htmlBody: null,
+      isReply: true,
+      fromOwner: false,
     });
+  });
+
+  it("marks a message that answers another by its envelope's In-Reply-To", () => {
+    const message = (envelope: Record<string, unknown>, headers?: string) =>
+      imapMessageToCached(ACCOUNT_ID, BigInt(77), {
+        seq: 1,
+        uid: 9,
+        flags: new Set<string>(),
+        internalDate: new Date("2026-07-20T00:00:00Z"),
+        envelope: {
+          messageId: "<message@example.test>",
+          from: [{ name: "Sender", address: "sender@example.test" }],
+          ...envelope,
+        },
+        ...(headers === undefined ? {} : { headers: Buffer.from(headers, "latin1") }),
+      }).messages[0]!;
+
+    expect(message({}).isReply).toBe(false);
+    expect(message({ inReplyTo: "<parent@example.test>" }).isReply).toBe(true);
+    // References is not fetched: its size is the sender's to choose, and a
+    // reply without In-Reply-To is gated like a first letter, the safe way.
+    expect(message({}, "List-Id: <news.example.test>\r\n").isReply).toBe(false);
   });
 });
 
@@ -284,6 +308,46 @@ describe("IMAP list-message classification and size", () => {
         headers: ["list-id", "list-unsubscribe", "precedence", "auto-submitted"],
       }),
     );
+  });
+
+  it("finds List-Id past a header of any length that it does not read", () => {
+    const references = Array.from(
+      { length: 600 },
+      (_, index) => `<message-${index}-${"x".repeat(40)}@lists.example.test>`,
+    ).join(" ");
+    const parsed = parseListHeaders(
+      Buffer.from(
+        `References: ${references}\r\nList-Id: <dev.lists.example.test>\r\nPrecedence: list\r\n`,
+        "latin1",
+      ),
+    );
+
+    expect(parsed).toMatchObject({ hasListId: true, precedence: "list" });
+  });
+
+  it("unfolds a value folded with a tab", () => {
+    expect(
+      parseListHeaders(Buffer.from("Precedence:\r\n\tbulk\r\nList-Id: <x.example.test>\r\n", "latin1")),
+    ).toMatchObject({ precedence: "bulk", hasListId: true });
+  });
+
+  it("reads megabytes of lines without a colon in time that grows with their length", () => {
+    const lines = Buffer.from(
+      `${"x".repeat(78)}\r\n`.repeat(40_000) + "List-Id: <x.example.test>\r\n",
+      "latin1",
+    );
+    const startedAt = performance.now();
+
+    expect(parseListHeaders(lines)).toMatchObject({ hasListId: true });
+    expect(performance.now() - startedAt).toBeLessThan(250);
+  });
+
+  it("reads a header name of up to 128 bytes and no longer", () => {
+    const named = (width: number) =>
+      parseListHeaders(Buffer.from(`${"List-Id".padEnd(width)}: <x.example.test>\r\n`, "latin1"));
+
+    expect(named(128)).toMatchObject({ hasListId: true });
+    expect(named(129)).toMatchObject({ hasListId: false });
   });
 
   it("unfolds continuations and matches header names case-insensitively", () => {

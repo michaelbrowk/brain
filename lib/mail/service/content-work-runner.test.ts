@@ -442,6 +442,7 @@ function threadFixture(): CachedProviderThread {
     listMessage: false,
     sizeBytes: 0,
     category: "people",
+    newSender: false,
   };
   return { thread, messages: [message], inInbox: true, mailboxes: ["all", "inbox"] };
 }

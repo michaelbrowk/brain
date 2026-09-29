@@ -34,6 +34,19 @@ export interface MailBackgroundSearchIndexPort {
 }
 
 /**
+ * The new-senders screen's step. `syncSucceeded` says whether this page's
+ * sync reached the provider and came back healthy: the archiver and the
+ * restores only touch the provider after one that did.
+ */
+export interface MailBackgroundSenderPort {
+  runBackgroundSenderStep(
+    accountId: string,
+    input: { readonly syncSucceeded: boolean },
+    signal: AbortSignal,
+  ): Promise<{ readonly hasMore: boolean }>;
+}
+
+/**
  * One serialized poller for the isolated service. A failed account never
  * prevents the remaining accounts from syncing, and a slow pass cannot overlap
  * the next one. Provider-specific backoff stays inside the sync service.
@@ -46,6 +59,7 @@ export class MailBackgroundSyncScheduler {
   private readonly maxItems: number;
   private readonly privacyCache: MailBackgroundPrivacyCachePort | null;
   private readonly searchIndex: MailBackgroundSearchIndexPort | null;
+  private readonly senders: MailBackgroundSenderPort | null;
   private readonly accountQueue: string[] = [];
   private readonly nextEligibleAt = new Map<string, number>();
   private readonly syncBackoffUntil = new Map<string, number>();
@@ -64,6 +78,7 @@ export class MailBackgroundSyncScheduler {
       readonly maxItems?: number;
       readonly privacyCache?: MailBackgroundPrivacyCachePort;
       readonly searchIndex?: MailBackgroundSearchIndexPort;
+      readonly senders?: MailBackgroundSenderPort;
     } = {},
   ) {
     this.port = port;
@@ -89,6 +104,13 @@ export class MailBackgroundSyncScheduler {
       throw new Error("mail background search index is invalid");
     }
     this.searchIndex = options.searchIndex ?? null;
+    if (
+      options.senders !== undefined &&
+      typeof options.senders.runBackgroundSenderStep !== "function"
+    ) {
+      throw new Error("mail background senders step is invalid");
+    }
+    this.senders = options.senders ?? null;
   }
 
   start(): void {
@@ -210,15 +232,19 @@ export class MailBackgroundSyncScheduler {
       // it: a failure rests the provider for one interval while the cache
       // keeps draining, and a busy provider interleaves with it.
       let syncHasMore = false;
+      let syncSucceeded = false;
       if ((this.syncBackoffUntil.get(accountId) ?? 0) <= Date.now()) {
         try {
-          syncHasMore = validateBackgroundSyncStep(
+          const step = validateBackgroundSyncStep(
             await this.port.runBackgroundSyncStep(
               accountId,
               { maxItems: this.maxItems },
               signal,
             ),
-          ).hasMore;
+          );
+          syncHasMore = step.hasMore;
+          syncSucceeded =
+            step.result.status === "idle" || step.result.status === "syncing";
         } catch {
           if (signal.aborted) return false;
           this.syncBackoffUntil.set(accountId, Date.now() + this.intervalMs);
@@ -254,7 +280,24 @@ export class MailBackgroundSyncScheduler {
         }
       }
       if (signal.aborted) return false;
-      if (syncHasMore || privacyHasMore || indexHasMore) {
+      // Last, so a blocked sender's new letter is archived by the pass that
+      // brought it in. A failed step waits for the next pass like the index.
+      let sendersHasMore = false;
+      if (this.senders !== null) {
+        try {
+          sendersHasMore = validateHasMoreStep(
+            await this.senders.runBackgroundSenderStep(
+              accountId,
+              { syncSucceeded },
+              signal,
+            ),
+          ).hasMore;
+        } catch {
+          if (signal.aborted) return false;
+        }
+      }
+      if (signal.aborted) return false;
+      if (syncHasMore || privacyHasMore || indexHasMore || sendersHasMore) {
         this.accountQueue.push(accountId);
       } else {
         this.nextEligibleAt.set(accountId, Date.now() + this.intervalMs);

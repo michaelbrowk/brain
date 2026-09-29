@@ -261,23 +261,42 @@ describe("brain-mail message HTTP surface", () => {
       });
       expect(viewFields).not.toHaveProperty("category");
 
-      const current = await itemFor(routePath, {
+      const categorized = await itemFor(routePath, {
         "x-brain-mail-thread-state": "4",
+      });
+      expect(categorized).toMatchObject({
+        starred: false,
+        listMessage: false,
+        sizeBytes: 0,
+        category: "people",
+      });
+      expect(categorized).not.toHaveProperty("newSender");
+
+      const current = await itemFor(routePath, {
+        "x-brain-mail-thread-state": "5",
       });
       expect(current).toMatchObject({
         starred: false,
         listMessage: false,
         sizeBytes: 0,
         category: "people",
+        newSender: false,
       });
 
-      const garbage = await itemFor(routePath, {
+      // A later client's tier reads as the highest this service knows.
+      const later = await itemFor(routePath, {
         "x-brain-mail-thread-state": "999",
+      });
+      expect(later).toMatchObject({ category: "people", newSender: false });
+
+      const garbage = await itemFor(routePath, {
+        "x-brain-mail-thread-state": "tier-9",
       });
       expect(garbage).not.toHaveProperty("starred");
       expect(garbage).not.toHaveProperty("listMessage");
       expect(garbage).not.toHaveProperty("sizeBytes");
       expect(garbage).not.toHaveProperty("category");
+      expect(garbage).not.toHaveProperty("newSender");
     }
   });
 
@@ -1349,6 +1368,7 @@ function threadFixture() {
     listMessage: false,
     sizeBytes: 0,
     category: "people",
+    newSender: false,
   } as const;
 }
 
@@ -1392,6 +1412,7 @@ function cachedSearchThreadFixture(
     listMessage: false,
     sizeBytes: 0,
     category: "people",
+    newSender: false,
   });
   return Object.freeze({
     thread,

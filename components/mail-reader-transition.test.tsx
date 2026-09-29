@@ -76,6 +76,7 @@ function detailFor(threadId: string): MailThreadDetail {
       listMessage: false,
       sizeBytes: 0,
       category: "people",
+      newSender: false,
     },
     messages: [message],
   };

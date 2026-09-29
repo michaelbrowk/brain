@@ -29,6 +29,7 @@ function makeThread(
     listMessage: false,
     sizeBytes: 24_000,
     category: "people",
+    newSender: false,
     ...overrides,
   };
 }

@@ -263,6 +263,7 @@ describe("brain-mail systemd contracts", () => {
       "service/outbound.js",
       "service/remote-image-fetcher.js",
       "service/runtime-config.js",
+      "service/senders.js",
       "service/smtp-runtime.js",
       "service/smtp-state-store.js",
       "service/sync-pause.js",

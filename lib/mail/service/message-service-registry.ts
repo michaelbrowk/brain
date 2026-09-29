@@ -22,6 +22,9 @@ import {
   type ImapSessionClient,
 } from "./imapflow-adapter";
 import {
+  type MailCacheInboxThreadSender,
+  type MailCacheSenderBackfillBatch,
+  type MailCacheThreadFirstSender,
   type MailReplyContext,
   selectWorstMailSyncError,
   SqliteMailMessageCache,
@@ -231,6 +234,69 @@ export class MultiAccountMailMessageService implements MailMessageService {
     messageId: string,
   ): Promise<MailReplyContext | null> {
     return this.withEntry(accountId, (entry) => entry.cache.readReplyContext(messageId));
+  }
+
+  /** The new-senders screen's reads. Each is one cache read under the same
+   *  lease every other read takes, and none reaches a provider. */
+  async readThreadFirstSenders(
+    accountId: string,
+    threadIds: readonly string[],
+  ): Promise<ReadonlyMap<string, MailCacheThreadFirstSender>> {
+    return this.withEntry(accountId, (entry) =>
+      entry.cache.readThreadFirstSenders(threadIds),
+    );
+  }
+
+  async readReferencedSenders(
+    accountId: string,
+    messageIds: readonly string[],
+  ): Promise<readonly string[]> {
+    return this.withEntry(accountId, (entry) => entry.cache.readReferencedSenders(messageIds));
+  }
+
+  async hasConversationStart(
+    accountId: string,
+    input: { readonly address: string; readonly after: number },
+  ): Promise<boolean> {
+    return this.withEntry(accountId, (entry) => entry.cache.hasConversationStart(input));
+  }
+
+  async listInboxThreadFirstSenders(
+    accountId: string,
+    isOwnAddress: (address: string) => boolean,
+  ): Promise<readonly MailCacheInboxThreadSender[]> {
+    return this.withEntry(accountId, (entry) =>
+      entry.cache.listInboxThreadFirstSenders(isOwnAddress),
+    );
+  }
+
+  async readSenderBackfillBatch(
+    accountId: string,
+    input: {
+      readonly fromCursor: number;
+      readonly sentCursor: number;
+      readonly window: number;
+      readonly learnFrom: boolean;
+    },
+  ): Promise<MailCacheSenderBackfillBatch> {
+    return this.withEntry(accountId, (entry) => entry.cache.readSenderBackfillBatch(input));
+  }
+
+  /** Every account with its address: the owner's own addresses, and which
+   *  of them the scheduler syncs. */
+  async listAccounts(): Promise<
+    readonly { readonly accountId: string; readonly address: string; readonly connected: boolean }[]
+  > {
+    const accounts = await this.store.listAccounts();
+    return Object.freeze(
+      accounts.map((account) =>
+        Object.freeze({
+          accountId: account.account.accountId,
+          address: account.account.emailAddress,
+          connected: account.status === "connected",
+        }),
+      ),
+    );
   }
 
   /**

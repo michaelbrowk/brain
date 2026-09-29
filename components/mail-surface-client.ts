@@ -1079,12 +1079,17 @@ function readThreadListItem(value: unknown): MailThreadListItem {
   // category travels alone like starred, unlike the paired view fields.
   const hasCategory =
     isRecord(value) && Object.prototype.hasOwnProperty.call(value, "category");
+  // newSender travels alone too, and a server older than the screen reads as
+  // one where nobody is waiting.
+  const hasNewSender =
+    isRecord(value) && Object.prototype.hasOwnProperty.call(value, "newSender");
   if (
     !isExactRecord(value, [
       ...baseFields,
       ...(hasStarred ? ["starred"] : []),
       ...(hasListMessage ? ["listMessage", "sizeBytes"] : []),
       ...(hasCategory ? ["category"] : []),
+      ...(hasNewSender ? ["newSender"] : []),
     ]) ||
     !isAccountId(value.accountId) ||
     !isResourceId(value.threadId) ||
@@ -1106,6 +1111,7 @@ function readThreadListItem(value: unknown): MailThreadListItem {
       value.category !== "people" &&
       value.category !== "notification" &&
       value.category !== "newsletter") ||
+    (hasNewSender && typeof value.newSender !== "boolean") ||
     typeof value.hasAttachments !== "boolean"
   ) {
     throw new Error("invalid mail thread");
@@ -1126,6 +1132,7 @@ function readThreadListItem(value: unknown): MailThreadListItem {
     category: hasCategory
       ? (value.category as MailThreadListItem["category"])
       : "people",
+    newSender: hasNewSender ? (value.newSender as boolean) : false,
   };
 }
 

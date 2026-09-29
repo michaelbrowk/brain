@@ -596,6 +596,146 @@ describe("Brain Mail Unix-socket client", () => {
     });
   });
 
+  it("speaks the new-senders routes with exact requests and exact answers", async () => {
+    const accountId = "account-a0123456789abcdef0123456789abcdef";
+    const decisionId = "decision-a0123456789abcdef0123456789abcdef";
+    const seen: Array<{ method: string; url: string; body: string }> = [];
+    const { socketPath } = await startServer(async (request, response) => {
+      const body = await readBody(request);
+      seen.push({ method: request.method ?? "", url: request.url ?? "", body });
+      if (request.url === "/v1/senders/state") {
+        const enabled = request.method === "PUT" ? JSON.parse(body).enabled : true;
+        writeJson(response, 200, {
+          apiVersion: 1,
+          enabled,
+          enabledAt: enabled ? 5 : null,
+          backfillComplete: enabled,
+          domainScopeRefused: ["gmail.com"],
+        });
+        return;
+      }
+      if (request.url === "/v1/senders/decisions") {
+        writeJson(response, 200, {
+          apiVersion: 1,
+          decisionId,
+          archived: [{ accountId, threadId: "thread_1" }],
+          pending: false,
+        });
+        return;
+      }
+      if (request.url?.startsWith(`/v1/senders/decisions/${decisionId}`)) {
+        writeJson(response, 200, {
+          apiVersion: 1,
+          restored: request.url.endsWith("restore=false")
+            ? []
+            : [{ accountId, threadId: "thread_1" }],
+          pending: false,
+        });
+        return;
+      }
+      writeJson(response, 200, {
+        apiVersion: 1,
+        blocked: [
+          { decisionId, key: "growth.test", scope: "domain", decidedAt: 9, archivedCount: 1 },
+        ],
+      });
+    });
+    const client = createBrainMailClient({ socketPath });
+
+    await expect(client.getSenderScreenState()).resolves.toEqual({
+      apiVersion: 1,
+      enabled: true,
+      enabledAt: 5,
+      backfillComplete: true,
+      domainScopeRefused: ["gmail.com"],
+    });
+    await expect(client.setSenderScreenEnabled(false)).resolves.toMatchObject({
+      enabled: false,
+      enabledAt: null,
+    });
+    await expect(
+      client.decideSender({ address: "news@growth.test", scope: "domain", decision: "block" }),
+    ).resolves.toMatchObject({ decisionId, archived: [{ accountId, threadId: "thread_1" }] });
+    await expect(client.undoSenderDecision(decisionId, { restore: true })).resolves.toMatchObject({
+      restored: [{ accountId, threadId: "thread_1" }],
+    });
+    await expect(client.undoSenderDecision(decisionId, { restore: false })).resolves.toMatchObject({
+      restored: [],
+    });
+    await expect(client.listBlockedSenders()).resolves.toMatchObject({
+      blocked: [{ key: "growth.test", scope: "domain" }],
+    });
+
+    expect(seen).toEqual([
+      { method: "GET", url: "/v1/senders/state", body: "" },
+      { method: "PUT", url: "/v1/senders/state", body: '{"enabled":false}' },
+      {
+        method: "POST",
+        url: "/v1/senders/decisions",
+        body: '{"address":"news@growth.test","scope":"domain","decision":"block"}',
+      },
+      { method: "DELETE", url: `/v1/senders/decisions/${decisionId}`, body: "" },
+      { method: "DELETE", url: `/v1/senders/decisions/${decisionId}?restore=false`, body: "" },
+      { method: "GET", url: "/v1/senders/blocked", body: "" },
+    ]);
+  });
+
+  it("reads a block or an undo that names two hundred of the longest thread ids", async () => {
+    const accountId = "account-a0123456789abcdef0123456789abcdef";
+    const decisionId = "decision-a0123456789abcdef0123456789abcdef";
+    const refs = Array.from({ length: 200 }, (_, index) => ({
+      accountId,
+      threadId: `${index}`.padStart(255, "t"),
+    }));
+    const { socketPath } = await startServer((request, response) => {
+      writeJson(
+        response,
+        200,
+        request.method === "POST"
+          ? { apiVersion: 1, decisionId, archived: refs, pending: true }
+          : { apiVersion: 1, restored: refs, pending: true },
+      );
+    });
+    const client = createBrainMailClient({ socketPath });
+
+    await expect(
+      client.decideSender({ address: "a@b.test", scope: "address", decision: "block" }),
+    ).resolves.toMatchObject({ pending: true });
+    await expect(
+      client.undoSenderDecision(decisionId, { restore: true }),
+    ).resolves.toMatchObject({ pending: true });
+  });
+
+  it("refuses a malformed new-senders request before the socket and relays the screen's refusals", async () => {
+    let requests = 0;
+    const { socketPath } = await startServer((_request, response) => {
+      requests += 1;
+      writeJson(response, 404, {
+        apiVersion: 1,
+        error: { code: "mail_sender_decision_not_found" },
+      });
+    });
+    const client = createBrainMailClient({ socketPath });
+
+    await expect(
+      client.decideSender({
+        address: "news@growth.test",
+        scope: "everyone",
+        decision: "block",
+      } as never),
+    ).rejects.toMatchObject({ status: 400, code: "mail_request_invalid" });
+    await expect(
+      client.undoSenderDecision("decision-1", { restore: true }),
+    ).rejects.toMatchObject({ status: 400, code: "mail_request_invalid" });
+    expect(requests).toBe(0);
+
+    await expect(
+      client.undoSenderDecision("decision-a0123456789abcdef0123456789abcdef", {
+        restore: true,
+      }),
+    ).rejects.toMatchObject({ status: 404, code: "mail_sender_decision_not_found" });
+  });
+
   it("opts into star state while remaining compatible with an old mail service", async () => {
     const accountId = "account-a0123456789abcdef0123456789abcdef";
     let requestedContract: string | undefined;
@@ -618,8 +758,8 @@ describe("Brain Mail Unix-socket client", () => {
 
     await expect(
       createBrainMailClient({ socketPath }).listThreads(accountId),
-    ).resolves.toMatchObject({ items: [{ starred: false }] });
-    expect(requestedContract).toBe("4");
+    ).resolves.toMatchObject({ items: [{ starred: false, newSender: false }] });
+    expect(requestedContract).toBe("5");
   });
 
   it("serializes view and sort only when non-default and reads the tier-3 fields", async () => {

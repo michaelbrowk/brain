@@ -143,6 +143,7 @@ const thread = {
   listMessage: false,
   sizeBytes: 0,
   category: "people",
+  newSender: false,
 } as const;
 
 const threadPage: MailThreadPage = {

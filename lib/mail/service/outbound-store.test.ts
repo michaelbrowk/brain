@@ -1761,6 +1761,150 @@ describe("SMTP ownership handoff and outbox mirror", () => {
     await fixture.store.close();
   });
 
+  it("tells the sent observer once when an SMTP send is accepted", async () => {
+    const sent: unknown[] = [];
+    const fixture = await createStore({ onSent: (value) => sent.push(value) });
+    const imap = submissionFixture({
+      operationId: operationId(26),
+      idempotencyKey: "imap-observed-sent",
+      providerKind: "imap",
+      message: Object.freeze({
+        ...submissionFixture().message,
+        envelope: Object.freeze({
+          from: "me@example.com",
+          to: Object.freeze(["friend@example.net"]),
+          cc: Object.freeze(["copy@example.net"]),
+          bcc: Object.freeze(["hidden@example.net"]),
+        }),
+      }),
+    });
+    await fixture.store.enqueue(imap);
+    let state = (await fixture.store.readSmtpSubmissionState(
+      imap.accountId,
+      imap.operationId,
+    ))!;
+    const attemptId = "attempt-00000000-0000-4000-8000-000000000026";
+    state = await casThrough(
+      fixture.store,
+      state,
+      claimSubmission(state, { attemptId, now: imap.createdAt, leaseMs: 60_000 }),
+    );
+    state = await casThrough(
+      fixture.store,
+      state,
+      markSubmissionDeliveryRisk(state, { attemptId, now: imap.createdAt + 1 }),
+    );
+    expect(sent).toEqual([]);
+    await casThrough(
+      fixture.store,
+      state,
+      recordSmtpOutcome(state, {
+        attemptId,
+        now: imap.createdAt + 2,
+        outcome: {
+          kind: "accepted",
+          responseCode: 250,
+          acceptedRecipients: [
+            ...imap.message.envelope.to,
+            ...imap.message.envelope.cc,
+            ...imap.message.envelope.bcc,
+          ],
+          rejectedRecipients: [],
+        },
+      }),
+    );
+
+    // Blind copies stay blind: the screen learns the visible recipients only.
+    expect(sent).toEqual([
+      {
+        accountId: imap.accountId,
+        to: ["friend@example.net"],
+        cc: ["copy@example.net"],
+      },
+    ]);
+    await fixture.store.close();
+  });
+
+  it("never tells the sent observer about an SMTP send the server refused", async () => {
+    const sent: unknown[] = [];
+    const fixture = await createStore({ onSent: (value) => sent.push(value) });
+    const imap = submissionFixture({
+      operationId: operationId(28),
+      idempotencyKey: "imap-observed-failed",
+      providerKind: "imap",
+    });
+    await fixture.store.enqueue(imap);
+    let state = (await fixture.store.readSmtpSubmissionState(
+      imap.accountId,
+      imap.operationId,
+    ))!;
+    const attemptId = "attempt-00000000-0000-4000-8000-000000000028";
+    state = await casThrough(
+      fixture.store,
+      state,
+      claimSubmission(state, { attemptId, now: imap.createdAt, leaseMs: 60_000 }),
+    );
+    await casThrough(
+      fixture.store,
+      state,
+      recordSmtpOutcome(state, {
+        attemptId,
+        now: imap.createdAt + 1,
+        outcome: {
+          kind: "rejected",
+          responseCode: 550,
+          retryable: false,
+          errorCode: "smtp_recipient_rejected",
+        },
+      }),
+    );
+
+    await expect(fixture.store.readByOperationId(imap.operationId)).resolves.toMatchObject({
+      status: "failed",
+    });
+    expect(sent).toEqual([]);
+    await fixture.store.close();
+  });
+
+  it("tells the sent observer when a Gmail send reaches sent, and never for a failure", async () => {
+    const sent: unknown[] = [];
+    const fixture = await createStore({ onSent: (value) => sent.push(value) });
+    const queued = submissionFixture();
+    const failing = submissionFixture({
+      operationId: operationId(27),
+      idempotencyKey: "gmail-observed-failed",
+    });
+    await fixture.store.enqueue(queued);
+    await fixture.store.enqueue(failing);
+
+    await expect(
+      fixture.store.compareAndSwap(queued.operationId, 0, {
+        ...queued,
+        version: 1,
+        status: "sent",
+        attemptCount: 1,
+        nextAttemptAt: null,
+        providerMessageId: "gmail-message-1",
+        providerThreadId: "gmail-thread-1",
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      fixture.store.compareAndSwap(failing.operationId, 0, {
+        ...failing,
+        version: 1,
+        status: "failed",
+        attemptCount: 1,
+        nextAttemptAt: null,
+        lastErrorCode: "mail_send_request_invalid",
+      }),
+    ).resolves.toBe(true);
+
+    expect(sent).toEqual([
+      { accountId: queued.accountId, to: ["friend@example.net"], cc: [] },
+    ]);
+    await fixture.store.close();
+  });
+
   it("mirrors SMTP acceptance onto the outbox row exactly once", async () => {
     const fixture = await createStore();
     const imap = submissionFixture({
@@ -3760,6 +3904,7 @@ async function createStore(
   options: {
     readonly now?: () => number;
     readonly onIntegrityCheck?: (accountId: string) => void;
+    readonly onSent?: ConstructorParameters<typeof SqliteMailSendStore>[0]["onSent"];
   } = {},
 ): Promise<{
   readonly store: SqliteMailSendStore;

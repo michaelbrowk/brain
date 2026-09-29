@@ -857,8 +857,9 @@ The worker process, patched streaming MailParser/MailSplit limits, sanitizer,
 disk-backed cache, attachment streamer, and malicious corpus are implemented in
 the MIME content slice. The worker cannot share an OS identity, credential
 mount, network namespace, or database access with the transport edge. Content
-format version `8` forces cached pre-verification output to be reparsed before
-reader use. Verified inline CID raster rendering and private downloads are
+format version `9` forces a body cached under an older one to be reparsed
+before reader use: `8` retired pre-verification output, and `9` retired the
+sanitizer that repaired malformed markup differently from a browser. Verified inline CID raster rendering and private downloads are
 implemented; remote images render from the server-side privacy cache as
 described above.
 

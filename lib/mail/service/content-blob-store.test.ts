@@ -92,6 +92,65 @@ describe("atomic account mail blob store", () => {
     ]);
   });
 
+  it("streams an incoming body without holding the lease every other operation waits for", async () => {
+    const fixture = await createStore();
+    const existing = Buffer.from("an attachment a reader is opening");
+    await fixture.store.put(descriptorFor(existing), chunks(existing, 4));
+    const provider = deferred<void>();
+    const incoming = fixture.store.putIncoming(
+      (async function* () {
+        yield Buffer.from("From: a@example.com\r\n");
+        await provider.promise;
+        yield Buffer.from("\r\nslow body");
+      })(),
+      1024,
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+    // The provider has stalled mid-body: reads and other writes go ahead.
+    const read = await Promise.race([
+      collect(fixture.store.read(descriptorFor(existing))),
+      new Promise<"blocked">((resolve) => setTimeout(() => resolve("blocked"), 500)),
+    ]);
+    expect(read).toEqual(existing);
+    const other = Buffer.from("written while the body streams");
+    await fixture.store.put(descriptorFor(other), chunks(other, 5));
+
+    provider.resolve();
+    const body = Buffer.from("From: a@example.com\r\n\r\nslow body");
+    await expect(incoming).resolves.toEqual(descriptorFor(body));
+    expect(await collect(fixture.store.read(descriptorFor(body)))).toEqual(body);
+    // Nothing is left where the body was received.
+    expect(
+      await readFileNames(
+        path.join(path.dirname(fixture.store.directoryPath), "content-incoming"),
+      ),
+    ).toEqual([]);
+  });
+
+  it("clears a received body a stopped process left, and only one that old", async () => {
+    const fixture = await createStore();
+    const incoming = path.join(
+      path.dirname(fixture.store.directoryPath),
+      "content-incoming",
+    );
+    const stale = path.join(incoming, `incoming-${"a".repeat(32)}`);
+    const fresh = path.join(incoming, `incoming-${"b".repeat(32)}`);
+    await writeFile(stale, "left behind", { mode: 0o400 });
+    await writeFile(fresh, "still arriving", { mode: 0o600 });
+    const hourAgo = new Date(Date.now() - 60 * 60_000);
+    await utimes(stale, hourAgo, hourAgo);
+    await fixture.store.close();
+
+    const reopened = new AtomicMailBlobStore({
+      cacheRoot: path.dirname(path.dirname(fixture.store.directoryPath)),
+      accountId: ACCOUNT_ID,
+    });
+    stores.push(reopened);
+    await reopened.initialize();
+    expect(await readFileNames(incoming)).toEqual([path.basename(fresh)]);
+  });
+
   it("removes an incoming temporary file when the producer aborts", async () => {
     const fixture = await createStore();
     const aborted = new DOMException("cancelled", "AbortError");

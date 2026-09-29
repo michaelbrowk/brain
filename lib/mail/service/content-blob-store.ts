@@ -33,6 +33,13 @@ const READ_CHUNK_BYTES = 64 * 1024;
 const SQLITE_BUSY_TIMEOUT_MS = 30_000;
 const MUTATION_LOCK_FILE = ".content-blobs.lock.sqlite3";
 const DEFAULT_MIN_CACHE_FREE_BYTES = MAIL_RESOURCE_LIMITS.maxTemporaryBytes;
+const INCOMING_DIRECTORY = "content-incoming";
+const INCOMING_FILE = /^incoming-[a-f0-9]{32}$/;
+/**
+ * A received body older than this belongs to a process that stopped: a
+ * download that long would have outlived its worker lease three times over.
+ */
+const INCOMING_STALE_MS = 3 * MAIL_RESOURCE_LIMITS.workerLeaseMs;
 
 /**
  * A process-local queue complements SQLite's cross-process writer lock. Without
@@ -55,8 +62,18 @@ export class MailBlobStoreError extends Error {
   }
 }
 
+/**
+ * A body `receiveIncoming` has on disk but not yet published. `discard`
+ * removes it if it is still there; publishing it moves it away.
+ */
+export interface MailIncomingBlobReceipt {
+  readonly descriptor: MailBlobDescriptor;
+  discard(): Promise<void>;
+}
+
 export interface MailBlobMutationLease {
   has(descriptor: MailBlobDescriptor): Promise<boolean>;
+  publishIncoming(receipt: MailIncomingBlobReceipt): Promise<MailBlobDescriptor>;
   discardCorrupt(
     descriptor: MailBlobDescriptor,
   ): Promise<"valid" | "metadata_mismatch" | "missing" | "discarded">;
@@ -104,8 +121,11 @@ export class AtomicMailBlobStore implements MailIncomingBlobStorePort {
   private readonly cacheRoot: string;
   private readonly accountDirectory: string;
   private readonly mutationLockPath: string;
+  private readonly incomingDirectory: string;
   private readonly maxCacheBytes: number;
   private readonly minCacheFreeBytes: number;
+  /** The file each receipt this store handed out stands for. */
+  private readonly receipts = new WeakMap<MailIncomingBlobReceipt, string>();
   private initialized = false;
   private closed = false;
   private mutationDatabase: DatabaseSync | null = null;
@@ -122,6 +142,7 @@ export class AtomicMailBlobStore implements MailIncomingBlobStorePort {
     this.accountId = validateAccountId(options.accountId);
     this.accountDirectory = path.join(this.cacheRoot, this.accountId);
     this.directoryPath = path.join(this.accountDirectory, "content-blobs");
+    this.incomingDirectory = path.join(this.accountDirectory, INCOMING_DIRECTORY);
     // This SQLite lease deliberately belongs to the private state directory,
     // outside account directories and the strict cache-root inventory. A
     // capacity reservation must serialize writers from every account, while
@@ -145,7 +166,9 @@ export class AtomicMailBlobStore implements MailIncomingBlobStorePort {
     await ensurePrivateDirectory(this.cacheRoot);
     await ensurePrivateDirectory(this.accountDirectory);
     await ensurePrivateDirectory(this.directoryPath);
+    await ensurePrivateDirectory(this.incomingDirectory);
     await this.assertTrustedDirectories();
+    await this.removeStaleIncomingFiles();
     let lockProof: FileHandle | null = null;
     try {
       await ensurePrivateFile(this.mutationLockPath);
@@ -213,15 +236,55 @@ export class AtomicMailBlobStore implements MailIncomingBlobStorePort {
     chunks: AsyncIterable<Uint8Array>,
     maxBytes: number,
   ): Promise<MailBlobDescriptor> {
+    const receipt = await this.receiveIncoming(chunks, maxBytes);
+    try {
+      return await this.withCapacityReservation(
+        receipt.descriptor.bytes,
+        undefined,
+        async (lease) => lease.publishIncoming(receipt),
+      );
+    } finally {
+      await receipt.discard();
+    }
+  }
+
+  /**
+   * Streams a body to disk without the lease every other blob operation
+   * waits for, into a directory of its own beside the blobs. A provider can
+   * take its time over a body, and while it streamed under the lease the
+   * reader's attachments and pictures on every account waited for it. The
+   * lease is taken afterwards, only to publish (`lease.publishIncoming`),
+   * and the capacity check comes then, against the size the body turned out
+   * to be. Before streaming only the disk's free space is checked.
+   */
+  async receiveIncoming(
+    chunks: AsyncIterable<Uint8Array>,
+    maxBytes: number,
+  ): Promise<MailIncomingBlobReceipt> {
     if (!isAsyncIterable(chunks)) {
       throw new MailBlobStoreError("mail_blob_request_invalid");
     }
     const limit = incomingByteLimit(maxBytes);
-    return this.withCapacityReservation(
-      limit,
-      undefined,
-      async (lease) => lease.putIncoming(chunks, limit),
+    await this.requireInitialized();
+    const filePath = path.join(
+      this.incomingDirectory,
+      `incoming-${randomBytes(16).toString("hex")}`,
     );
+    let descriptor: MailBlobDescriptor;
+    try {
+      await this.assertFreeSpace(limit);
+      descriptor = await writeIncomingFile(filePath, chunks, limit);
+    } catch (error) {
+      throw blobStoreError(error);
+    }
+    const receipt: MailIncomingBlobReceipt = Object.freeze({
+      descriptor,
+      discard: async () => {
+        await unlink(filePath).catch(() => undefined);
+      },
+    });
+    this.receipts.set(receipt, filePath);
+    return receipt;
   }
 
   /**
@@ -430,6 +493,19 @@ export class AtomicMailBlobStore implements MailIncomingBlobStorePort {
         has: (descriptor: MailBlobDescriptor) => {
           return track(async () => this.hasUnlocked(blobDescriptor(descriptor)));
         },
+        publishIncoming: (receipt: MailIncomingBlobReceipt) => {
+          return track(async () => {
+            const filePath = this.receipts.get(receipt);
+            if (filePath === undefined) {
+              throw new MailBlobStoreError("mail_blob_request_invalid");
+            }
+            this.receipts.delete(receipt);
+            return this.publishWrittenFileUnlocked(
+              filePath,
+              blobDescriptor(receipt.descriptor),
+            );
+          });
+        },
         discardCorrupt: (descriptor: MailBlobDescriptor) => {
           return track(async () =>
             this.discardCorruptUnlocked(blobDescriptor(descriptor)),
@@ -613,51 +689,35 @@ export class AtomicMailBlobStore implements MailIncomingBlobStorePort {
     if (!isAsyncIterable(chunks)) {
       throw new MailBlobStoreError("mail_blob_request_invalid");
     }
-
-    let temporaryPath = this.temporaryPath(randomBytes(32).toString("hex"));
-    let handle: FileHandle | null = null;
-    let temporaryExists = true;
-    const hash = createHash("sha256");
-    let bytes = 0;
+    const writtenPath = this.temporaryPath(randomBytes(32).toString("hex"));
+    let descriptor: MailBlobDescriptor;
     try {
-      handle = await open(
-        temporaryPath,
-        constants.O_WRONLY |
-          constants.O_CREAT |
-          constants.O_EXCL |
-          constants.O_NOFOLLOW,
-        0o600,
-      );
-      for await (const candidate of chunks) {
-        if (!(candidate instanceof Uint8Array)) {
-          throw new MailBlobStoreError("mail_blob_request_invalid");
-        }
-        if (candidate.byteLength === 0) continue;
-        if (candidate.byteLength > maxBytes - bytes) {
-          throw new MailBlobStoreError("mail_blob_integrity_failed");
-        }
-        const chunk = Buffer.from(
-          candidate.buffer,
-          candidate.byteOffset,
-          candidate.byteLength,
-        );
-        hash.update(chunk);
-        await writeComplete(handle, chunk);
-        bytes += chunk.byteLength;
-      }
+      descriptor = await writeIncomingFile(writtenPath, chunks, maxBytes);
+    } catch (error) {
+      throw blobStoreError(error);
+    }
+    return this.publishWrittenFileUnlocked(writtenPath, descriptor);
+  }
 
-      const descriptor = blobDescriptor({
-        sha256: hash.digest("hex"),
-        bytes,
-      });
-      await handle.sync();
-      await handle.close();
-      handle = null;
-      await chmod(temporaryPath, 0o400);
-
-      const finalizedTemporaryPath = this.temporaryPath(descriptor.sha256);
-      await rename(temporaryPath, finalizedTemporaryPath);
-      temporaryPath = finalizedTemporaryPath;
+  /**
+   * Publishes a file `writeIncomingFile` finished, by its content hash. The
+   * file is moved into this directory under a temporary name first, so an
+   * interruption leaves only what `recoverInterruptedPublicationsUnlocked`
+   * already knows how to clear. Runs under the lease.
+   */
+  private async publishWrittenFileUnlocked(
+    writtenPath: string,
+    descriptor: MailBlobDescriptor,
+  ): Promise<MailBlobDescriptor> {
+    const temporaryPath = this.temporaryPath(descriptor.sha256);
+    try {
+      await rename(writtenPath, temporaryPath);
+    } catch (error) {
+      await unlink(writtenPath).catch(() => undefined);
+      throw blobStoreError(error);
+    }
+    let temporaryExists = true;
+    try {
       await this.assertTrustedDirectories();
 
       if (await this.hasUnlocked(descriptor)) {
@@ -692,7 +752,6 @@ export class AtomicMailBlobStore implements MailIncomingBlobStorePort {
       }
       return descriptor;
     } catch (error) {
-      await handle?.close().catch(() => undefined);
       if (temporaryExists) await unlink(temporaryPath).catch(() => undefined);
       throw blobStoreError(error);
     }
@@ -931,11 +990,16 @@ export class AtomicMailBlobStore implements MailIncomingBlobStorePort {
     if (usedBytes > this.maxCacheBytes - additionalBytes) {
       throw new MailBlobStoreError("mail_blob_cache_capacity_exhausted");
     }
+    await this.assertFreeSpace(additionalBytes);
+  }
 
-    // statfs is necessarily a preflight: another service outside this lease
-    // can consume disk space after the check. We still fail closed when the
-    // floor is already unavailable and reserve the incoming upper bound while
-    // this store's root SQLite lease is held.
+  /**
+   * statfs is necessarily a preflight: another service can consume disk
+   * space after the check. We still fail closed when the floor is already
+   * unavailable. Under the lease it reserves the incoming upper bound between
+   * cooperating writers; before a body streams it is the check that one fits.
+   */
+  private async assertFreeSpace(additionalBytes: number): Promise<void> {
     let filesystem;
     try {
       filesystem = await statfs(this.cacheRoot);
@@ -945,6 +1009,34 @@ export class AtomicMailBlobStore implements MailIncomingBlobStorePort {
     const availableBytes = filesystemBytes(filesystem.bavail, filesystem.bsize);
     if (availableBytes < this.minCacheFreeBytes + additionalBytes) {
       throw new MailBlobStoreError("mail_blob_cache_capacity_exhausted");
+    }
+  }
+
+  /**
+   * A received body is published within its download's lease, or discarded.
+   * One still here long after that belongs to a process that stopped between
+   * the two. Anything younger may be a download in flight in this process,
+   * which another instance of this store, such as the capacity reclaimer's,
+   * must leave alone.
+   */
+  private async removeStaleIncomingFiles(): Promise<void> {
+    const staleBefore = Date.now() - INCOMING_STALE_MS;
+    for (const entry of await readdir(this.incomingDirectory, { withFileTypes: true })) {
+      if (!INCOMING_FILE.test(entry.name) || !entry.isFile()) {
+        throw new MailBlobStoreError("mail_blob_integrity_failed");
+      }
+      const filePath = path.join(this.incomingDirectory, entry.name);
+      let fileStat;
+      try {
+        fileStat = await secureFileStat(filePath);
+      } catch (error) {
+        if (isFileError(error, "ENOENT")) continue;
+        throw error;
+      }
+      if (fileStat.mtimeMs > staleBefore) continue;
+      await unlinkVerifiedPath(filePath, fileStat).catch((error: unknown) => {
+        if (!isFileError(error, "ENOENT")) throw error;
+      });
     }
   }
 
@@ -1016,8 +1108,10 @@ export class AtomicMailBlobStore implements MailIncomingBlobStorePort {
     await assertPrivateDirectory(this.cacheRoot);
     await assertPrivateDirectory(this.accountDirectory);
     await assertPrivateDirectory(this.directoryPath);
+    await assertPrivateDirectory(this.incomingDirectory);
     await assertContained(this.cacheRoot, this.accountDirectory);
     await assertContained(this.accountDirectory, this.directoryPath);
+    await assertContained(this.accountDirectory, this.incomingDirectory);
     await assertContained(path.dirname(this.cacheRoot), this.cacheRoot);
   }
 
@@ -1091,6 +1185,56 @@ export class AtomicMailBlobStore implements MailIncomingBlobStorePort {
       throw new MailBlobStoreError("mail_blob_store_unavailable");
     }
     return this.mutationDatabase;
+  }
+}
+
+/**
+ * Streams `chunks` into a new private file at `filePath`, hashing as it goes
+ * and refusing the chunk that would cross `maxBytes`, then syncs it and makes
+ * it read-only. On any failure the file is removed; on success the caller
+ * owns it.
+ */
+async function writeIncomingFile(
+  filePath: string,
+  chunks: AsyncIterable<Uint8Array>,
+  maxBytes: number,
+): Promise<MailBlobDescriptor> {
+  let handle: FileHandle | null = null;
+  const hash = createHash("sha256");
+  let bytes = 0;
+  try {
+    handle = await open(
+      filePath,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
+    for await (const candidate of chunks) {
+      if (!(candidate instanceof Uint8Array)) {
+        throw new MailBlobStoreError("mail_blob_request_invalid");
+      }
+      if (candidate.byteLength === 0) continue;
+      if (candidate.byteLength > maxBytes - bytes) {
+        throw new MailBlobStoreError("mail_blob_integrity_failed");
+      }
+      const chunk = Buffer.from(
+        candidate.buffer,
+        candidate.byteOffset,
+        candidate.byteLength,
+      );
+      hash.update(chunk);
+      await writeComplete(handle, chunk);
+      bytes += chunk.byteLength;
+    }
+    const descriptor = blobDescriptor({ sha256: hash.digest("hex"), bytes });
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await chmod(filePath, 0o400);
+    return descriptor;
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    await unlink(filePath).catch(() => undefined);
+    throw error;
   }
 }
 

@@ -1822,6 +1822,67 @@ describe("MailContentCoordinator", () => {
     expect(startedAt[2]! - startedAt[1]!).toBeGreaterThanOrEqual(280);
   });
 
+  it("serves the reader's attachment while a prefetch is still streaming a body", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    seedInbox(fixture.caches[0]!, ["slow"], { baseSentAt: 50 });
+    const download = deferred<void>();
+    const runner = new FakeMailContentWorkRunner([
+      // The owner's earlier open of the fixture letter, with an attachment.
+      (input) =>
+        publish(input, {
+          text: Buffer.from("body"),
+          attachment: Buffer.from("attachment bytes"),
+          filename: "a.pdf",
+        }),
+      // The prefetch of an older letter, from a provider that stalls.
+      async (input) => {
+        async function* slowProvider(): AsyncIterable<Uint8Array> {
+          yield Buffer.from("From: a\r\n");
+          await download.promise;
+          yield Buffer.from("\r\nbody");
+        }
+        await input.cache.incomingBlobStore(input.lease).putIncoming(slowProvider(), 1024);
+        await publish(input, { text: Buffer.from("prefetched") });
+      },
+    ]);
+    const coordinator = fixture.coordinator(runner);
+    await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID });
+    let attachmentId = "";
+    await vi.waitFor(async () => {
+      const content = await coordinator.getContent({
+        accountId: ACCOUNT_ID,
+        messageId: MESSAGE_ID,
+      });
+      if (content.state !== "ready") throw new Error("not ready yet");
+      attachmentId = content.attachments[0]!.attachmentId;
+    });
+    await coordinator.runBackgroundPrefetchStep(
+      ACCOUNT_ID,
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(2));
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+
+    const read = coordinator
+      .downloadAttachment({ accountId: ACCOUNT_ID, attachmentId })
+      .then(async (value) => {
+        const bytes = await collectBytes(value.body);
+        await value.dispose();
+        return bytes;
+      });
+    const outcome = await Promise.race([
+      read,
+      new Promise<"blocked">((resolve) => setTimeout(() => resolve("blocked"), 1_000)),
+    ]);
+    expect(outcome).toEqual(Buffer.from("attachment bytes"));
+    download.resolve();
+    await vi.waitFor(async () => {
+      await expect(
+        statesOf(coordinator, ["message-thread-slow"], "ready"),
+      ).resolves.toHaveLength(1);
+    });
+  });
+
   it("claims afresh a prefetch whose lease ran out while it waited its turn", async () => {
     let now = 1_000;
     const fixture = await createFixture([ACCOUNT_ID]);

@@ -644,9 +644,11 @@ export class SqliteMailContentCache {
   }
 
   /**
-   * Gives a raw-source adapter a lease-bound incoming store. Publishing raw
-   * MIME and recording its staged reference happen under the same global
-   * capacity reservation, before the provider is allowed to stream bytes.
+   * Gives a raw-source adapter a lease-bound incoming store. The provider
+   * streams into a received file outside the blob store's lease; publishing
+   * the raw MIME and recording its staged reference then happen together,
+   * under the lease and a capacity reservation for the size it turned out to
+   * be.
    */
   incomingBlobStore(leaseInput: MailContentLease): MailIncomingBlobStorePort & {
     readonly accountId: string;
@@ -672,28 +674,34 @@ export class SqliteMailContentCache {
     if (!isAsyncIterable(chunks)) throw invalidRequest();
     const maximumBytes = incomingByteLimit(maxBytes);
     const requestedAt = this.readCurrentTime();
-    return mapContentOperation(async () =>
-      this.blobStore.withCapacityReservation(
-        maximumBytes,
-        () => this.reclaimCapacity(requestedAt, maximumBytes),
-        async (blobLease) => {
-          await this.serialized(async () => {
-            this.transaction((database) => {
-              assertLiveLease(database, lease, requestedAt, this.contentFormatVersion);
+    await this.serialized(async () => {
+      this.transaction((database) => {
+        assertLiveLease(database, lease, requestedAt, this.contentFormatVersion);
+      });
+    });
+    return mapContentOperation(async () => {
+      const receipt = await this.blobStore.receiveIncoming(chunks, maximumBytes);
+      try {
+        const bytes = receipt.descriptor.bytes;
+        return await this.blobStore.withCapacityReservation(
+          bytes,
+          () => this.reclaimCapacity(requestedAt, bytes),
+          async (blobLease) => {
+            const descriptor = await blobLease.publishIncoming(receipt);
+            const completedAt = Math.max(requestedAt, this.readCurrentTime());
+            await this.serialized(async () => {
+              this.transaction((database) => {
+                assertLiveLease(database, lease, completedAt, this.contentFormatVersion);
+                stageDescriptor(database, lease, descriptor, completedAt);
+              });
             });
-          });
-          const descriptor = await blobLease.putIncoming(chunks, maximumBytes);
-          const completedAt = Math.max(requestedAt, this.readCurrentTime());
-          await this.serialized(async () => {
-            this.transaction((database) => {
-              assertLiveLease(database, lease, completedAt, this.contentFormatVersion);
-              stageDescriptor(database, lease, descriptor, completedAt);
-            });
-          });
-          return descriptor;
-        },
-      ),
-    );
+            return descriptor;
+          },
+        );
+      } finally {
+        await receipt.discard();
+      }
+    });
   }
 
   async commitReady(input: {

@@ -3151,8 +3151,9 @@ function draftMatchesSubmission(
             },
       // With files, the message is rebuilt with every file empty: the parts
       // around them are compared byte for byte below and each file's own
-      // body is read against the mutation's base64, so the proof never holds
-      // a second message at the attachment cap (`rawCarriesFiles`).
+      // body is compared, a chunk at a time, with the writer's encoding of
+      // the mutation's base64, so the proof never holds a second message at
+      // the attachment cap (`rawCarriesFiles`).
       attachments: input.attachments.map((attachment) => ({
         filename: attachment.filename,
         mimeType: attachment.mimeType,
@@ -3165,7 +3166,10 @@ function draftMatchesSubmission(
     const raw = submission.message.rawRfc2822;
     // The bytes are compared to the bytes, in constant time neither before nor
     // now: what this decides is whether a replay rebuilt the same message, and
-    // both sides are this service's own.
+    // both sides are this service's own. With files it is still bytes to
+    // bytes, the files' bodies included (`base64BodyCarries` never decodes the
+    // message's side), so a body only a lenient decoder reads as the file is
+    // refused. The digest is read off the stored message itself.
     return (
       equalEnvelope(built.envelope, submission.message.envelope) &&
       raw.byteLength === submission.message.rawRfc2822Bytes &&
@@ -3191,7 +3195,7 @@ const PART_HEADER_END = Buffer.from("\r\n\r\n", "ascii");
  * first two blank lines in the message end its own header and the text part's
  * (base64 lines never make one), so the files' places are the third blank line
  * on, one per file. Everything between them is compared exactly and each body
- * is read by `base64BodyCarries`, at the length the writer gives that file.
+ * is compared by `base64BodyCarries`, at the length the writer gives that file.
  */
 function rawCarriesFiles(
   skeleton: Buffer,

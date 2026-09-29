@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -481,6 +482,143 @@ describe("provider-neutral draft service", () => {
         fixture.store.commitDraftSend(mutation, fingerprintMailDraftMutation(mutation), honest, 100),
       ).resolves.toMatchObject({ created: true, operationId: SEND_OPERATION_ID });
       await fixture.store.close();
+    });
+
+    // THE PROOF READS A FILE'S BODY THE WAY A RECIPIENT DOES. A lenient
+    // decoder takes the URL-safe alphabet, skips junk and stops at `=`, so a
+    // body a strict RFC 2045 parser reads as nothing could pass a proof that
+    // decoded it. The proof compares the wrapped base64 byte for byte against
+    // the service's own encoding of the file, a chunk at a time, instead.
+    describe("reading each file's body byte for byte", () => {
+      /** Bytes with every base64 character in them, cheap and repeatable. */
+      const varied = (length: number) => {
+        const bytes = Buffer.alloc(length);
+        let seed = 7;
+        for (let index = 0; index < length; index += 1) {
+          seed = (seed * 1_103_515_245 + 12_345) >>> 0;
+          bytes[index] = seed >>> 24;
+        }
+        return bytes;
+      };
+
+      /** The service's own submission for `bytes`, written over by `forge`
+       *  on its raw message (latin1, so a byte is a character) with its
+       *  digests redone, so the proof alone stands between it and the row. */
+      async function commitForged(
+        bytes: Buffer,
+        forge: (raw: string, body: { readonly start: number; readonly end: number }) => string,
+      ): Promise<unknown> {
+        const fixture = await createFixture();
+        await fixture.service.create(
+          { ...createInput(), to: "friend@example.test", text: "Attached." },
+          requestContext(),
+        );
+        const draft = await fixture.store.readDraft(ACCOUNT_ID, DRAFT_ID);
+        if (draft === null) throw new Error("missing draft");
+        const file = {
+          filename: "f.bin",
+          mimeType: "application/octet-stream",
+          dataBase64: bytes.toString("base64"),
+        };
+        const mutation = validateMailDraftMutationInput(sendMutation({ attachments: [file] }));
+        if (mutation.kind !== "send") throw new Error("not a send");
+        const honest = createMailSendSubmissionProposal({
+          account: gmailAccount(),
+          input: mailSendInputFromDraft(draft, mutation.sendIdempotencyKey, [file]),
+          reply: null,
+          operationId: SEND_OPERATION_ID,
+          createdAt: 100,
+        });
+        const raw = honest.message.rawRfc2822.toString("latin1");
+        // The file's body starts after the third blank line (the message's
+        // header, the text part's, the file part's) and ends at the next
+        // delimiter.
+        let start = 0;
+        for (let blank = 0; blank < 3; blank += 1) start = raw.indexOf("\r\n\r\n", start) + 4;
+        const end = raw.indexOf("\r\n--", start);
+        const forgedRaw = Buffer.from(forge(raw, { start, end }), "latin1");
+        const submission = {
+          ...honest,
+          message: {
+            ...honest.message,
+            rawRfc2822: forgedRaw,
+            rawRfc2822Bytes: forgedRaw.byteLength,
+            rawRfc2822Sha256: createHash("sha256").update(forgedRaw).digest("hex"),
+          },
+        };
+        try {
+          return await fixture.store.commitDraftSend(
+            mutation,
+            fingerprintMailDraftMutation(mutation),
+            submission,
+            100,
+          );
+        } catch (error) {
+          return error;
+        } finally {
+          await fixture.store.close();
+        }
+      }
+      const refused = new MailDraftError("mail_draft_idempotency_conflict");
+      /** Moves the line break after line `line` of the body one column on. */
+      const moveBreak = (line: number) => (raw: string, body: { start: number; end: number }) => {
+        const lines = raw.slice(body.start, body.end).split("\r\n");
+        lines[line] = lines[line]! + lines[line + 1]!.slice(0, 1);
+        lines[line + 1] = lines[line + 1]!.slice(1);
+        return raw.slice(0, body.start) + lines.join("\r\n") + raw.slice(body.end);
+      };
+
+      it("commits an honest file of about 100 KB, four chunks of lines", async () => {
+        await expect(commitForged(varied(100_000), (raw) => raw)).resolves.toMatchObject({
+          created: true,
+        });
+      });
+
+      it("refuses the URL-safe alphabet in place of + and /", async () => {
+        const bytes = Buffer.alloc(300);
+        for (let index = 0; index < bytes.length; index += 3) bytes.set([0xfb, 0xef, 0xff], index);
+        expect(bytes.toString("base64").startsWith("++//")).toBe(true);
+        await expect(
+          commitForged(bytes, (raw, body) =>
+            raw.slice(0, body.start) +
+            raw.slice(body.start, body.end).replace(/\+/g, "-").replace(/\//g, "_") +
+            raw.slice(body.end),
+          ),
+        ).resolves.toEqual(refused);
+      });
+
+      it("refuses padding written as other bytes, and trailing bits spelled otherwise", async () => {
+        await expect(
+          commitForged(Buffer.from("A"), (raw) => raw.replace("QQ==\r\n--", "QQ\u0000\u0000\r\n--")),
+        ).resolves.toEqual(refused);
+        await expect(
+          commitForged(Buffer.from("A"), (raw) => raw.replace("QQ==\r\n--", "QR==\r\n--")),
+        ).resolves.toEqual(refused);
+      });
+
+      it("refuses one character changed in the second chunk of lines", async () => {
+        await expect(
+          commitForged(varied(100_000), (raw, body) => {
+            const at = body.start + 600 * 78 + 10;
+            const swapped = raw[at] === "A" ? "B" : "A";
+            return raw.slice(0, at) + swapped + raw.slice(at + 1);
+          }),
+        ).resolves.toEqual(refused);
+      });
+
+      it("refuses a line break moved one column, inside a chunk and at a chunk's edge", async () => {
+        await expect(commitForged(varied(100_000), moveBreak(3))).resolves.toEqual(refused);
+        await expect(commitForged(varied(100_000), moveBreak(511))).resolves.toEqual(refused);
+      });
+
+      it("refuses a closing delimiter changed after the last file", async () => {
+        await expect(
+          commitForged(varied(1_000), (raw) => {
+            const at = raw.lastIndexOf("--\r\n");
+            return raw.slice(0, at) + "-!" + raw.slice(at + 2);
+          }),
+        ).resolves.toEqual(refused);
+      });
     });
 
     it("refuses files the codec refuses before anything is built", async () => {

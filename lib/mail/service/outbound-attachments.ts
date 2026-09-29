@@ -28,9 +28,9 @@ const BASE64_CHUNK_SOURCE_BYTES = BASE64_LINE_SOURCE_BYTES * 512;
 const CRLF = Buffer.from("\r\n", "ascii");
 
 /**
- * Deterministic, because `draftMatchesSubmission` rebuilds the whole message
- * and compares its bytes to the stored ones. A random boundary would make
- * every replay check fail.
+ * Deterministic, because `draftMatchesSubmission` rebuilds the message (whole
+ * without files, around them with files) and compares its bytes to the stored
+ * ones. A random boundary would make every replay check fail.
  */
 export function multipartBoundary(messageId: string): string {
   const digest = createHash("sha256").update(messageId).digest("hex").slice(0, 32);
@@ -123,40 +123,42 @@ export function encodeBase64Body(bytes: Buffer): Buffer {
 }
 
 /**
- * Whether a wrapped base64 body in a finished message carries the same bytes
- * as a file's own base64, read without building either in full.
+ * Whether a wrapped base64 body in a finished message is, byte for byte, the
+ * body this writer makes of a file's own base64, read without building either
+ * in full.
  *
  * The draft lane's replay proof used to rebuild the whole message and compare
  * it byte for byte. With the compose sheet's files that rebuild is a second
  * message at the attachment cap inside the same held turn, measured at 50 MiB
  * over the lane's own peak and past `MemoryHigh`. So the parts around the files
- * are still rebuilt and compared exactly, and each file's body is read here: a
- * line break after every full 76-character line, and the two decoded a whole
- * number of lines at a time, so neither side ever stands in memory at full
- * size. 76 characters are 57 bytes, which is why line `k` of the message and
- * characters `76k` onward of the file decode to the same bytes whatever the
- * file's own base64 spelled its last bits as.
+ * are still rebuilt and compared exactly, and each file's body is compared
+ * here, 512 lines at a time: that slice of the file is decoded and written
+ * again by `writeBase64Body`, the writer's own wrapping, and the message's
+ * bytes must be those bytes, with a line break at every chunk's edge but the
+ * last. The message side is never decoded. A decoder is lenient (Node's takes
+ * the URL-safe alphabet, skips junk and stops at `=`), so a body it reads as
+ * the file could be one a recipient's strict parser reads as nothing; the
+ * bytes cannot. 512 lines are 38,912 characters of the file, a whole number of
+ * base64 groups, so each slice decodes on its own.
  */
 export function base64BodyCarries(body: Buffer, dataBase64: string): boolean {
   const stride = BASE64_LINE_LENGTH + CRLF.byteLength;
-  for (let at = BASE64_LINE_LENGTH; at < body.byteLength; at += stride) {
-    if (body[at] !== 0x0d || body[at + 1] !== 0x0a) return false;
-  }
   const lines = 512;
   for (let line = 0; line * stride < body.byteLength; line += lines) {
-    const fromMessage = Buffer.from(
-      body
-        .subarray(line * stride, Math.min(body.byteLength, (line + lines) * stride))
-        .toString("latin1"),
-      "base64",
-    );
-    const fromFile = Buffer.from(
+    const decoded = Buffer.from(
       dataBase64.slice(line * BASE64_LINE_LENGTH, (line + lines) * BASE64_LINE_LENGTH),
       "base64",
     );
-    const same = fromMessage.equals(fromFile);
-    fromMessage.fill(0);
-    fromFile.fill(0);
+    const expected = Buffer.alloc(base64BodyLength(decoded.byteLength));
+    writeBase64Body(expected, 0, decoded);
+    decoded.fill(0);
+    const at = line * stride;
+    const end = at + expected.byteLength;
+    const same =
+      end <= body.byteLength &&
+      body.subarray(at, end).equals(expected) &&
+      (end === body.byteLength || (body[end] === 0x0d && body[end + 1] === 0x0a));
+    expected.fill(0);
     if (!same) return false;
   }
   return true;

@@ -113,6 +113,25 @@ describe("the draft door's send route", () => {
     expect(sendDraft).not.toHaveBeenCalled();
   });
 
+  it("answers a set exactly at the cap but refused for something else as the files' own 400", async () => {
+    // At the cap is within it: the size is not what is wrong, so the
+    // sentence must not say the files are too large.
+    const response = await post(
+      mutation({
+        attachments: [
+          file({
+            mimeType: "Application/PDF",
+            dataBase64: payloadOf(MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes),
+          }),
+        ],
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(await refusal(response)).toBe("mail_send_attachments_invalid");
+    expect(sendDraft).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["one file past the count cap", () => Array.from({ length: 11 }, () => file())],
     ["base64 that is not base64", () => [file({ dataBase64: "!!!=" })]],

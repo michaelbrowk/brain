@@ -104,6 +104,12 @@ export class MailBackgroundSyncScheduler {
   private readonly syncBackoffUntil = new Map<string, number>();
   private readonly providers = new Map<string, MailBackgroundSyncProvider | null>();
   private readonly emptyPasses = new Map<string, number>();
+  /**
+   * Accounts whose current pass has seen a change so far. A pass is every
+   * visit from the one that was due to the one that rests, however many
+   * continuation visits the cache steps add, and it is counted once.
+   */
+  private readonly passChanged = new Set<string>();
   /** Accounts IDLE asked for while a pass was in flight. */
   private readonly requested = new Set<string>();
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -190,6 +196,7 @@ export class MailBackgroundSyncScheduler {
     this.syncBackoffUntil.clear();
     this.providers.clear();
     this.emptyPasses.clear();
+    this.passChanged.clear();
     this.requested.clear();
   }
 
@@ -353,7 +360,12 @@ export class MailBackgroundSyncScheduler {
       }
     }
     this.accountQueue.splice(0, this.accountQueue.length, ...retained);
-    for (const state of [this.nextEligibleAt, this.syncBackoffUntil, this.emptyPasses]) {
+    for (const state of [
+      this.nextEligibleAt,
+      this.syncBackoffUntil,
+      this.emptyPasses,
+      this.passChanged,
+    ]) {
       for (const accountId of state.keys()) {
         if (!active.has(accountId)) state.delete(accountId);
       }
@@ -381,7 +393,6 @@ export class MailBackgroundSyncScheduler {
       let syncHasMore = false;
       let syncSucceeded = false;
       if ((this.syncBackoffUntil.get(accountId) ?? 0) <= Date.now()) {
-        let changed = false;
         try {
           const step = validateBackgroundSyncStep(
             await this.port.runBackgroundSyncStep(
@@ -395,13 +406,13 @@ export class MailBackgroundSyncScheduler {
             step.result.status === "idle" || step.result.status === "syncing";
           // A new generation still being written counts as a change even on
           // a page that happened to carry no thread.
-          changed =
-            step.result.changedCount > 0 || step.result.status === "syncing";
+          if (step.result.changedCount > 0 || step.result.status === "syncing") {
+            this.passChanged.add(accountId);
+          }
         } catch {
           if (signal.aborted) return false;
           this.syncBackoffUntil.set(accountId, Date.now() + this.intervalMs);
         }
-        this.recordSyncOutcome(accountId, changed);
       }
       if (signal.aborted) return false;
       // Straight after the sync rather than after the cache steps below, so
@@ -460,6 +471,7 @@ export class MailBackgroundSyncScheduler {
       if (syncHasMore || privacyHasMore || indexHasMore || sendersHasMore) {
         this.accountQueue.push(accountId);
       } else {
+        this.recordPassOutcome(accountId);
         this.nextEligibleAt.set(accountId, Date.now() + this.cadenceOf(accountId));
       }
     }
@@ -467,9 +479,12 @@ export class MailBackgroundSyncScheduler {
     return hasContinuation;
   }
 
-  /** A failed pass saw no change either, so it counts toward the backoff. */
-  private recordSyncOutcome(accountId: string, changed: boolean): void {
-    if (changed) {
+  /**
+   * One finished pass. A pass whose sync failed, or rested for a provider
+   * backoff, saw no change either, so it counts toward the Gmail backoff.
+   */
+  private recordPassOutcome(accountId: string): void {
+    if (this.passChanged.delete(accountId)) {
       this.emptyPasses.delete(accountId);
       return;
     }

@@ -758,6 +758,43 @@ describe("per-provider sync cadence", () => {
     await scheduler.stop();
   });
 
+  it("counts a pass once, however many continuation visits the cache takes", async () => {
+    vi.useFakeTimers({ now: 0 });
+    const calls: number[] = [];
+    let prefetches = 0;
+    const scheduler = new MailBackgroundSyncScheduler(
+      {
+        listAccountIds: async () => [accountA],
+        listSyncAccounts: async () => [{ accountId: accountA, providerKind: "gmail" }],
+        runBackgroundSyncStep: async () => {
+          calls.push(Date.now());
+          return syncResult(false);
+        },
+      },
+      {
+        initialDelayMs: 10,
+        intervalMs: 60_000,
+        gmailIntervalMs: 20_000,
+        continuationDelayMs: 25,
+        privacyCache: {
+          async runBackgroundPrefetchStep() {
+            prefetches += 1;
+            // Bodies to fetch after a new letter: four more visits.
+            return { hasMore: prefetches < 5 };
+          },
+        },
+      },
+    );
+
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(calls).toEqual([10, 10, 10, 10, 10]);
+    // One pass that found nothing, not five: the account stays on 20 s.
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(calls.at(-1)).toBe(20_010);
+    await scheduler.stop();
+  });
+
   it("brings a backed-off Gmail account back to its cadence on an on-demand sync", async () => {
     vi.useFakeTimers({ now: 0 });
     const calls: number[] = [];

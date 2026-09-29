@@ -1791,6 +1791,36 @@ describe("MailContentCoordinator", () => {
     expect(runner.calls[1]?.providerMessageId).toBe("message-thread-m1");
   });
 
+  it("runs at once an owner's open of a prefetch waiting to retry a failure", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    let failures = 0;
+    const runner = new FakeMailContentWorkRunner([
+      () => {
+        failures += 1;
+        throw new MailContentWorkError("transient", "provider_hiccup");
+      },
+      (input) => publish(input, { text: bodyText(input.providerMessageId) }),
+    ]);
+    // A minute before the prefetch would try again.
+    const coordinator = fixture.coordinator(runner, { nextDelayMs: () => 60_000 });
+    await coordinator.runBackgroundPrefetchStep(
+      ACCOUNT_ID,
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(failures).toBe(1));
+    await vi.waitFor(async () => {
+      await expect(
+        statesOf(coordinator, [MESSAGE_ID], "transient"),
+      ).resolves.toHaveLength(1);
+    });
+    await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID });
+    await vi.waitFor(async () => {
+      await expect(
+        statesOf(coordinator, [MESSAGE_ID], "ready"),
+      ).resolves.toHaveLength(1);
+    });
+  });
+
   it("paces the prefetch on an IMAP account, where every fetch is a login", async () => {
     const fixture = await createFixture([ACCOUNT_ID]);
     fixture.accounts.providerKind = "imap";
@@ -1904,6 +1934,11 @@ describe("MailContentCoordinator", () => {
         statesOf(coordinator, ["message-thread-m1"], "ready"),
       ).resolves.toHaveLength(1);
     });
+    // Its first fetch already ran on a fresh claim: none was spent on a lease
+    // the cache would have refused at the commit.
+    expect(
+      gated.started().filter((messageId) => messageId === "message-thread-m1"),
+    ).toHaveLength(1);
   });
 
   it("takes a deployed three-message cohort to the new size without a refetch storm", async () => {

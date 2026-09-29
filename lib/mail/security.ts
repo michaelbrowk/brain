@@ -1563,6 +1563,9 @@ const MAIL_LOG_NUMERIC_FIELDS = Object.freeze([
   "accountCount",
   "mailboxCount",
   "messageCount",
+  // How many threads one step of the new-senders archiver moved. A count and
+  // nothing else: no address, no thread id.
+  "threadCount",
   "attachmentCount",
   "recipientCount",
   "queuedSubmissionCount",
@@ -1678,6 +1681,10 @@ const MAIL_REQUEST_PHASE_FAMILIES: readonly (readonly [RegExp, string])[] =
     [/^\/v1\/drafts\/[^/]+$/, "draft"],
     [/^\/v1\/send$/, "send"],
     [/^\/v1\/send\/[^/]+$/, "send_operation"],
+    [/^\/v1\/senders\/state$/, "sender_state"],
+    [/^\/v1\/senders\/decisions$/, "sender_decision_list"],
+    [/^\/v1\/senders\/decisions\/[^/]+$/, "sender_decision"],
+    [/^\/v1\/senders\/blocked$/, "sender_blocked"],
     [/^\/v2\/accounts$/, "account_list"],
     [/^\/v2\/accounts\/[^/]+$/, "account"],
     [/^\/v1\/account$/, "account_status"],

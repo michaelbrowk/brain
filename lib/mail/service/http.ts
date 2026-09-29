@@ -63,6 +63,9 @@ import {
   validateMailResourceId,
   validateMailSearchInput,
   validateMailSendInput,
+  validateMailSenderDecisionId,
+  validateMailSenderDecisionInput,
+  validateMailSenderScreenInput,
   validateMailSyncEnabledInput,
   validateMailSyncInput,
   validateMailSystemMailbox,
@@ -78,6 +81,7 @@ import {
   MailSendError,
   type MailSendService,
 } from "./outbound";
+import { MailSenderError, type MailSenderScreenService } from "./senders";
 import {
   MailContentServiceError,
   type MailAttachmentDownload,
@@ -112,6 +116,7 @@ interface MailServiceHttpOptions {
   readonly drafts?: MailDraftService;
   readonly content?: MailContentService;
   readonly syncPause?: MailSyncPausePort;
+  readonly senders?: MailSenderScreenService;
 }
 
 /**
@@ -189,6 +194,8 @@ export const MAIL_SERVICE_ERROR_CODES = Object.freeze({
     "mail_content_remote_image_refused",
     "mail_content_unavailable",
     "mail_attachment_range_unsupported",
+    "mail_sender_decision_not_found",
+    "mail_senders_unavailable",
   ] as const),
   transport: Object.freeze([
     "headers_too_large",
@@ -269,6 +276,7 @@ export function createMailServiceHttpServer(
   const drafts = options.drafts;
   const content = options.content;
   const syncPause = options.syncPause;
+  const senders = options.senders;
   const build = validateBuildIdentity(options.build);
   const server = createServer(
     {
@@ -292,6 +300,7 @@ export function createMailServiceHttpServer(
         drafts,
         content,
         syncPause,
+        senders,
       );
     },
   );
@@ -346,6 +355,7 @@ async function handleRequest(
   drafts: MailDraftService | undefined,
   content: MailContentService | undefined,
   syncPause: MailSyncPausePort | undefined,
+  senders: MailSenderScreenService | undefined,
 ): Promise<void> {
   const requestStartedAt = Date.now();
   const deadlineAt =
@@ -396,6 +406,8 @@ async function handleRequest(
       /^\/v1\/drafts\/draft-[0-9a-f-]{36}$/.test(url.pathname);
     const remoteImagePath =
       /^\/v1\/remote-images\/remote-image-a[0-9a-f]{32}$/.test(url.pathname);
+    const senderDecisionPath =
+      /^\/v1\/senders\/decisions\/decision-a[0-9a-f]{32}$/.test(url.pathname);
     const allowsQuery =
       url.pathname === GMAIL_OAUTH_SERVICE_PATHS.callback ||
       url.pathname === GMAIL_OAUTH_SERVICE_PATHS.start ||
@@ -409,7 +421,8 @@ async function handleRequest(
           url.pathname === "/v1/drafts" ||
           draftReadPath ||
           remoteImagePath)) ||
-      (method === "POST" && messageContentPath);
+      (method === "POST" && messageContentPath) ||
+      (method === "DELETE" && senderDecisionPath);
     if (url.hash || (url.search && !allowsQuery)) {
       throw new MailHttpError(404, "route_not_found");
     }
@@ -721,6 +734,86 @@ async function handleRequest(
           providerOperationDeadlineAt,
           ({ signal }) => service.sync(input, signal),
         ),
+      );
+      return;
+    }
+
+    if (url.pathname === "/v1/senders/state") {
+      const screen = requireSenderScreen(senders);
+      if (method === "GET") {
+        assertNoRequestBody(request);
+        writeJson(
+          response,
+          200,
+          await beforeRequestDeadline(screen.readState(), deadlineAt),
+        );
+        return;
+      }
+      if (method === "PUT") {
+        const input = validateMailSenderScreenInput(
+          await readJsonBody(request, deadlineAt),
+        );
+        writeJson(
+          response,
+          200,
+          await beforeRequestDeadline(screen.setEnabled(input.enabled), deadlineAt),
+        );
+        return;
+      }
+      throw new MailHttpError(405, "method_not_allowed");
+    }
+
+    if (url.pathname === "/v1/senders/decisions") {
+      if (method !== "POST") throw new MailHttpError(405, "method_not_allowed");
+      const screen = requireSenderScreen(senders);
+      const input = validateMailSenderDecisionInput(
+        await readJsonBody(request, deadlineAt),
+      );
+      // A block archives the sender's Inbox inside this request, one provider
+      // mutation per thread, so it runs on the provider deadline and stops
+      // starting new ones before it; the scheduler finishes the rest.
+      writeJson(
+        response,
+        200,
+        await runAccountMutation(
+          request,
+          response,
+          providerOperationDeadlineAt,
+          (context) => screen.decide(input, context),
+        ),
+      );
+      return;
+    }
+
+    const senderDecisionMatch =
+      /^\/v1\/senders\/decisions\/(decision-a[0-9a-f]{32})$/.exec(url.pathname);
+    if (senderDecisionMatch) {
+      if (method !== "DELETE") throw new MailHttpError(405, "method_not_allowed");
+      const screen = requireSenderScreen(senders);
+      assertNoRequestBody(request);
+      const decisionId = validateMailSenderDecisionId(senderDecisionMatch[1]);
+      const restore = readSenderRestoreQuery(url);
+      writeJson(
+        response,
+        200,
+        await runAccountMutation(
+          request,
+          response,
+          providerOperationDeadlineAt,
+          (context) => screen.undo(decisionId, { restore }, context),
+        ),
+      );
+      return;
+    }
+
+    if (url.pathname === "/v1/senders/blocked") {
+      if (method !== "GET") throw new MailHttpError(405, "method_not_allowed");
+      const screen = requireSenderScreen(senders);
+      assertNoRequestBody(request);
+      writeJson(
+        response,
+        200,
+        await beforeRequestDeadline(screen.listBlocked(), deadlineAt),
       );
       return;
     }
@@ -1605,6 +1698,15 @@ function toHttpError(error: unknown): MailHttpError {
     }
     return new MailHttpError(503, error.code, true);
   }
+  if (error instanceof MailSenderError) {
+    if (error.code === "mail_request_invalid") {
+      return new MailHttpError(400, error.code);
+    }
+    if (error.code === "mail_sender_decision_not_found") {
+      return new MailHttpError(404, error.code);
+    }
+    return new MailHttpError(503, error.code, true);
+  }
   if (error instanceof MailProviderSyncError) {
     if (error.code === "mail_provider_reauth_required") {
       return new MailHttpError(409, "mail_account_reauth_required");
@@ -1725,6 +1827,27 @@ function requireContentService(
 ): MailContentService {
   if (!content) throw new MailHttpError(503, "mail_content_unavailable");
   return content;
+}
+
+function requireSenderScreen(
+  senders: MailSenderScreenService | undefined,
+): MailSenderScreenService {
+  if (!senders) throw new MailHttpError(503, "mail_senders_unavailable");
+  return senders;
+}
+
+/**
+ * `?restore=false` is the Blocked list's unblock: the decision goes and the
+ * mail it archived stays where it is. Without it the removal is the toast's
+ * undo, which moves those threads back.
+ */
+function readSenderRestoreQuery(url: URL): boolean {
+  if (!url.search) return true;
+  assertExactQuery(url.searchParams, [], ["restore"]);
+  const value = url.searchParams.get("restore");
+  if (value === "true") return true;
+  if (value === "false") return false;
+  throw new MailHttpError(400, "mail_request_invalid");
 }
 
 function requireAccountsV2(

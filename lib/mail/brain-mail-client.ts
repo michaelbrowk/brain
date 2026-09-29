@@ -185,6 +185,8 @@ export const SAFE_SERVICE_ERROR_CODES = new Set([
   "mail_content_remote_image_refused",
   "mail_content_unavailable",
   "mail_attachment_range_unsupported",
+  "mail_sender_decision_not_found",
+  "mail_senders_unavailable",
 ]);
 
 export type MailTlsMode = "implicit" | "starttls";

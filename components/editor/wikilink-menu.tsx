@@ -4,9 +4,10 @@ import { useInstance } from "@milkdown/react";
 import { editorViewCtx } from "@milkdown/kit/core";
 import { insert } from "@milkdown/kit/utils";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { DEFAULT_PAGE_ICON } from "@/lib/constants";
 import { DUR, EASE_OUT } from "@/lib/motion";
+import { caretMenuTakesKey } from "./caret-menu-keys";
 import type { PageRef } from "./floating-toolbar";
 import { clampMenuLeft, shouldFlipAbove } from "./menu-position";
 
@@ -118,9 +119,13 @@ export function WikiLinkMenu({
     [getEditor, state],
   );
 
-  useEffect(() => {
-    if (!state) return;
+  // The slash menu's rules, for the slash menu's reasons: attached in the
+  // commit that paints the menu, only while a row is on screen, and never for
+  // a key `caretMenuTakesKey` leaves to someone else.
+  useLayoutEffect(() => {
+    if (!state || results.length === 0) return;
     const onKey = (e: KeyboardEvent) => {
+      if (!caretMenuTakesKey(e, container.current)) return;
       if (e.key === "ArrowDown") {
         e.preventDefault();
         setActive((a) => Math.min(a + 1, results.length - 1));
@@ -136,7 +141,7 @@ export function WikiLinkMenu({
     };
     document.addEventListener("keydown", onKey, true);
     return () => document.removeEventListener("keydown", onKey, true);
-  }, [state, results, active, run]);
+  }, [state, results, active, run, container]);
 
   return (
     <AnimatePresence>

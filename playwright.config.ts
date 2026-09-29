@@ -35,5 +35,8 @@ export default defineConfig({
     url: `${e2eOrigin}/login`,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
+    // Without this Playwright ends the harness with SIGKILL, and the handler
+    // that deletes its notes root and state root never runs.
+    gracefulShutdown: { signal: "SIGTERM", timeout: 10_000 },
   },
 });

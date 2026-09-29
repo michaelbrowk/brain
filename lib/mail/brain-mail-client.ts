@@ -120,6 +120,11 @@ const REQUEST_TIMEOUT_MS = 12_000;
 const MAX_RESPONSE_BYTES = 32 * 1024;
 const MAX_THREAD_LIST_RESPONSE_BYTES = 512 * 1024;
 const MAX_THREAD_DETAIL_RESPONSE_BYTES = 4 * 1024 * 1024;
+/** A block or an undo names at most two hundred threads, and the worst of
+ *  them costs 328 bytes as JSON: a 42-character account id, a 255-character
+ *  thread id and the keys around them. Two hundred of those is 65,600 bytes,
+ *  twice the default ceiling, so these two answers get room for twice that. */
+const MAX_SENDER_DECISION_RESPONSE_BYTES = 128 * 1024;
 const MAX_DRAFT_DETAIL_RESPONSE_BYTES =
   MAIL_SERVICE_HTTP_LIMITS.maxDraftBodyBytes;
 const MAX_CONNECTED_AT_FUTURE_SKEW_MS = 5 * 60 * 1000;
@@ -198,6 +203,8 @@ export const SAFE_SERVICE_ERROR_CODES = new Set([
   "mail_content_remote_image_refused",
   "mail_content_unavailable",
   "mail_attachment_range_unsupported",
+  "mail_sender_own_address",
+  "mail_sender_domain_scope_refused",
   "mail_sender_decision_not_found",
   "mail_senders_unavailable",
 ]);
@@ -1174,6 +1181,7 @@ export function createBrainMailClient(options?: {
         validateMessageRequest(() => validateMailSenderDecisionInput(input)),
         validateMailSenderDecisionResult,
         signal,
+        MAX_SENDER_DECISION_RESPONSE_BYTES,
       ),
     undoSenderDecision: async (
       decisionId: string,
@@ -1192,6 +1200,7 @@ export function createBrainMailClient(options?: {
         undefined,
         validateMailSenderUndoResult,
         signal,
+        MAX_SENDER_DECISION_RESPONSE_BYTES,
       );
     },
     listBlockedSenders: async (signal?: AbortSignal) =>

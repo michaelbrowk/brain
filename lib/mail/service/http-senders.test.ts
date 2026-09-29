@@ -39,7 +39,13 @@ describe("brain-mail new-senders routes", () => {
 
     expect(read).toEqual({
       status: 200,
-      body: { apiVersion: 1, enabled: true, enabledAt: 5, backfillComplete: true },
+      body: {
+        apiVersion: 1,
+        enabled: true,
+        enabledAt: 5,
+        backfillComplete: true,
+        domainScopeRefused: ["gmail.com"],
+      },
     });
     expect(switched.status).toBe(200);
     expect(senders.setEnabled).toHaveBeenCalledWith(false);
@@ -165,27 +171,36 @@ describe("brain-mail new-senders routes", () => {
 
   it("answers the screen's own refusals with their codes", async () => {
     const senders = screenFixture();
-    senders.decide.mockRejectedValueOnce(new MailSenderError("mail_request_invalid"));
+    senders.decide
+      .mockRejectedValueOnce(new MailSenderError("mail_request_invalid"))
+      .mockRejectedValueOnce(new MailSenderError("mail_sender_own_address"))
+      .mockRejectedValueOnce(new MailSenderError("mail_sender_domain_scope_refused"));
     senders.undo.mockRejectedValueOnce(new MailSenderError("mail_sender_decision_not_found"));
     senders.listBlocked.mockRejectedValueOnce(new MailSenderError("mail_senders_unavailable"));
     const socketPath = await startServer(senders);
+    const decide = () =>
+      requestJson(
+        socketPath,
+        "POST",
+        "/v1/senders/decisions",
+        JSON.stringify({ address: "someone@gmail.com", scope: "domain", decision: "block" }),
+      );
 
-    const decide = await requestJson(
-      socketPath,
-      "POST",
-      "/v1/senders/decisions",
-      JSON.stringify({ address: "not an address", scope: "address", decision: "block" }),
-    );
-    const undo = await requestJson(socketPath, "DELETE", `/v1/senders/decisions/${DECISION_ID}`);
-    const blocked = await requestJson(socketPath, "GET", "/v1/senders/blocked");
+    const answers = [
+      await decide(),
+      await decide(),
+      await decide(),
+      await requestJson(socketPath, "DELETE", `/v1/senders/decisions/${DECISION_ID}`),
+      await requestJson(socketPath, "GET", "/v1/senders/blocked"),
+    ];
 
-    expect([decide, undo, blocked].map((answer) => [answer.status, errorCode(answer.body)])).toEqual(
-      [
-        [400, "mail_request_invalid"],
-        [404, "mail_sender_decision_not_found"],
-        [503, "mail_senders_unavailable"],
-      ],
-    );
+    expect(answers.map((answer) => [answer.status, errorCode(answer.body)])).toEqual([
+      [400, "mail_request_invalid"],
+      [400, "mail_sender_own_address"],
+      [400, "mail_sender_domain_scope_refused"],
+      [404, "mail_sender_decision_not_found"],
+      [503, "mail_senders_unavailable"],
+    ]);
   });
 
   it("says the screen is unavailable when the service has none", async () => {
@@ -213,12 +228,14 @@ function screenFixture() {
       enabled: true,
       enabledAt: 5,
       backfillComplete: true,
+      domainScopeRefused: ["gmail.com"],
     })),
     setEnabled: vi.fn(async (enabled: boolean) => ({
       apiVersion: 1 as const,
       enabled,
       enabledAt: enabled ? 5 : null,
       backfillComplete: enabled,
+      domainScopeRefused: ["gmail.com"],
     })),
     decide: vi.fn<MailSenderScreenService["decide"]>(async () => ({
       apiVersion: 1 as const,

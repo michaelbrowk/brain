@@ -293,14 +293,18 @@ export interface MailSendOperation {
  * The new-senders screen. `enabledAt` is the moment the switch was last
  * turned on, which is also the moment "known" was computed; it is null while
  * the switch is off. `backfillComplete` says whether every connected account
- * has finished teaching the screen who is already known. Until it has, no
- * thread is gated anywhere.
+ * has finished teaching the screen who is already known; an account gates
+ * nothing until its own backfill has finished, and the others go on gating.
+ * `domainScopeRefused` names the domains a decision may not take whole: the
+ * big mail providers and the owner's own domains. The UI offers "Everyone at
+ * <domain>" for none of them.
  */
 export interface MailSenderScreenState {
   readonly apiVersion: 1;
   readonly enabled: boolean;
   readonly enabledAt: number | null;
   readonly backfillComplete: boolean;
+  readonly domainScopeRefused: readonly string[];
 }
 
 export type MailSenderDecisionScope = "address" | "domain";

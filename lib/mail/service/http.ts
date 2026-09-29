@@ -194,6 +194,8 @@ export const MAIL_SERVICE_ERROR_CODES = Object.freeze({
     "mail_content_remote_image_refused",
     "mail_content_unavailable",
     "mail_attachment_range_unsupported",
+    "mail_sender_own_address",
+    "mail_sender_domain_scope_refused",
     "mail_sender_decision_not_found",
     "mail_senders_unavailable",
   ] as const),
@@ -1699,7 +1701,11 @@ function toHttpError(error: unknown): MailHttpError {
     return new MailHttpError(503, error.code, true);
   }
   if (error instanceof MailSenderError) {
-    if (error.code === "mail_request_invalid") {
+    if (
+      error.code === "mail_request_invalid" ||
+      error.code === "mail_sender_own_address" ||
+      error.code === "mail_sender_domain_scope_refused"
+    ) {
       return new MailHttpError(400, error.code);
     }
     if (error.code === "mail_sender_decision_not_found") {

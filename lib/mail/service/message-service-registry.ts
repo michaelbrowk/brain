@@ -258,15 +258,28 @@ export class MultiAccountMailMessageService implements MailMessageService {
     input: {
       readonly fromCursor: number;
       readonly sentCursor: number;
-      readonly enabledAt: number;
       readonly window: number;
+      readonly learnFrom: boolean;
     },
   ): Promise<MailCacheSenderBackfillBatch> {
     return this.withEntry(accountId, (entry) => entry.cache.readSenderBackfillBatch(input));
   }
 
-  async readAccountAddress(accountId: string): Promise<string | null> {
-    return (await this.store.readAccount(accountId))?.account.emailAddress ?? null;
+  /** Every account with its address: the owner's own addresses, and which
+   *  of them the scheduler syncs. */
+  async listAccounts(): Promise<
+    readonly { readonly accountId: string; readonly address: string; readonly connected: boolean }[]
+  > {
+    const accounts = await this.store.listAccounts();
+    return Object.freeze(
+      accounts.map((account) =>
+        Object.freeze({
+          accountId: account.account.accountId,
+          address: account.account.emailAddress,
+          connected: account.status === "connected",
+        }),
+      ),
+    );
   }
 
   /**

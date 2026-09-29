@@ -1081,7 +1081,7 @@ function metadataFetchQuery() {
     size: true,
     // imapflow fetches named headers with BODY.PEEK[HEADER.FIELDS (…)], so
     // the read-only session stays flag-neutral.
-    headers: ["list-id", "list-unsubscribe", "precedence", "auto-submitted"],
+    headers: ["list-id", "list-unsubscribe", "precedence", "auto-submitted", "references"],
   });
 }
 
@@ -1147,6 +1147,10 @@ export function imapMessageToCached(
     listMessage,
     category,
     sizeEstimate,
+    // The envelope carries In-Reply-To; a reply that names its parent in
+    // References alone is read from the fetched header block.
+    isReply: inReplyTo !== null || hasReferencesHeader(source.headers),
+    fromOwner: false,
   });
   const participants = Object.freeze(from === null ? [] : [from]);
   const thread: MailThreadListItem = Object.freeze({
@@ -1467,6 +1471,16 @@ interface ParsedListHeaders {
   readonly hasListUnsubscribe: boolean;
   readonly precedence: string | null;
   readonly autoSubmitted: string | null;
+}
+
+/** Whether the fetched header block names a References header at all. */
+export function hasReferencesHeader(headers: Buffer | undefined): boolean {
+  if (headers === undefined || headers.byteLength === 0) return false;
+  return headers
+    .subarray(0, MAX_LIST_HEADER_BYTES)
+    .toString("latin1")
+    .split(/\r?\n/)
+    .some((line) => /^references\s*:/i.test(line));
 }
 
 /**

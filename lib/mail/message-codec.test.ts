@@ -456,18 +456,21 @@ describe("Mail message boundary codec", () => {
       expect(() => validateMailSenderDecisionInput(invalid)).toThrow("mail_request_invalid");
     }
 
-    expect(
-      validateMailSenderScreenState({
-        apiVersion: 1,
-        enabled: true,
-        enabledAt: 5,
-        backfillComplete: false,
-      }),
-    ).toEqual({ apiVersion: 1, enabled: true, enabledAt: 5, backfillComplete: false });
+    const state = {
+      apiVersion: 1,
+      enabled: true,
+      enabledAt: 5,
+      backfillComplete: false,
+      domainScopeRefused: ["gmail.com", "example.test"],
+    };
+    expect(validateMailSenderScreenState(state)).toEqual(state);
     for (const invalid of [
-      { apiVersion: 1, enabled: true, enabledAt: null, backfillComplete: false },
-      { apiVersion: 1, enabled: false, enabledAt: 5, backfillComplete: false },
-      { apiVersion: 1, enabled: false, enabledAt: null, backfillComplete: true },
+      { ...state, enabledAt: null },
+      { ...state, enabled: false },
+      { ...state, enabled: false, enabledAt: null, backfillComplete: true },
+      { ...state, domainScopeRefused: "gmail.com" },
+      { ...state, domainScopeRefused: [7] },
+      { apiVersion: 1, enabled: true, enabledAt: 5, backfillComplete: false },
     ]) {
       expect(() => validateMailSenderScreenState(invalid)).toThrow("mail_response_invalid");
     }
@@ -482,14 +485,21 @@ describe("Mail message boundary codec", () => {
         pending: true,
       }),
     ).toEqual({ apiVersion: 1, decisionId, archived: [ref], pending: true });
-    expect(() =>
-      validateMailSenderDecisionResult({
-        apiVersion: 1,
-        decisionId: "decision-1",
-        archived: [],
-        pending: false,
-      }),
-    ).toThrow("mail_response_invalid");
+    for (const decisionId of [
+      "decision-1",
+      `decision-a${"z".repeat(32)}`,
+      "decision-a0123",
+      `decision-a${"0".repeat(33)}`,
+    ]) {
+      expect(() =>
+        validateMailSenderDecisionResult({
+          apiVersion: 1,
+          decisionId,
+          archived: [],
+          pending: false,
+        }),
+      ).toThrow("mail_response_invalid");
+    }
     expect(
       validateMailSenderUndoResult({ apiVersion: 1, restored: [ref], pending: false }),
     ).toEqual({ apiVersion: 1, restored: [ref], pending: false });

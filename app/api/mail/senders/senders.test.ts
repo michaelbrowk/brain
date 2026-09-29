@@ -22,13 +22,19 @@ vi.mock("@/lib/mail/brain-mail-client", async (importOriginal) => ({
 const ORIGIN = "https://brain.test";
 const ACCOUNT = "account-a00000000000000000000000000000000";
 const DECISION = "decision-a0123456789abcdef0123456789abcdef";
-const STATE = { apiVersion: 1, enabled: true, enabledAt: 5, backfillComplete: true };
+const STATE = {
+  apiVersion: 1,
+  enabled: true,
+  enabledAt: 5,
+  backfillComplete: true,
+  domainScopeRefused: ["gmail.com"],
+};
 
 beforeEach(() => {
   for (const method of Object.values(client)) method.mockReset();
   client.getSenderScreenState.mockResolvedValue(STATE);
   client.setSenderScreenEnabled.mockResolvedValue({
-    apiVersion: 1,
+    ...STATE,
     enabled: false,
     enabledAt: null,
     backfillComplete: false,
@@ -221,6 +227,8 @@ describe("the new-senders proxies", () => {
       ),
       await remove(`/api/mail/senders/decisions/${DECISION}?restore=maybe`, DECISION),
       await remove(`/api/mail/senders/decisions/${DECISION}?also=1`, DECISION),
+      await remove(`/api/mail/senders/decisions/${DECISION}?restore=false&also=1`, DECISION),
+      await remove(`/api/mail/senders/decisions/${DECISION}?restore=true&restore=false`, DECISION),
       await remove("/api/mail/senders/decisions/decision-1", "decision-1"),
       await remove(`/api/mail/senders/decisions/${DECISION}`, DECISION, "{}"),
     ];

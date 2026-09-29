@@ -264,7 +264,30 @@ describe("IMAP metadata sync adapter", () => {
       references: ["<parent@example.test>"],
       textBody: null,
       htmlBody: null,
+      isReply: true,
+      fromOwner: false,
     });
+  });
+
+  it("marks a message that answers another by In-Reply-To or by References alone", () => {
+    const message = (envelope: Record<string, unknown>, headers?: string) =>
+      imapMessageToCached(ACCOUNT_ID, BigInt(77), {
+        seq: 1,
+        uid: 9,
+        flags: new Set<string>(),
+        internalDate: new Date("2026-07-20T00:00:00Z"),
+        envelope: {
+          messageId: "<message@example.test>",
+          from: [{ name: "Sender", address: "sender@example.test" }],
+          ...envelope,
+        },
+        ...(headers === undefined ? {} : { headers: Buffer.from(headers, "latin1") }),
+      }).messages[0]!;
+
+    expect(message({}).isReply).toBe(false);
+    expect(message({ inReplyTo: "<parent@example.test>" }).isReply).toBe(true);
+    expect(message({}, "References: <root@example.test>\r\n").isReply).toBe(true);
+    expect(message({}, "List-Id: <news.example.test>\r\n").isReply).toBe(false);
   });
 });
 
@@ -281,7 +304,13 @@ describe("IMAP list-message classification and size", () => {
       "1:3",
       expect.objectContaining({
         size: true,
-        headers: ["list-id", "list-unsubscribe", "precedence", "auto-submitted"],
+        headers: [
+          "list-id",
+          "list-unsubscribe",
+          "precedence",
+          "auto-submitted",
+          "references",
+        ],
       }),
     );
   });

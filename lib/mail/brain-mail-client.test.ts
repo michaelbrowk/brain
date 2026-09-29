@@ -610,6 +610,7 @@ describe("Brain Mail Unix-socket client", () => {
           enabled,
           enabledAt: enabled ? 5 : null,
           backfillComplete: enabled,
+          domainScopeRefused: ["gmail.com"],
         });
         return;
       }
@@ -646,6 +647,7 @@ describe("Brain Mail Unix-socket client", () => {
       enabled: true,
       enabledAt: 5,
       backfillComplete: true,
+      domainScopeRefused: ["gmail.com"],
     });
     await expect(client.setSenderScreenEnabled(false)).resolves.toMatchObject({
       enabled: false,
@@ -676,6 +678,32 @@ describe("Brain Mail Unix-socket client", () => {
       { method: "DELETE", url: `/v1/senders/decisions/${decisionId}?restore=false`, body: "" },
       { method: "GET", url: "/v1/senders/blocked", body: "" },
     ]);
+  });
+
+  it("reads a block or an undo that names two hundred of the longest thread ids", async () => {
+    const accountId = "account-a0123456789abcdef0123456789abcdef";
+    const decisionId = "decision-a0123456789abcdef0123456789abcdef";
+    const refs = Array.from({ length: 200 }, (_, index) => ({
+      accountId,
+      threadId: `${index}`.padStart(255, "t"),
+    }));
+    const { socketPath } = await startServer((request, response) => {
+      writeJson(
+        response,
+        200,
+        request.method === "POST"
+          ? { apiVersion: 1, decisionId, archived: refs, pending: true }
+          : { apiVersion: 1, restored: refs, pending: true },
+      );
+    });
+    const client = createBrainMailClient({ socketPath });
+
+    await expect(
+      client.decideSender({ address: "a@b.test", scope: "address", decision: "block" }),
+    ).resolves.toMatchObject({ pending: true });
+    await expect(
+      client.undoSenderDecision(decisionId, { restore: true }),
+    ).resolves.toMatchObject({ pending: true });
   });
 
   it("refuses a malformed new-senders request before the socket and relays the screen's refusals", async () => {

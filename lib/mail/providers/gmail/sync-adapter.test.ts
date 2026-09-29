@@ -42,6 +42,40 @@ describe("Gmail sync adapter projection", () => {
     expect(cached.mailboxes).toEqual(["all", "inbox"]);
   });
 
+  it("marks a message that answers another and a message the account sent", () => {
+    const withoutReferences = (headers: readonly { name: string; value: string }[]) => {
+      const source = messageFixture();
+      return messageFixture({
+        labelIds: ["SENT"],
+        payload: {
+          ...source.payload!,
+          headers: [
+            ...source.payload!.headers.filter(
+              (header) => header.name.toLowerCase() !== "references",
+            ),
+            ...headers,
+          ],
+        },
+      });
+    };
+
+    expect(gmailMessageToDto(ACCOUNT_ID, messageFixture())).toMatchObject({
+      isReply: true,
+      fromOwner: false,
+    });
+    // In-Reply-To alone is enough; some clients send no References.
+    expect(
+      gmailMessageToDto(
+        ACCOUNT_ID,
+        withoutReferences([{ name: "In-Reply-To", value: "<parent@example.test>" }]),
+      ),
+    ).toMatchObject({ isReply: true, references: [], fromOwner: true });
+    expect(gmailMessageToDto(ACCOUNT_ID, withoutReferences([]))).toMatchObject({
+      isReply: false,
+      fromOwner: true,
+    });
+  });
+
   it("falls back to the newest message snippet when the thread carries none", () => {
     const older = messageFixture({
       id: "message-old",

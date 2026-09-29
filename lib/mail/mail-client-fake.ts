@@ -249,6 +249,7 @@ function defaultClient(): BrainMailClient {
       enabled: true,
       enabledAt: 0,
       backfillComplete: true,
+      domainScopeRefused: ["gmail.com"],
     }),
     setSenderScreenEnabled: unavailable,
     decideSender: unavailable,

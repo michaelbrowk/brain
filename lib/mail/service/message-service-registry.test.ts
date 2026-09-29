@@ -147,35 +147,51 @@ describe("multi-account message registry", () => {
     });
     const provider = providerFixture({
       listInitialThreads: vi.fn().mockResolvedValue({
-        threads: [fromStranger, fromFriend],
+        threads: [fromFriend],
         nextPageToken: null,
       }),
-      getThread: vi.fn().mockResolvedValue(archived),
+      listChanges: vi.fn().mockResolvedValue({
+        changedThreadIds: ["thread-stranger"],
+        nextPageToken: null,
+        resultingHistoryId: "101",
+      }),
+      getThread: vi.fn().mockResolvedValueOnce(fromStranger).mockResolvedValueOnce(archived),
     });
     const service = new MultiAccountMailMessageService({
       stateDirectory,
       store: storeFixture(),
       providerFactory: { create: vi.fn().mockResolvedValue({ provider }) },
     });
-    await service.sync({ accountId: ACCOUNT_ID, maxItems: 20 }, new AbortController().signal);
     const store = new SqliteMailSenderStore({ stateDirectory, now: () => 1_000 });
     await store.initialize();
     const screen = new MailSenderScreen({ store, mail: service, backfillWindow: 1 });
-    for (let step = 0; step < 20; step += 1) {
-      const { hasMore } = await screen.runBackgroundSenderStep(
-        ACCOUNT_ID,
-        { syncSucceeded: false },
-        new AbortController().signal,
-      );
-      if (!hasMore) break;
-    }
+    const backfill = async () => {
+      for (let step = 0; step < 20; step += 1) {
+        const { hasMore } = await screen.runBackgroundSenderStep(
+          ACCOUNT_ID,
+          { syncSucceeded: false },
+          new AbortController().signal,
+        );
+        if (!hasMore) return;
+      }
+    };
+    // Before the initial sync the cache holds nothing yet, and a backfill
+    // that finished over it would gate the account's whole history.
+    await backfill();
+    expect(store.readBackfillProgress(ACCOUNT_ID)?.completedAt).toBeNull();
+    await service.sync({ accountId: ACCOUNT_ID, maxItems: 20 }, new AbortController().signal);
+    await backfill();
+    expect(store.readBackfillProgress(ACCOUNT_ID)?.completedAt).toBe(1_000);
+    await service.sync({ accountId: ACCOUNT_ID, maxItems: 20 }, new AbortController().signal);
     const screened = new MailSenderScreenedMessageService(service, screen);
 
     const page = await screened.listThreads({ accountId: ACCOUNT_ID, limit: 20 });
     expect(
       Object.fromEntries(page.items.map((item) => [item.threadId, item.newSender])),
     ).toEqual({ "thread-stranger": true, "thread-friend": false });
-    await expect(service.readAccountAddress(ACCOUNT_ID)).resolves.toBe("reader@example.test");
+    await expect(service.listAccounts()).resolves.toEqual([
+      { accountId: ACCOUNT_ID, address: "reader@example.test", connected: true },
+    ]);
 
     const block = await screen.decide(
       { address: "stranger@example.net", scope: "address", decision: "block" },

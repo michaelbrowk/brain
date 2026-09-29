@@ -541,6 +541,8 @@ export function validateMailSyncResult(value: unknown): MailSyncResult {
 const SAFE_SENDER_DECISION_ID = /^decision-a[0-9a-f]{32}$/;
 const MAX_BLOCKED_SENDERS = 1_000;
 const MAX_SENDER_THREAD_REFS = 200;
+/** The provider list and the owner's own domains, with room to spare. */
+const MAX_REFUSED_SCOPE_DOMAINS = 500;
 
 /** The body of `PUT /v1/senders/state`. */
 export function validateMailSenderScreenInput(value: unknown): {
@@ -556,6 +558,7 @@ export function validateMailSenderScreenState(value: unknown): MailSenderScreenS
     !isRecordWithExactFields(value, [
       "apiVersion",
       "backfillComplete",
+      "domainScopeRefused",
       "enabled",
       "enabledAt",
     ]) ||
@@ -563,7 +566,9 @@ export function validateMailSenderScreenState(value: unknown): MailSenderScreenS
     typeof value.enabled !== "boolean" ||
     typeof value.backfillComplete !== "boolean" ||
     (value.enabled !== (value.enabledAt !== null)) ||
-    (!value.enabled && value.backfillComplete)
+    (!value.enabled && value.backfillComplete) ||
+    !Array.isArray(value.domainScopeRefused) ||
+    value.domainScopeRefused.length > MAX_REFUSED_SCOPE_DOMAINS
   ) {
     throw responseInvalid();
   }
@@ -572,6 +577,11 @@ export function validateMailSenderScreenState(value: unknown): MailSenderScreenS
     enabled: value.enabled,
     enabledAt: nullableTimestamp(value.enabledAt),
     backfillComplete: value.backfillComplete,
+    domainScopeRefused: Object.freeze(
+      value.domainScopeRefused.map((domain: unknown) =>
+        boundedString(domain, 253, false, "response"),
+      ),
+    ),
   });
 }
 

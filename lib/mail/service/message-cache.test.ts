@@ -5801,7 +5801,7 @@ function withDatabase(
 }
 
 describe("the cache's answers for the new-senders screen", () => {
-  it("names each thread's first message sender and when it arrived", async () => {
+  it("names each thread's first message, whether it starts a conversation, whose it is, and where the thread is", async () => {
     const { cache } = await createCache();
     const generation = cache.beginInitial("100");
     cache.putInitialPage(
@@ -5809,12 +5809,13 @@ describe("the cache's answers for the new-senders screen", () => {
       [
         conversationFixture("thread-reply", [
           { from: "Late <late@example.test>", sentAt: 2_000 },
-          { from: "First <first@example.test>", sentAt: 1_000 },
+          { from: "First <first@example.test>", sentAt: 1_000, isReply: true },
         ]),
-        conversationFixture("thread-sent", [{ from: "me@example.test", sentAt: 500 }], [
-          "all",
-          "sent",
-        ]),
+        conversationFixture(
+          "thread-sent",
+          [{ from: "me@example.test", sentAt: 500, fromOwner: true }],
+          ["all", "sent"],
+        ),
       ],
       null,
       null,
@@ -5828,15 +5829,32 @@ describe("the cache's answers for the new-senders screen", () => {
     ]);
 
     expect(Object.fromEntries(senders)).toEqual({
-      "thread-reply": { address: "first@example.test", firstMessageAt: 1_000 },
-      "thread-sent": { address: "me@example.test", firstMessageAt: 500 },
+      "thread-reply": {
+        address: "first@example.test",
+        firstMessageAt: 1_000,
+        startsConversation: false,
+        fromOwner: false,
+        inInbox: true,
+      },
+      "thread-sent": {
+        address: "me@example.test",
+        firstMessageAt: 500,
+        startsConversation: true,
+        fromOwner: true,
+        inInbox: false,
+      },
     });
     expect(cache.listInboxThreadFirstSenders()).toEqual([
-      { threadId: "thread-reply", address: "first@example.test" },
+      {
+        threadId: "thread-reply",
+        address: "first@example.test",
+        fromOwner: false,
+        lastMessageAt: 2_000,
+      },
     ]);
   });
 
-  it("reads From before the switch and every Sent recipient in bounded windows", async () => {
+  it("reads every From, then every Sent recipient and the owner's own From, in bounded windows", async () => {
     const { cache } = await createCache();
     const generation = cache.beginInitial("100");
     cache.putInitialPage(
@@ -5848,10 +5866,11 @@ describe("the cache's answers for the new-senders screen", () => {
           "thread-sent",
           [
             {
-              from: "me@example.test",
+              from: "Me <alias@example.test>",
               sentAt: 1_200,
               to: ["colleague@example.test"],
               cc: ["boss@example.test"],
+              fromOwner: true,
             },
           ],
           ["all", "sent"],
@@ -5860,9 +5879,18 @@ describe("the cache's answers for the new-senders screen", () => {
       null,
       null,
     );
+    expect(
+      cache.readSenderBackfillBatch({
+        fromCursor: 0,
+        sentCursor: 0,
+        window: 10,
+        learnFrom: true,
+      }).cacheReady,
+    ).toBe(false);
     cache.completeInitial(generation, 3_000);
 
-    const addresses: string[] = [];
+    const known: string[] = [];
+    const own: string[] = [];
     let fromCursor = 0;
     let sentCursor = 0;
     let steps = 0;
@@ -5870,10 +5898,12 @@ describe("the cache's answers for the new-senders screen", () => {
       const batch = cache.readSenderBackfillBatch({
         fromCursor,
         sentCursor,
-        enabledAt: 1_000,
         window: 1,
+        learnFrom: true,
       });
-      addresses.push(...batch.addresses);
+      expect(batch.cacheReady).toBe(true);
+      known.push(...batch.known);
+      own.push(...batch.own);
       fromCursor = batch.fromCursor;
       sentCursor = batch.sentCursor;
       steps += 1;
@@ -5881,15 +5911,64 @@ describe("the cache's answers for the new-senders screen", () => {
       expect(steps).toBeLessThan(20);
     }
 
-    expect(addresses.sort()).toEqual([
+    expect(known.sort()).toEqual([
+      "alias@example.test",
       "boss@example.test",
       "colleague@example.test",
+      "new@example.test",
       "old@example.test",
     ]);
+    expect(own).toEqual(["alias@example.test"]);
     expect(steps).toBeGreaterThan(2);
     expect(
-      cache.readSenderBackfillBatch({ fromCursor, sentCursor, enabledAt: 1_000, window: 1 }),
-    ).toEqual({ addresses: [], fromCursor, sentCursor, done: true });
+      cache.readSenderBackfillBatch({ fromCursor, sentCursor, window: 1, learnFrom: true }),
+    ).toEqual({ known: [], own: [], fromCursor, sentCursor, done: true, cacheReady: true });
+
+    // After the account starts gating only the Sent phase reads on.
+    cache.replaceActiveThread(
+      conversationFixture("thread-later", [{ from: "stranger@example.test", sentAt: 5_000 }]),
+    );
+    expect(
+      cache.readSenderBackfillBatch({ fromCursor, sentCursor, window: 10, learnFrom: false }),
+    ).toMatchObject({ known: [], own: [], fromCursor, done: true });
+  });
+
+  it("marks cached replies from their references when a cache from before the flag opens", async () => {
+    const fixture = await createCache();
+    const generation = fixture.cache.beginInitial("100");
+    fixture.cache.putInitialPage(
+      generation,
+      [
+        conversationFixture("thread-answer", [
+          { from: "x@example.test", sentAt: 1_000, references: ["<parent@example.test>"] },
+        ]),
+        conversationFixture("thread-first", [{ from: "y@example.test", sentAt: 1_000 }]),
+      ],
+      null,
+      null,
+    );
+    fixture.cache.completeInitial(generation, 2_000);
+    fixture.cache.close();
+    const databasePath = cacheDatabasePath(fixture.cacheRoot);
+    const rollback = new DatabaseSync(databasePath);
+    rollback.exec("ALTER TABLE messages DROP COLUMN is_reply");
+    rollback.exec("ALTER TABLE messages DROP COLUMN from_owner");
+    rollback.close();
+
+    const reopened = new SqliteMailMessageCache({
+      cacheRoot: fixture.cacheRoot,
+      accountId: ACCOUNT_ID,
+    });
+    await reopened.initialize();
+
+    expect(
+      Object.fromEntries(
+        [...reopened.readThreadFirstSenders(["thread-answer", "thread-first"])].map(
+          ([threadId, sender]) => [threadId, sender.startsConversation],
+        ),
+      ),
+    ).toEqual({ "thread-answer": false, "thread-first": true });
+    reopened.close();
   });
 });
 
@@ -5900,6 +5979,9 @@ function conversationFixture(
     readonly sentAt: number;
     readonly to?: readonly string[];
     readonly cc?: readonly string[];
+    readonly isReply?: boolean;
+    readonly fromOwner?: boolean;
+    readonly references?: readonly string[];
   }[],
   mailboxes: readonly MailCacheMailbox[] = Object.freeze(["all", "inbox"]),
 ): CachedProviderThread {
@@ -5919,6 +6001,9 @@ function conversationFixture(
       to: Object.freeze((message.to ?? ["reader@example.test"]).map(address)),
       cc: Object.freeze((message.cc ?? []).map(address)),
       sentAt: message.sentAt,
+      references: Object.freeze([...(message.references ?? [])]),
+      isReply: message.isReply ?? (message.references ?? []).length > 0,
+      fromOwner: message.fromOwner ?? false,
     }),
   );
   return Object.freeze({

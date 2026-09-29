@@ -36,6 +36,12 @@ const previews = [
   preview("attachment-3", "agenda.pdf", "pdf"),
 ];
 
+/** The letter's store, answering each picture with a blob URL of its own. */
+const store = {
+  blob: vi.fn(async () => new Blob([])),
+  url: vi.fn(async (attachment: MailContentAttachmentDto) => `blob:brain/${attachment.attachmentId}`),
+};
+
 function Harness({
   start,
   onClose,
@@ -49,6 +55,7 @@ function Harness({
   return (
     <MailAttachmentViewer
       previews={previews}
+      store={store}
       index={index}
       onIndexChange={(next) => {
         onIndexChange(next);
@@ -115,9 +122,12 @@ describe("MailAttachmentViewer", () => {
     expect(dialog().getAttribute("aria-modal")).toBe("true");
     expect(dialog().querySelector("h2")?.textContent).toBe("first.png");
     expect(counter()).toBe("1 of 3");
+    // The picture is the letter's verified blob, asked for at the viewer's
+    // priority; the Download link stays the route itself.
     const image = dialog().querySelector("img");
-    expect(image?.getAttribute("src")).toBe(previews[0]!.url);
+    expect(image?.getAttribute("src")).toBe("blob:brain/attachment-1");
     expect(image?.getAttribute("alt")).toBe("first.png");
+    expect(store.url).toHaveBeenCalledWith(previews[0]!.attachment, 1, expect.any(AbortSignal));
     expect(download().getAttribute("href")).toBe(previews[0]!.url);
     expect(download().getAttribute("download")).toBe("first.png");
     expect(download().getAttribute("aria-label")).toBe("Download first.png");
@@ -211,6 +221,10 @@ describe("MailAttachmentViewer", () => {
     expect(counter()).toBe("2 of 3");
     swipe(200, 230, 100, 500);
     expect(counter()).toBe("2 of 3");
+    // Far enough sideways to count, but more down than across: a scroll
+    // through a PDF that drifted, not a swipe.
+    swipe(300, 240, 100, 180);
+    expect(counter()).toBe("2 of 3");
   });
 
   it("shows the failure in place of a picture that will not load", async () => {
@@ -223,11 +237,21 @@ describe("MailAttachmentViewer", () => {
     expect(dialog().querySelector('[role="alert"]')?.textContent).toBe("Couldn’t open this file");
   });
 
+  it("shows the failure when the picture never arrives", async () => {
+    store.url.mockRejectedValueOnce(new Error("refused"));
+    await act(async () => {
+      root.render(<Harness start={0} onClose={() => {}} onIndexChange={() => {}} />);
+    });
+    expect(dialog().querySelector("img")).toBeNull();
+    expect(dialog().querySelector('[role="alert"]')?.textContent).toBe("Couldn’t open this file");
+  });
+
   it("drops the counter and the arrows for a letter with one preview", async () => {
     await act(async () => {
       root.render(
         <MailAttachmentViewer
           previews={[previews[0]!]}
+          store={store}
           index={0}
           onIndexChange={() => {}}
           onClose={() => {}}

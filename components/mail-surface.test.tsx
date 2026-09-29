@@ -1406,6 +1406,20 @@ describe("MailSurface", () => {
   });
 
   it("hands the window to an attachment viewer, and the list keys go quiet under it", async () => {
+    // The picture's download answers only by being aborted: this test is
+    // about the window, and a tile still waiting stays a tile. It honours the
+    // abort so the slot it holds in the shared gate comes back afterwards.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_input: string, init?: RequestInit) =>
+          new Promise<Response>((_, reject) => {
+            init?.signal?.addEventListener("abort", () =>
+              reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+            );
+          }),
+      ),
+    );
     const client = makeClient({
       requestMessageContent: vi.fn().mockResolvedValue({
         ...readyContent,
@@ -1453,6 +1467,15 @@ describe("MailSurface", () => {
     await click(findButton("Close"));
     expect(document.body.querySelector('[role="dialog"]')).toBeNull();
     expect(onSheetOpenChange).toHaveBeenLastCalledWith(false);
+
+    // And the guard lets go with the viewer: `e` archives again.
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "e", cancelable: true }));
+    });
+    await settle();
+    expect(client.updateThread).toHaveBeenLastCalledWith(
+      expect.objectContaining({ threadId: "thread-1", archive: true }),
+    );
   });
 
   it("loads a verified CID through the parent proxy and revokes its blob URL", async () => {

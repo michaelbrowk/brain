@@ -66,6 +66,17 @@ describe("classifyAttachment", () => {
     ).toBe("file");
   });
 
+  it("reads the type without regard to case", () => {
+    expect(classifyAttachment(attachment({ mimeType: "IMAGE/PNG" }))).toBe("image");
+    expect(classifyAttachment(attachment({ mimeType: "Image/Jpeg" }))).toBe("image");
+    expect(classifyAttachment(attachment({ mimeType: "APPLICATION/PDF", bytes: 1_024 }))).toBe(
+      "pdf",
+    );
+    expect(classifyAttachment(attachment({ mimeType: "IMAGE/SVG+XML", bytes: 1_024 }))).toBe(
+      "file",
+    );
+  });
+
   it("goes by the type, not by the filename", () => {
     expect(
       classifyAttachment(attachment({ filename: "scan.pdf", mimeType: "application/zip" })),

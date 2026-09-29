@@ -4833,6 +4833,10 @@ a.brain-share-url:active {
     box-shadow 160ms var(--ease-out),
     transform 100ms ease-out;
 }
+/* The picture is a small canvas decoded at thumbnail size (an `<img>` of the
+   blob only where the engine has no resizing decoder); either fills the
+   square and is cropped to it. */
+.brain-mail-tile-thumb > canvas,
 .brain-mail-tile-thumb > img {
   position: absolute;
   inset: 0;
@@ -5025,6 +5029,13 @@ a.brain-share-url:active {
   inset: 0;
   width: 100%;
   height: 100%;
+}
+/* After the last page laid out, when a PDF declares more than the viewer
+   lays out: the way to the rest is the file itself. */
+.brain-viewer-pdf-more {
+  display: flex;
+  justify-content: center;
+  padding-top: 12px;
 }
 /* "Page 2 of 7": a 28 capsule at the stage's foot. Its glass is `mat-thin`
    (the chip's thickness) on the element, so this rule sets no material. */

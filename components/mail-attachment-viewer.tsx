@@ -1,10 +1,11 @@
 "use client";
 
-import { useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { DUR, EASE_OUT, SHEET_ENTER_Y, SPRING_SHEET } from "@/lib/motion";
 import type { MailContentAttachmentDto } from "@/lib/mail/content-types";
+import { ATTACHMENT_FETCH_PRIORITY, type AttachmentBlobStore } from "@/lib/mail/attachment-blobs";
 import { IconButton } from "./ui/button";
 import { Icon } from "./ui/icon";
 import { useSheetGesture } from "./use-sheet-gesture";
@@ -13,9 +14,12 @@ import { AttachmentFailure, MailAttachmentPdf } from "./mail-attachment-pdf";
 export interface AttachmentPreview {
   readonly attachment: MailContentAttachmentDto;
   readonly kind: "image" | "pdf";
-  /** The authenticated download route, which both draws and downloads it. */
+  /** The authenticated download route, for the Download links. */
   readonly url: string;
 }
+
+/** What the viewer reads its previews from: the letter's store. */
+export type AttachmentSource = Pick<AttachmentBlobStore, "blob" | "url">;
 
 /** How far a finger must travel sideways, in px, before a release moves to
  *  the next attachment rather than counting as a tap. */
@@ -39,12 +43,15 @@ const SLIDE_X = 32;
  */
 export function MailAttachmentViewer({
   previews,
+  store,
   index,
   onIndexChange,
   onClose,
   returnFocus,
 }: {
   previews: readonly AttachmentPreview[];
+  /** The letter's downloads, shared with its tiles. */
+  store: AttachmentSource;
   index: number;
   onIndexChange: (index: number) => void;
   onClose: () => void;
@@ -242,9 +249,13 @@ export function MailAttachmentViewer({
                   transition={stage.transition}
                 >
                   {current.kind === "image" ? (
-                    <ViewerImage preview={current} name={name} />
+                    <ViewerImage preview={current} name={name} store={store} />
                   ) : (
-                    <MailAttachmentPdf url={current.url} filename={current.attachment.filename} />
+                    <MailAttachmentPdf
+                      attachment={current.attachment}
+                      url={current.url}
+                      store={store}
+                    />
                   )}
                 </motion.div>
               </AnimatePresence>
@@ -256,9 +267,32 @@ export function MailAttachmentViewer({
   );
 }
 
-function ViewerImage({ preview, name }: { preview: AttachmentPreview; name: string }) {
+/** The whole picture, from the letter's store at the viewer's priority: the
+ *  same verified blob the tile was drawn from, so it is not fetched again. */
+function ViewerImage({
+  preview,
+  name,
+  store,
+}: {
+  preview: AttachmentPreview;
+  name: string;
+  store: AttachmentSource;
+}) {
+  const [source, setSource] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    store.url(preview.attachment, ATTACHMENT_FETCH_PRIORITY.viewer, controller.signal).then(
+      setSource,
+      () => {
+        if (!controller.signal.aborted) setFailed(true);
+      },
+    );
+    return () => controller.abort();
+  }, [preview.attachment, store]);
+
   if (failed) {
     return (
       <AttachmentFailure
@@ -268,10 +302,17 @@ function ViewerImage({ preview, name }: { preview: AttachmentPreview; name: stri
       />
     );
   }
+  if (source === null) {
+    return (
+      <p aria-live="polite" className="brain-viewer-status text-control">
+        Opening image…
+      </p>
+    );
+  }
   return (
-    // eslint-disable-next-line @next/next/no-img-element -- an authenticated attachment route, not a static asset next/image could optimise
+    // eslint-disable-next-line @next/next/no-img-element -- a verified blob of an authenticated attachment, not a static asset next/image could optimise
     <img
-      src={preview.url}
+      src={source}
       alt={name}
       decoding="async"
       data-loaded={loaded ? "" : undefined}

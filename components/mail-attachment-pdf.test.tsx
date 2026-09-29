@@ -11,6 +11,7 @@ const pdfjs = vi.hoisted(() => ({
 
 vi.mock("pdfjs-dist", () => ({
   getDocument: pdfjs.getDocument,
+  VerbosityLevel: { ERRORS: 0, WARNINGS: 1, INFOS: 5 },
   PDFWorker: {
     create: ({ port }: { port: unknown }) => {
       const worker = { port, destroy: vi.fn() };
@@ -20,9 +21,29 @@ vi.mock("pdfjs-dist", () => ({
   },
 }));
 
-import { MailAttachmentPdf, PDF_PIXEL_RATIO_CAP } from "./mail-attachment-pdf";
+import { MAIL_ATTACHMENT_CONTENT_SECURITY_POLICY } from "@/lib/mail/content-types";
+import type { MailContentAttachmentDto } from "@/lib/mail/content-types";
+import { AttachmentBlobStore } from "@/lib/mail/attachment-blobs";
+import { ATTACHMENT_PDF_PREVIEW_MAX_BYTES } from "@/lib/mail/attachment-preview";
+import { MailFetchGate } from "@/lib/mail/inline-fetch-gate";
+import {
+  MailAttachmentPdf,
+  PDF_CANVAS_MAX_PIXELS,
+  PDF_PAGE_LIMIT,
+  PDF_PIXEL_RATIO_CAP,
+} from "./mail-attachment-pdf";
 
-const URL_UNDER_TEST = "/api/mail/attachments/attachment-pdf?accountId=account-a1";
+const ACCOUNT_ID = "account-a0123456789abcdef0123456789abcdef";
+const PDF_BYTES = new Uint8Array([0x25, 0x50, 0x44, 0x46]);
+const agenda: MailContentAttachmentDto = {
+  attachmentId: "attachment-a33333333333333333333333333333333",
+  filename: "agenda.pdf",
+  mimeType: "application/pdf",
+  disposition: "attachment",
+  contentId: null,
+  bytes: PDF_BYTES.byteLength,
+};
+const URL_UNDER_TEST = `/api/mail/attachments/${agenda.attachmentId}?accountId=${ACCOUNT_ID}`;
 
 class FakeWorker {
   static instances: FakeWorker[] = [];
@@ -101,20 +122,29 @@ function observer(kind: "near" | "far" | "reading"): FakeIntersectionObserver {
   return found;
 }
 
+type FakeRender = { promise: Promise<void>; cancel: ReturnType<typeof vi.fn> };
 type FakePage = {
   getViewport: (options: { scale: number }) => { width: number; height: number };
-  render: ReturnType<typeof vi.fn>;
+  render: ReturnType<typeof vi.fn<(params: { canvas: HTMLCanvasElement }) => FakeRender>>;
   cleanup: ReturnType<typeof vi.fn>;
 };
 
-function fakeDocument(numPages: number) {
+function fakeDocument(
+  numPages: number,
+  size: (pageNumber: number) => { width: number; height: number } = () => ({
+    width: 612,
+    height: 792,
+  }),
+  render: () => FakeRender = () => ({ promise: Promise.resolve(), cancel: vi.fn() }),
+) {
   const pages = new Map<number, FakePage>();
   const page = (pageNumber: number): FakePage => {
     const existing = pages.get(pageNumber);
     if (existing) return existing;
+    const { width, height } = size(pageNumber);
     const created: FakePage = {
-      getViewport: ({ scale }) => ({ width: 612 * scale, height: 792 * scale }),
-      render: vi.fn(() => ({ promise: Promise.resolve(), cancel: vi.fn() })),
+      getViewport: ({ scale }) => ({ width: width * scale, height: height * scale }),
+      render: vi.fn(render),
       cleanup: vi.fn(),
     };
     pages.set(pageNumber, created);
@@ -134,9 +164,17 @@ function loadingTask(result: Promise<unknown>) {
 }
 
 function pdfResponse(): Response {
-  return new Response(new Uint8Array([0x25, 0x50, 0x44, 0x46]), {
+  return new Response(PDF_BYTES as unknown as BodyInit, {
     status: 200,
-    headers: { "Content-Type": "application/pdf" },
+    headers: {
+      "Content-Type": "application/pdf",
+      "Content-Length": String(PDF_BYTES.byteLength),
+      "Content-Disposition": 'attachment; filename="agenda.pdf"',
+      "Cache-Control": "private, no-store",
+      "X-Content-Type-Options": "nosniff",
+      "Cross-Origin-Resource-Policy": "same-origin",
+      "Content-Security-Policy": MAIL_ATTACHMENT_CONTENT_SECURITY_POLICY,
+    },
   });
 }
 
@@ -163,6 +201,7 @@ describe("MailAttachmentPdf", () => {
   let host: HTMLDivElement;
   let root: Root;
   let fetchMock: ReturnType<typeof vi.fn>;
+  let store: AttachmentBlobStore;
 
   beforeEach(() => {
     (
@@ -178,6 +217,7 @@ describe("MailAttachmentPdf", () => {
     vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
     vi.stubGlobal("ResizeObserver", FakeResizeObserver);
     vi.stubGlobal("devicePixelRatio", 3);
+    store = new AttachmentBlobStore(ACCOUNT_ID, new MailFetchGate(2));
     host = document.createElement("div");
     document.body.append(host);
     root = createRoot(host);
@@ -189,26 +229,40 @@ describe("MailAttachmentPdf", () => {
     vi.unstubAllGlobals();
   });
 
-  async function open(numPages = 7) {
-    const { document: pdf, pages } = fakeDocument(numPages);
-    const task = loadingTask(Promise.resolve(pdf));
-    pdfjs.getDocument.mockReturnValue(task);
-    await act(async () => {
-      root.render(<MailAttachmentPdf url={URL_UNDER_TEST} filename="agenda.pdf" />);
+  function show(source: Pick<AttachmentBlobStore, "blob"> = store) {
+    return act(async () => {
+      root.render(<MailAttachmentPdf attachment={agenda} url={URL_UNDER_TEST} store={source} />);
     });
-    await until(() => host.querySelector("[data-page]") !== null);
-    return { pdf, pages, task };
   }
 
-  it("fetches the bytes same-origin and parses them with XFA off", async () => {
+  async function open(documentUnderTest = fakeDocument(7)) {
+    const task = loadingTask(Promise.resolve(documentUnderTest.document));
+    pdfjs.getDocument.mockReturnValue(task);
+    await show();
+    await until(() => host.querySelector("[data-page]") !== null);
+    return { ...documentUnderTest, task };
+  }
+
+  function alert(): string | null | undefined {
+    return host.querySelector('[role="alert"]')?.textContent;
+  }
+
+  it("reads the bytes through the verified download and opens them with pdf.js's smallest surface", async () => {
     await open();
     expect(fetchMock).toHaveBeenCalledWith(
       URL_UNDER_TEST,
-      expect.objectContaining({ credentials: "same-origin" }),
+      expect.objectContaining({ credentials: "same-origin", redirect: "error" }),
     );
     const [params] = pdfjs.getDocument.mock.calls[0]!;
-    expect(params).toMatchObject({ enableXfa: false });
+    expect(params).toMatchObject({
+      enableXfa: false,
+      useWasm: false,
+      disableFontFace: true,
+      maxImageSize: 2 ** 26,
+      verbosity: 0,
+    });
     expect(params.data).toBeInstanceOf(Uint8Array);
+    expect(params.data.byteLength).toBe(PDF_BYTES.byteLength);
     // Its own module worker, handed to pdf.js as the port.
     expect(FakeWorker.instances).toHaveLength(1);
     expect(FakeWorker.instances[0]!.options).toEqual({ type: "module" });
@@ -218,7 +272,7 @@ describe("MailAttachmentPdf", () => {
   });
 
   it("lays out every page but draws a canvas only for the pages near the viewport", async () => {
-    const { pages } = await open(7);
+    const { pages } = await open();
     expect(host.querySelectorAll("[data-page]")).toHaveLength(7);
     expect(host.querySelectorAll("canvas")).toHaveLength(0);
 
@@ -233,15 +287,44 @@ describe("MailAttachmentPdf", () => {
     // Fitted to the column (600 CSS px) at a pixel ratio capped at 2, even
     // on a 3x screen.
     expect(PDF_PIXEL_RATIO_CAP).toBe(2);
-    const [{ canvas, viewport }] = pages.get(1)!.render.mock.calls[0]!;
+    const [{ canvas }] = pages.get(1)!.render.mock.calls[0]!;
     expect(canvas).toBe(canvases[0]);
-    expect(viewport.width).toBeCloseTo(600 * 2);
     expect(canvases[0]!.width).toBe(1200);
     expect(canvases[0]!.height).toBe(Math.floor(792 * (600 / 612) * 2));
   });
 
+  it("keeps a page's canvas under 2^24 pixels, however tall the sender made it", async () => {
+    const { pages } = await open(fakeDocument(1, () => ({ width: 100, height: 2_000 })));
+    await act(async () => observer("near").report({ 1: true }));
+    await settle();
+    expect(PDF_CANVAS_MAX_PIXELS).toBe(2 ** 24);
+    const canvas = host.querySelector("canvas")!;
+    expect(pages.get(1)!.render).toHaveBeenCalledTimes(1);
+    expect(canvas.width * canvas.height).toBeLessThanOrEqual(2 ** 24);
+    expect(canvas.width * canvas.height).toBeGreaterThan(0.95 * 2 ** 24);
+  });
+
+  it("draws nothing for a page with no size instead of dividing by it", async () => {
+    const { pages } = await open(fakeDocument(1, () => ({ width: 0, height: 0 })));
+    await act(async () => observer("near").report({ 1: true }));
+    await settle();
+    expect(pages.get(1)!.render).not.toHaveBeenCalled();
+  });
+
+  it("lays out the first 1,000 pages and offers the rest as a download", async () => {
+    await open(fakeDocument(4_212));
+    expect(PDF_PAGE_LIMIT).toBe(1_000);
+    expect(host.querySelectorAll("[data-page]")).toHaveLength(1_000);
+    expect(host.textContent).toContain("Page 1 of 4212");
+    const rest = [...host.querySelectorAll("a")].find(
+      (link) => link.textContent === "Download to read the rest",
+    );
+    expect(rest?.getAttribute("href")).toBe(URL_UNDER_TEST);
+    expect(rest?.getAttribute("download")).toBe("agenda.pdf");
+  });
+
   it("releases a page that scrolls far away, and draws it again on the way back", async () => {
-    const { pages } = await open(7);
+    const { pages } = await open();
     await act(async () => observer("near").report({ 1: true, 2: true }));
     await settle();
     const first = host.querySelector<HTMLCanvasElement>('[data-page="1"] canvas')!;
@@ -259,58 +342,110 @@ describe("MailAttachmentPdf", () => {
     expect(pages.get(1)!.render).toHaveBeenCalledTimes(2);
   });
 
+  it("cancels a render still drawing when its page is let go, and when the viewer closes", async () => {
+    const renders: FakeRender[] = [];
+    const never = () => {
+      const render = { promise: new Promise<void>(() => {}), cancel: vi.fn() };
+      renders.push(render);
+      return render;
+    };
+    await open(fakeDocument(3, undefined, never));
+    await act(async () => observer("near").report({ 1: true, 2: true }));
+    await settle();
+    expect(renders).toHaveLength(2);
+
+    await act(async () => observer("far").report({ 1: false }));
+    await settle();
+    expect(renders[0]!.cancel).toHaveBeenCalledTimes(1);
+    expect(renders[1]!.cancel).not.toHaveBeenCalled();
+
+    await act(async () => root.render(<></>));
+    expect(renders[1]!.cancel).toHaveBeenCalledTimes(1);
+  });
+
   it("says which page is being read", async () => {
-    await open(7);
+    await open();
     expect(host.textContent).toContain("Page 1 of 7");
     await act(async () => observer("reading").report({ 2: true }));
     expect(host.textContent).toContain("Page 2 of 7");
   });
 
-  it("says a password-protected PDF is one, with Download beside it", async () => {
-    pdfjs.getDocument.mockReturnValue(
-      loadingTask(
-        Promise.reject(Object.assign(new Error("No password given"), { name: "PasswordException" })),
-      ),
-    );
-    await act(async () => {
-      root.render(<MailAttachmentPdf url={URL_UNDER_TEST} filename="locked.pdf" />);
-    });
-    await until(() => host.querySelector('[role="alert"]') !== null);
-    expect(host.querySelector('[role="alert"]')?.textContent).toContain(
-      "This PDF is password protected",
-    );
-    const download = host.querySelector<HTMLAnchorElement>('[role="alert"] a');
-    expect(download?.getAttribute("href")).toBe(URL_UNDER_TEST);
-    expect(download?.getAttribute("download")).toBe("locked.pdf");
-    expect(download?.textContent).toBe("Download");
+  it("hands the keyboard to the page scroller once the pages stand", async () => {
+    await open();
+    const scroller = host.querySelector<HTMLElement>(".brain-viewer-pdf-scroll");
+    expect(scroller?.tabIndex).toBe(0);
+    expect(document.activeElement).toBe(scroller);
   });
 
-  it("says a broken file could not be opened", async () => {
-    pdfjs.getDocument.mockReturnValue(
-      loadingTask(
-        Promise.reject(Object.assign(new Error("Invalid PDF structure"), { name: "InvalidPDFException" })),
-      ),
+  it("says a password-protected PDF is one, with Download beside it, and lets pdf.js go", async () => {
+    const task = loadingTask(
+      Promise.reject(Object.assign(new Error("No password given"), { name: "PasswordException" })),
     );
-    await act(async () => {
-      root.render(<MailAttachmentPdf url={URL_UNDER_TEST} filename="broken.pdf" />);
-    });
+    pdfjs.getDocument.mockReturnValue(task);
+    await show();
     await until(() => host.querySelector('[role="alert"]') !== null);
-    expect(host.querySelector('[role="alert"]')?.textContent).toContain("Couldn’t open this file");
+    expect(alert()).toContain("This PDF is password protected");
+    const download = host.querySelector<HTMLAnchorElement>('[role="alert"] a');
+    expect(download?.getAttribute("href")).toBe(URL_UNDER_TEST);
+    expect(download?.getAttribute("download")).toBe("agenda.pdf");
+    expect(download?.textContent).toBe("Download");
+    await settle();
+    expect(task.destroy).toHaveBeenCalledTimes(1);
+    expect(FakeWorker.instances[0]!.terminate).toHaveBeenCalledTimes(1);
+  });
+
+  it("says a broken file could not be opened, and lets pdf.js go", async () => {
+    const task = loadingTask(
+      Promise.reject(Object.assign(new Error("Invalid PDF structure"), { name: "InvalidPDFException" })),
+    );
+    pdfjs.getDocument.mockReturnValue(task);
+    await show();
+    await until(() => host.querySelector('[role="alert"]') !== null);
+    expect(alert()).toContain("Couldn’t open this file");
+    await settle();
+    expect(task.destroy).toHaveBeenCalledTimes(1);
+    expect(FakeWorker.instances[0]!.terminate).toHaveBeenCalledTimes(1);
+  });
+
+  it("says so when the worker never starts, instead of waiting for it for good", async () => {
+    const task = loadingTask(new Promise(() => {}));
+    pdfjs.getDocument.mockReturnValue(task);
+    await show();
+    await until(() => FakeWorker.instances.length === 1);
+    expect(alert()).toBeUndefined();
+    await act(async () => FakeWorker.instances[0]!.listeners.get("error")?.());
+    await until(() => host.querySelector('[role="alert"]') !== null);
+    expect(alert()).toContain("Couldn’t open this file");
+    await settle();
+    expect(FakeWorker.instances[0]!.terminate).toHaveBeenCalledTimes(1);
   });
 
   it("says the same when the download itself fails, and never starts pdf.js", async () => {
     fetchMock.mockResolvedValue(new Response("gone", { status: 404 }));
-    await act(async () => {
-      root.render(<MailAttachmentPdf url={URL_UNDER_TEST} filename="gone.pdf" />);
-    });
+    await show();
     await until(() => host.querySelector('[role="alert"]') !== null);
-    expect(host.querySelector('[role="alert"]')?.textContent).toContain("Couldn’t open this file");
+    expect(alert()).toContain("Couldn’t open this file");
     expect(pdfjs.getDocument).not.toHaveBeenCalled();
     expect(FakeWorker.instances).toHaveLength(0);
   });
 
+  it("never hands pdf.js more than the preview cap", async () => {
+    const arrayBuffer = vi.fn(async () => new ArrayBuffer(0));
+    const oversized = {
+      blob: vi.fn(
+        async () =>
+          ({ size: ATTACHMENT_PDF_PREVIEW_MAX_BYTES + 1, arrayBuffer }) as unknown as Blob,
+      ),
+    };
+    await show(oversized);
+    await until(() => host.querySelector('[role="alert"]') !== null);
+    expect(alert()).toContain("Couldn’t open this file");
+    expect(arrayBuffer).not.toHaveBeenCalled();
+    expect(pdfjs.getDocument).not.toHaveBeenCalled();
+  });
+
   it("destroys the document and its worker when it closes", async () => {
-    const { task } = await open(3);
+    const { task } = await open(fakeDocument(3));
     await act(async () => root.render(<></>));
     await settle();
     expect(task.destroy).toHaveBeenCalledTimes(1);
@@ -326,9 +461,8 @@ describe("MailAttachmentPdf", () => {
           signal = init.signal ?? undefined;
         }),
     );
-    await act(async () => {
-      root.render(<MailAttachmentPdf url={URL_UNDER_TEST} filename="slow.pdf" />);
-    });
+    await show();
+    await until(() => signal !== undefined);
     expect(signal?.aborted).toBe(false);
     await act(async () => root.render(<></>));
     expect(signal?.aborted).toBe(true);

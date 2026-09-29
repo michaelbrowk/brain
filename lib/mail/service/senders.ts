@@ -275,15 +275,21 @@ const SCHEMA_SQL = `
     kind TEXT NOT NULL CHECK(kind IN ('address', 'domain')),
     decision TEXT NOT NULL CHECK(decision IN ('accept', 'block')),
     decided_at INTEGER NOT NULL CHECK(decided_at >= 0),
-    UNIQUE(kind, key)
+    replaced_by TEXT CHECK(replaced_by IS NULL OR length(replaced_by) = 42)
   ) STRICT;
+
+  CREATE UNIQUE INDEX sender_decisions_standing
+    ON sender_decisions(kind, key) WHERE replaced_by IS NULL;
 
   CREATE INDEX sender_decisions_by_decision
     ON sender_decisions(decision, decided_at DESC);
 
+  CREATE INDEX sender_decisions_by_replacement
+    ON sender_decisions(replaced_by);
+
   CREATE TABLE decision_effects (
     decision_id TEXT NOT NULL
-      REFERENCES sender_decisions(decision_id) ON DELETE CASCADE ON UPDATE CASCADE,
+      REFERENCES sender_decisions(decision_id) ON DELETE CASCADE,
     effect TEXT NOT NULL CHECK(effect IN ('known', 'archived')),
     account_id TEXT NOT NULL,
     target TEXT NOT NULL CHECK(length(target) BETWEEN 1 AND 255),
@@ -298,12 +304,6 @@ const SCHEMA_SQL = `
 
   CREATE INDEX decision_effects_by_thread
     ON decision_effects(account_id, effect, target);
-
-  CREATE TABLE replaced_decisions (
-    old_id TEXT PRIMARY KEY CHECK(length(old_id) = 42),
-    new_id TEXT NOT NULL CHECK(length(new_id) = 42),
-    replaced_at INTEGER NOT NULL CHECK(replaced_at >= 0)
-  ) STRICT;
 
   CREATE TABLE backfill_progress (
     account_id TEXT PRIMARY KEY,
@@ -336,6 +336,11 @@ export interface MailSenderStandingDecision {
 export interface MailSenderDecisionIndex {
   readonly addresses: ReadonlyMap<string, MailSenderStandingDecision>;
   readonly domains: ReadonlyMap<string, MailSenderStandingDecision>;
+}
+
+export interface MailSenderArchiveEffects {
+  readonly byThread: ReadonlyMap<string, MailSenderArchiveEffect>;
+  readonly byMessage: ReadonlyMap<string, readonly MailSenderArchiveEffect[]>;
 }
 
 export interface MailSenderArchiveEffect {
@@ -565,7 +570,8 @@ export class SqliteMailSenderStore {
           address,
         ) !== undefined;
       const decision = database.prepare(
-        "SELECT decision FROM sender_decisions WHERE kind = ? AND key = ?",
+        `SELECT decision FROM sender_decisions
+          WHERE kind = ? AND key = ? AND replaced_by IS NULL`,
       );
       return Object.freeze({
         known,
@@ -584,7 +590,9 @@ export class SqliteMailSenderStore {
       const addresses = new Map<string, MailSenderStandingDecision>();
       const domains = new Map<string, MailSenderStandingDecision>();
       for (const row of database
-        .prepare("SELECT decision_id, key, kind, decision FROM sender_decisions")
+        .prepare(
+          "SELECT decision_id, key, kind, decision FROM sender_decisions WHERE replaced_by IS NULL",
+        )
         .all()) {
         const decision = decisionKind(row.decision);
         if (
@@ -613,7 +621,8 @@ export class SqliteMailSenderStore {
   readBlockingDecision(address: string): MailSenderStandingDecision | null {
     return this.read((database) => {
       const statement = database.prepare(
-        "SELECT decision_id, decision FROM sender_decisions WHERE kind = ? AND key = ?",
+        `SELECT decision_id, decision FROM sender_decisions
+          WHERE kind = ? AND key = ? AND replaced_by IS NULL`,
       );
       const own = standingDecision(statement.get("address", address));
       if (own !== null) return own.decision === "block" ? own : null;
@@ -631,17 +640,20 @@ export class SqliteMailSenderStore {
     return this.read(
       (database) =>
         database
-          .prepare("SELECT 1 AS present FROM sender_decisions WHERE decision = 'block' LIMIT 1")
+          .prepare(
+            `SELECT 1 AS present FROM sender_decisions
+              WHERE decision = 'block' AND replaced_by IS NULL LIMIT 1`,
+          )
           .get() !== undefined,
     );
   }
 
   /**
-   * One decision per address or domain. The same verdict again answers the
-   * decision that stands; a changed verdict replaces it under a new id and
-   * the key's effects follow it, so nothing an earlier verdict archived is
-   * left without a decision that can undo it. An accept also makes the
-   * address known and remembers that it did.
+   * One standing decision per address or domain. The same verdict again
+   * answers the decision that stands. A changed verdict stands in its place
+   * under a new id, and the one it replaced is kept, with its own effects,
+   * marked as replaced: undoing the new verdict gives the old one back. An
+   * accept also makes the address known and remembers that it did.
    */
   recordDecision(input: {
     readonly decisionId: string;
@@ -653,7 +665,10 @@ export class SqliteMailSenderStore {
     const now = validTimestamp(this.now());
     return this.transaction((database) => {
       const existing = database
-        .prepare("SELECT decision_id, decision FROM sender_decisions WHERE kind = ? AND key = ?")
+        .prepare(
+          `SELECT decision_id, decision FROM sender_decisions
+            WHERE kind = ? AND key = ? AND replaced_by IS NULL`,
+        )
         .get(input.kind, input.key);
       if (existing !== undefined && typeof existing.decision_id !== "string") {
         throw new MailSenderError("mail_senders_unavailable");
@@ -661,31 +676,17 @@ export class SqliteMailSenderStore {
       if (existing?.decision === input.decision) {
         return Object.freeze({ decisionId: existing.decision_id as string, created: false });
       }
-      if (existing === undefined) {
+      if (existing !== undefined) {
         database
-          .prepare(
-            `INSERT INTO sender_decisions(decision_id, key, kind, decision, decided_at)
-             VALUES (?, ?, ?, ?, ?)`,
-          )
-          .run(input.decisionId, input.key, input.kind, input.decision, now);
-      } else {
-        // The effects carry forward through the foreign key's ON UPDATE, and
-        // the old id is remembered so the toast that holds it can be told the
-        // verdict changed rather than that nothing is there.
-        database
-          .prepare(
-            `UPDATE sender_decisions
-                SET decision_id = ?, decision = ?, decided_at = ?
-              WHERE decision_id = ?`,
-          )
-          .run(input.decisionId, input.decision, now, existing.decision_id as string);
-        database
-          .prepare(
-            `INSERT OR REPLACE INTO replaced_decisions(old_id, new_id, replaced_at)
-             VALUES (?, ?, ?)`,
-          )
-          .run(existing.decision_id as string, input.decisionId, now);
+          .prepare("UPDATE sender_decisions SET replaced_by = ? WHERE decision_id = ?")
+          .run(input.decisionId, existing.decision_id as string);
       }
+      database
+        .prepare(
+          `INSERT INTO sender_decisions(decision_id, key, kind, decision, decided_at)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(input.decisionId, input.key, input.kind, input.decision, now);
       if (input.knownAddress !== null) {
         const added = database
           .prepare(
@@ -729,7 +730,7 @@ export class SqliteMailSenderStore {
                message_key, added_at
              )
              SELECT decision_id, 'archived', ?, ?, 'pending', ?, ?, ?
-               FROM sender_decisions WHERE decision_id = ?
+               FROM sender_decisions WHERE decision_id = ? AND replaced_by IS NULL
              ON CONFLICT(decision_id, effect, account_id, target) DO UPDATE
                SET state = 'pending', thread_last_at = excluded.thread_last_at,
                    message_key = excluded.message_key`,
@@ -772,92 +773,91 @@ export class SqliteMailSenderStore {
     );
   }
 
-  /** Every archive effect in one account, keyed by decision and thread. */
-  readArchiveEffects(accountId: string): ReadonlyMap<string, MailSenderArchiveEffect> {
+  /** Every archive effect in one account, by decision and thread, and by
+   *  decision and first Message-ID. */
+  readArchiveEffects(accountId: string): MailSenderArchiveEffects {
     return this.read((database) => {
-      const effects = new Map<string, MailSenderArchiveEffect>();
+      const byThread = new Map<string, MailSenderArchiveEffect>();
+      const byMessage = new Map<string, MailSenderArchiveEffect[]>();
       for (const row of database
         .prepare(
           `SELECT decision_id, target, state, thread_last_at, message_key FROM decision_effects
             WHERE account_id = ? AND effect = 'archived'`,
         )
         .all(validAccountId(accountId))) {
-        if (
-          typeof row.decision_id !== "string" ||
-          typeof row.target !== "string" ||
-          (row.state !== "pending" && row.state !== "done") ||
-          (row.thread_last_at !== null && !Number.isSafeInteger(row.thread_last_at)) ||
-          (row.message_key !== null && typeof row.message_key !== "string")
-        ) {
+        if (typeof row.decision_id !== "string" || typeof row.target !== "string") {
           throw new MailSenderError("mail_senders_unavailable");
         }
-        const effect = Object.freeze({
-          state: row.state,
-          threadLastAt: row.thread_last_at as number | null,
-          messageKey: row.message_key as string | null,
-        });
-        effects.set(archiveEffectKey(row.decision_id, row.target), effect);
+        const effect = archiveEffectFromRow(row);
+        byThread.set(archiveEffectKey(row.decision_id, row.target), effect);
         if (effect.messageKey !== null) {
-          const byMessage = archiveMessageKey(row.decision_id, effect.messageKey);
-          // A finished archive speaks for the message over a pending one.
-          if (effects.get(byMessage)?.state !== "done") effects.set(byMessage, effect);
+          const key = archiveMessageKey(row.decision_id, effect.messageKey);
+          byMessage.set(key, [...(byMessage.get(key) ?? []), effect]);
         }
       }
-      return effects;
+      return Object.freeze({ byThread, byMessage });
+    });
+  }
+
+  /** The archive this decision recorded for this very thread, or null. */
+  readArchiveEffect(decisionId: string, ref: MailSenderThreadRef): MailSenderArchiveEffect | null {
+    return this.read((database) => {
+      const row = database
+        .prepare(
+          `SELECT state, thread_last_at, message_key FROM decision_effects
+            WHERE decision_id = ? AND effect = 'archived' AND account_id = ? AND target = ?`,
+        )
+        .get(decisionId, validAccountId(ref.accountId), ref.threadId);
+      return row === undefined ? null : archiveEffectFromRow(row);
     });
   }
 
   /**
-   * The archive this decision recorded for a thread, found by its thread id
-   * or by its first message's Message-ID, a finished one before a pending
-   * one. Null when there is none.
+   * Whether this decision finished archiving another copy of the same message
+   * in this account, with the same newest date: what an IMAP message the
+   * owner moved back looks like under its new UID.
    */
-  readArchiveEffect(
+  hasFinishedArchiveOfMessage(
     decisionId: string,
-    ref: MailSenderThreadRef,
-    messageKey: string | null,
-  ): MailSenderArchiveEffect | null {
-    return this.read((database) => {
-      const rows = database
-        .prepare(
-          `SELECT state, thread_last_at, message_key FROM decision_effects
-            WHERE decision_id = ? AND effect = 'archived' AND account_id = ?
-              AND (target = ? OR (? IS NOT NULL AND message_key = ?))
-            ORDER BY state = 'done' DESC`,
-        )
-        .all(decisionId, validAccountId(ref.accountId), ref.threadId, messageKey, messageKey);
-      const row = rows[0];
-      if (row === undefined) return null;
-      if (
-        (row.state !== "pending" && row.state !== "done") ||
-        (row.thread_last_at !== null && !Number.isSafeInteger(row.thread_last_at)) ||
-        (row.message_key !== null && typeof row.message_key !== "string")
-      ) {
-        throw new MailSenderError("mail_senders_unavailable");
-      }
-      return Object.freeze({
-        state: row.state,
-        threadLastAt: row.thread_last_at as number | null,
-        messageKey: row.message_key as string | null,
-      });
-    });
+    accountId: string,
+    messageKey: string,
+    threadLastAt: number | null,
+  ): boolean {
+    if (threadLastAt === null) return false;
+    return this.read(
+      (database) =>
+        database
+          .prepare(
+            `SELECT 1 AS present FROM decision_effects
+              WHERE decision_id = ? AND effect = 'archived' AND account_id = ?
+                AND message_key = ? AND state = 'done' AND thread_last_at = ?
+              LIMIT 1`,
+          )
+          .get(decisionId, validAccountId(accountId), messageKey, threadLastAt) !== undefined,
+    );
   }
 
   decisionExists(decisionId: string): boolean {
     return this.read(
       (database) =>
         database
-          .prepare("SELECT 1 AS present FROM sender_decisions WHERE decision_id = ?")
+          .prepare(
+            `SELECT 1 AS present FROM sender_decisions
+              WHERE decision_id = ? AND replaced_by IS NULL`,
+          )
           .get(decisionId) !== undefined,
     );
   }
 
   /**
-   * Removes a decision. The known entry an accept added goes with it; an id
-   * a changed verdict replaced answers `mail_sender_decision_changed`. With
-   * `restore`, every thread archived under it, finished or still pending, is
-   * queued for the move back in the same transaction, so a restore cut short
-   * is finished by the scheduler rather than forgotten.
+   * Removes a decision. The known entry an accept added goes with it, and
+   * the verdict it replaced, if any, stands again with its own effects: an
+   * accept that replaced a block gives the block back with its archive where
+   * it was, and a block that replaced an accept gives the accept back. An id a
+   * later verdict replaced answers `mail_sender_decision_changed`. With
+   * `restore`, every thread archived under this decision itself, finished or
+   * still pending, is queued for the move back in the same transaction, so a
+   * restore cut short is finished by the scheduler rather than forgotten.
    */
   removeDecision(
     decisionId: string,
@@ -866,22 +866,16 @@ export class SqliteMailSenderStore {
     const now = validTimestamp(this.now());
     return this.transaction((database) => {
       const row = database
-        .prepare("SELECT decision FROM sender_decisions WHERE decision_id = ?")
+        .prepare("SELECT decision, replaced_by FROM sender_decisions WHERE decision_id = ?")
         .get(decisionId);
-      if (row === undefined) {
-        const replaced = database
-          .prepare("SELECT 1 AS present FROM replaced_decisions WHERE old_id = ?")
-          .get(decisionId);
-        if (replaced !== undefined) {
-          throw new MailSenderError("mail_sender_decision_changed");
-        }
-        return null;
+      if (row === undefined) return null;
+      if (row.replaced_by !== null) {
+        throw new MailSenderError("mail_sender_decision_changed");
       }
       const decision = decisionKind(row.decision);
       if (decision === null) throw new MailSenderError("mail_senders_unavailable");
-      // Only an accept takes its known entry back. A block that replaced an
-      // accept carries that entry too, and undoing the block returns to the
-      // accept's world, where the address was known.
+      // Only an accept takes its known entry back; the effects of a verdict
+      // it replaced belong to that verdict, which stands again below.
       if (decision === "accept") {
         database
           .prepare(
@@ -912,6 +906,9 @@ export class SqliteMailSenderStore {
         }
       }
       database.prepare("DELETE FROM sender_decisions WHERE decision_id = ?").run(decisionId);
+      database
+        .prepare("UPDATE sender_decisions SET replaced_by = NULL WHERE replaced_by = ?")
+        .run(decisionId);
       return Object.freeze({ decision, restoreRefs: Object.freeze(restoreRefs) });
     });
   }
@@ -971,7 +968,7 @@ export class SqliteMailSenderStore {
                         AND effect.effect = 'archived'
                         AND effect.state = 'done') AS archived_count
                FROM sender_decisions AS decision
-              WHERE decision.decision = 'block'
+              WHERE decision.decision = 'block' AND decision.replaced_by IS NULL
               ORDER BY decision.decided_at DESC, decision.decision_id DESC
               LIMIT ?`,
           )
@@ -1043,7 +1040,10 @@ export interface MailInboxThreadSender {
   readonly threadId: string;
   readonly address: string | null;
   readonly fromOwner: boolean;
-  readonly lastMessageAt: number | null;
+  /** The newest date of a message the owner did not send: neither marked as
+   *  sent nor from one of his addresses. The owner's own reply in a thread he
+   *  moved back is not a new letter from the blocked sender. */
+  readonly lastForeignMessageAt: number | null;
   /** The first message's Message-ID, when it has one. */
   readonly firstMessageId: string | null;
 }
@@ -1094,7 +1094,10 @@ export interface MailSenderMailPort {
       readonly learnFrom: boolean;
     },
   ): Promise<MailSenderBackfillBatch>;
-  listInboxThreadFirstSenders(accountId: string): Promise<readonly MailInboxThreadSender[]>;
+  listInboxThreadFirstSenders(
+    accountId: string,
+    ownAddresses: readonly string[],
+  ): Promise<readonly MailInboxThreadSender[]>;
   updateThread(
     input: MailThreadMutationInput & { readonly threadId: string },
     signal: AbortSignal,
@@ -1131,6 +1134,13 @@ interface OwnSenders {
 interface ArchiveTarget {
   readonly ref: MailSenderThreadRef;
   readonly thread: MailInboxThreadSender;
+  /**
+   * The Message-ID another copy's archive may be matched by: the first
+   * message's, unless two or more threads this decision governs in the same
+   * listing carry it. Those are duplicate deliveries of one letter, each to be
+   * archived in its own right, not one letter the owner moved back.
+   */
+  readonly matchKey: string | null;
 }
 
 interface QueuedWork {
@@ -1315,7 +1325,7 @@ export class MailSenderScreen implements MailSenderScreenService {
     for (const accountId of own.connectedAccountIds) {
       let threads: readonly MailInboxThreadSender[];
       try {
-        threads = await this.mail.listInboxThreadFirstSenders(accountId);
+        threads = await this.mail.listInboxThreadFirstSenders(accountId, [...own.addresses]);
       } catch {
         // The account's next sync finds what this one could not read.
         pending = true;
@@ -1324,11 +1334,16 @@ export class MailSenderScreen implements MailSenderScreenService {
       // A thread this decision already archived, and the owner put back, is
       // recognised inside the queue, where a second walk of the same block
       // cannot race the first.
-      for (const thread of threads) {
-        const blocking = this.blockingDecision(index, own, thread);
-        if (blocking?.decisionId !== decisionId) continue;
-        targets.push({ ref: Object.freeze({ accountId, threadId: thread.threadId }), thread });
-      }
+      targets.push(
+        ...withMatchKeys(
+          accountId,
+          threads.flatMap((thread) =>
+            this.blockingDecision(index, own, thread)?.decisionId === decisionId
+              ? [{ thread, decisionId }]
+              : [],
+          ),
+        ),
+      );
     }
     const archived: MailSenderThreadRef[] = [];
     for (const target of targets) {
@@ -1600,22 +1615,17 @@ export class MailSenderScreen implements MailSenderScreenService {
     const own = await this.readOwn();
     const index = this.store.readDecisionIndex();
     const effects = this.store.readArchiveEffects(accountId);
-    const targets: Array<ArchiveTarget & { readonly decisionId: string }> = [];
-    for (const thread of await this.mail.listInboxThreadFirstSenders(accountId)) {
+    const governed = (
+      await this.mail.listInboxThreadFirstSenders(accountId, [...own.addresses])
+    ).flatMap((thread) => {
       const blocking = this.blockingDecision(index, own, thread);
-      if (
-        blocking === null ||
-        this.archiveBackoff.has(`${accountId}/${thread.threadId}`) ||
-        ownerMovedBack(effects, blocking.decisionId, thread)
-      ) {
-        continue;
-      }
-      targets.push({
-        ref: Object.freeze({ accountId, threadId: thread.threadId }),
-        thread,
-        decisionId: blocking.decisionId,
-      });
-    }
+      return blocking === null ? [] : [{ thread, decisionId: blocking.decisionId }];
+    });
+    const targets = withMatchKeys(accountId, governed).filter(
+      (target) =>
+        !this.archiveBackoff.has(`${accountId}/${target.ref.threadId}`) &&
+        !ownerMovedBack(effects, target),
+    );
     const archived: MailSenderThreadRef[] = [];
     let attempted = 0;
     for (const target of targets) {
@@ -1672,9 +1682,30 @@ export class MailSenderScreen implements MailSenderScreenService {
       if (current?.decisionId !== decisionId) {
         return this.store.decisionExists(decisionId) ? "skipped" : "gone";
       }
-      const effect = this.store.readArchiveEffect(decisionId, ref, thread.firstMessageId);
-      if (effect !== null && finishedAndNotNewer(effect, thread)) return "skipped";
-      if (!this.store.beginArchiveEffect(decisionId, ref, thread.lastMessageAt, thread.firstMessageId)) {
+      // The thread's own archive record speaks first; another copy's record
+      // counts only for a Message-ID no other copy in the listing carries.
+      const ownRecord = this.store.readArchiveEffect(decisionId, ref);
+      if (ownRecord !== null) {
+        if (finishedAndNotNewer(ownRecord, thread)) return "skipped";
+      } else if (
+        target.matchKey !== null &&
+        this.store.hasFinishedArchiveOfMessage(
+          decisionId,
+          ref.accountId,
+          target.matchKey,
+          thread.lastForeignMessageAt,
+        )
+      ) {
+        return "skipped";
+      }
+      if (
+        !this.store.beginArchiveEffect(
+          decisionId,
+          ref,
+          thread.lastForeignMessageAt,
+          thread.firstMessageId,
+        )
+      ) {
         return "gone";
       }
       try {
@@ -1845,36 +1876,77 @@ export class MailSenderScreenedMessageService implements MailMessageService {
 
 /**
  * Whether the owner put a thread back in the Inbox after this decision
- * archived it: the archive is on record, found by thread id or, for an IMAP
- * message that came back under a new UID, by its Message-ID, and nothing
- * newer has arrived since. Such a thread stays; a new letter in it goes the
- * way the first one went.
+ * archived it, and nothing newer from anyone but the owner has arrived since.
+ * The thread's own record speaks first. Without one, an IMAP message that came
+ * back under a new UID is recognised by another copy's record for the same
+ * Message-ID and the same newest date, and only when the Message-ID is not
+ * shared by another thread in the listing. Such a thread stays; a new letter
+ * in it goes the way the first one went.
  */
 function ownerMovedBack(
-  effects: ReadonlyMap<string, MailSenderArchiveEffect>,
-  decisionId: string,
-  thread: MailInboxThreadSender,
+  effects: MailSenderArchiveEffects,
+  target: ArchiveTarget & { readonly decisionId: string },
 ): boolean {
-  const byThread = effects.get(archiveEffectKey(decisionId, thread.threadId));
-  const byMessage =
-    thread.firstMessageId === null
-      ? undefined
-      : effects.get(archiveMessageKey(decisionId, thread.firstMessageId));
-  return [byThread, byMessage].some(
-    (effect) => effect !== undefined && finishedAndNotNewer(effect, thread),
+  const { decisionId, thread } = target;
+  const ownRecord = effects.byThread.get(archiveEffectKey(decisionId, thread.threadId));
+  if (ownRecord !== undefined) return finishedAndNotNewer(ownRecord, thread);
+  if (target.matchKey === null || thread.lastForeignMessageAt === null) return false;
+  return (effects.byMessage.get(archiveMessageKey(decisionId, target.matchKey)) ?? []).some(
+    (effect) => effect.state === "done" && effect.threadLastAt === thread.lastForeignMessageAt,
   );
 }
 
 function finishedAndNotNewer(
   effect: MailSenderArchiveEffect,
-  thread: { readonly lastMessageAt: number | null },
+  thread: { readonly lastForeignMessageAt: number | null },
 ): boolean {
   return (
     effect.state === "done" &&
-    (thread.lastMessageAt === null ||
+    (thread.lastForeignMessageAt === null ||
       effect.threadLastAt === null ||
-      thread.lastMessageAt <= effect.threadLastAt)
+      thread.lastForeignMessageAt <= effect.threadLastAt)
   );
+}
+
+/** The targets a listing yields, each with the Message-ID it may be matched
+ *  by: none when two or more threads the same decision governs carry it. */
+function withMatchKeys(
+  accountId: string,
+  governed: readonly { readonly thread: MailInboxThreadSender; readonly decisionId: string }[],
+): Array<ArchiveTarget & { readonly decisionId: string }> {
+  const carriers = new Map<string, number>();
+  for (const { thread, decisionId } of governed) {
+    if (thread.firstMessageId === null) continue;
+    const key = archiveMessageKey(decisionId, thread.firstMessageId);
+    carriers.set(key, (carriers.get(key) ?? 0) + 1);
+  }
+  return governed.map(({ thread, decisionId }) =>
+    Object.freeze({
+      ref: Object.freeze({ accountId, threadId: thread.threadId }),
+      thread,
+      decisionId,
+      matchKey:
+        thread.firstMessageId !== null &&
+        carriers.get(archiveMessageKey(decisionId, thread.firstMessageId)) === 1
+          ? thread.firstMessageId
+          : null,
+    }),
+  );
+}
+
+function archiveEffectFromRow(row: Record<string, unknown>): MailSenderArchiveEffect {
+  if (
+    (row.state !== "pending" && row.state !== "done") ||
+    (row.thread_last_at !== null && !Number.isSafeInteger(row.thread_last_at)) ||
+    (row.message_key !== null && typeof row.message_key !== "string")
+  ) {
+    throw new MailSenderError("mail_senders_unavailable");
+  }
+  return Object.freeze({
+    state: row.state,
+    threadLastAt: row.thread_last_at as number | null,
+    messageKey: row.message_key as string | null,
+  });
 }
 
 function archiveEffectKey(decisionId: string, threadId: string): string {

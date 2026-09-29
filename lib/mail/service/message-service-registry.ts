@@ -263,8 +263,11 @@ export class MultiAccountMailMessageService implements MailMessageService {
 
   async listInboxThreadFirstSenders(
     accountId: string,
+    ownAddresses: readonly string[],
   ): Promise<readonly MailCacheInboxThreadSender[]> {
-    return this.withEntry(accountId, (entry) => entry.cache.listInboxThreadFirstSenders());
+    return this.withEntry(accountId, (entry) =>
+      entry.cache.listInboxThreadFirstSenders(ownAddresses),
+    );
   }
 
   async readSenderBackfillBatch(

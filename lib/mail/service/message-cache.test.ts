@@ -5810,6 +5810,8 @@ describe("the cache's answers for the new-senders screen", () => {
         conversationFixture("thread-reply", [
           { from: "Late <late@example.test>", sentAt: 2_000 },
           { from: "First <first@example.test>", sentAt: 1_000, isReply: true },
+          // The provider marks this one the owner's, under an address not named.
+          { from: "Alias <alias@example.test>", sentAt: 2_500, fromOwner: true },
         ]),
         conversationFixture(
           "thread-sent",
@@ -5846,14 +5848,18 @@ describe("the cache's answers for the new-senders screen", () => {
         references: [],
       },
     });
-    expect(cache.listInboxThreadFirstSenders()).toEqual([
+    expect(cache.listInboxThreadFirstSenders([])).toEqual([
       {
         threadId: "thread-reply",
         address: "first@example.test",
         fromOwner: false,
-        lastMessageAt: 2_000,
+        lastForeignMessageAt: 2_000,
         firstMessageId: "<thread-reply-1@example.test>",
       },
+    ]);
+    // The newest letter is the owner's once his address is named.
+    expect(cache.listInboxThreadFirstSenders(["late@example.test"])).toMatchObject([
+      { threadId: "thread-reply", lastForeignMessageAt: 1_000 },
     ]);
   });
 
@@ -5971,6 +5977,21 @@ describe("the cache's answers for the new-senders screen", () => {
     expect(cache.hasConversationStart({ address: "rep@sales.test", after: 1_500 })).toBe(true);
     expect(cache.hasConversationStart({ address: "rep@sales.test", after: 2_000 })).toBe(false);
     expect(cache.hasConversationStart({ address: "nobody@sales.test", after: 0 })).toBe(false);
+    // A start that left the Inbox, or list mail, holds nobody's follow-up.
+    cache.replaceActiveThread(
+      conversationFixture("thread-archived", [{ from: "gone@sales.test", sentAt: 2_300 }], ["all"]),
+    );
+    const newsletter = conversationFixture("thread-news", [
+      { from: "digest@sales.test", sentAt: 2_400 },
+    ]);
+    cache.replaceActiveThread(
+      Object.freeze({
+        ...newsletter,
+        thread: Object.freeze({ ...newsletter.thread, category: "newsletter" as const }),
+      }),
+    );
+    expect(cache.hasConversationStart({ address: "gone@sales.test", after: 0 })).toBe(false);
+    expect(cache.hasConversationStart({ address: "digest@sales.test", after: 0 })).toBe(false);
     // Only the owner's own message in a Sent thread names an own address.
     const batch = cache.readSenderBackfillBatch({
       fromCursor: 10_000,

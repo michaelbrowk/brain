@@ -318,6 +318,10 @@ async function main(): Promise<void> {
   const stop = () => {
     if (stopping) return;
     stopping = true;
+    // First, before anything waits on the server: Brain's held long poll is
+    // an active keep-alive request, and server.close() would sit on it until
+    // the deadline below killed the process with exit 1 on every deploy.
+    changes.close();
     writeServiceLog({ event: "mail_service_stopping" });
     const deadline = setTimeout(() => {
       writeServiceLog({

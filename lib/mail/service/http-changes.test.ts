@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { readMailChanges } from "../brain-mail-client";
+import { MailChangeFeedLoop } from "../change-feed";
 import { mailRequestPhase } from "../security";
 import { MailChangeFeed } from "./change-feed-ring";
 import { createMailServiceHttpServer, MAIL_SERVICE_ERROR_CODES } from "./http";
@@ -26,6 +28,75 @@ afterEach(async () => {
 });
 
 describe("brain-mail change feed route", () => {
+  /*
+    The stop path, with Brain's own loop and client on the other end. The held
+    read is an active keep-alive request, so server.close() alone waits for it
+    and the process ran into its 12 s shutdown deadline on every deploy. The
+    feed's close() answers it and hangs the connection up, and every read
+    after that is refused on a connection that closes.
+  */
+  it("lets the server stop at once while Brain's loop holds a read", async () => {
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const changes = new MailChangeFeed({ initialCursor: 41 });
+    const { server, socketPath } = await startServerWithHandle({ changes });
+    const loop = new MailChangeFeedLoop({
+      readChanges: (input, signal) => readMailChanges(input, signal, { socketPath }),
+      mailEnabled: async () => true,
+      emit: () => undefined,
+      onModulesChange: () => () => {},
+    });
+    loop.start();
+    try {
+      // The loop's first read takes the cursor; the second is held.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      const startedAt = Date.now();
+      changes.close();
+      const closed = new Promise<number>((resolve) =>
+        server.close(() => resolve(Date.now() - startedAt)),
+      );
+      server.closeIdleConnections();
+
+      await expect(closed).resolves.toBeLessThan(2_000);
+    } finally {
+      loop.stop();
+    }
+  });
+
+  it("refuses a read after close on a connection that closes", async () => {
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const changes = new MailChangeFeed({ initialCursor: 41 });
+    const socketPath = await startServer({ changes });
+    changes.close();
+
+    const answer = await new Promise<{ status: number; connection: unknown; body: unknown }>(
+      (resolve, reject) => {
+        const request = httpRequest(
+          { socketPath, method: "GET", path: "/v1/changes?cursor=41&wait=25000" },
+          (response) => {
+            const chunks: Buffer[] = [];
+            response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+            response.once("end", () =>
+              resolve({
+                status: response.statusCode ?? 0,
+                connection: response.headers.connection,
+                body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
+              }),
+            );
+          },
+        );
+        request.once("error", reject);
+        request.end();
+      },
+    );
+
+    expect(answer).toEqual({
+      status: 503,
+      connection: "close",
+      body: { apiVersion: 1, error: { code: "mail_sync_unavailable" } },
+    });
+  });
+
   it("answers a first read with the cursor to wait from", async () => {
     const changes = new MailChangeFeed({ initialCursor: 41 });
     const socketPath = await startServer({ changes });
@@ -136,6 +207,13 @@ async function startServer(options: {
   readonly changes: MailChangeFeed;
   readonly syncPause?: MailSyncPausePort;
 }): Promise<string> {
+  return (await startServerWithHandle(options)).socketPath;
+}
+
+async function startServerWithHandle(options: {
+  readonly changes: MailChangeFeed;
+  readonly syncPause?: MailSyncPausePort;
+}): Promise<{ readonly server: Server; readonly socketPath: string }> {
   const root = await mkdtemp(path.join(tmpdir(), "brain-mail-changes-"));
   const socketPath = path.join(root, "mail.sock");
   const server = createMailServiceHttpServer({
@@ -151,7 +229,7 @@ async function startServer(options: {
       resolve();
     });
   });
-  return socketPath;
+  return { server, socketPath };
 }
 
 function requestJson(

@@ -4,6 +4,7 @@ import {
   MAIL_CHANGE_FEED_CAPACITY,
   MailChangeFeed,
   MailChangeFeedBusyError,
+  MailChangeFeedClosedError,
   type MailServiceChange,
 } from "./change-feed-ring";
 
@@ -178,6 +179,21 @@ describe("the service's change feed", () => {
       cursor: 9,
       changes: [sync(), sync()],
     });
+  });
+
+  it("answers the held read quietly on close and refuses every read after it", async () => {
+    vi.useFakeTimers();
+    const feed = new MailChangeFeed({ initialCursor: 7 });
+    const held = read(feed, 7);
+
+    feed.close();
+
+    await expect(held).resolves.toEqual({ apiVersion: 1, cursor: 7, changes: [] });
+    expect(feed.isClosed()).toBe(true);
+    await expect(read(feed, 7)).rejects.toBeInstanceOf(MailChangeFeedClosedError);
+    await expect(read(feed, null)).rejects.toBeInstanceOf(MailChangeFeedClosedError);
+    // A record appended while the process winds down is simply not served.
+    expect(() => feed.append(sync())).not.toThrow();
   });
 
   it("answers at once when asked not to wait", async () => {

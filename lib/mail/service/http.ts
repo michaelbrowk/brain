@@ -38,6 +38,7 @@ import {
 import {
   MAIL_CHANGE_FEED_MAX_WAIT_MS,
   MailChangeFeedBusyError,
+  MailChangeFeedClosedError,
   type MailChangeFeed,
 } from "./change-feed-ring";
 import { MAIL_SERVICE_HTTP_LIMITS } from "./limits";
@@ -541,10 +542,20 @@ async function handleRequest(
           paused: () => syncPause?.isPaused() ?? false,
           signal: controller.signal,
         });
-        if (answer !== null) writeJson(response, 200, answer);
+        if (answer === null) return;
+        // The feed closed under this read: answer it, then hang up, so the
+        // keep-alive socket Brain would re-arm on cannot hold the stop open.
+        if (changes.isClosed()) {
+          response.shouldKeepAlive = false;
+          response.setHeader("Connection", "close");
+        }
+        writeJson(response, 200, answer);
       } catch (error) {
         if (error instanceof MailChangeFeedBusyError) {
           throw new MailHttpError(409, "mail_changes_busy");
+        }
+        if (error instanceof MailChangeFeedClosedError) {
+          throw new MailHttpError(503, "mail_sync_unavailable", true);
         }
         throw error;
       } finally {

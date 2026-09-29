@@ -66,6 +66,14 @@ export class MailChangeFeedBusyError extends Error {
   }
 }
 
+/** The process is stopping and serves no more reads. */
+export class MailChangeFeedClosedError extends Error {
+  constructor() {
+    super("mail_changes_closed");
+    this.name = "MailChangeFeedClosedError";
+  }
+}
+
 /** Every mailbox a thread can be listed in, for a change that may have moved
  *  a thread between any of them. */
 export const MAIL_CHANGE_ALL_MAILBOXES: readonly MailSystemMailbox[] = Object.freeze([
@@ -82,7 +90,10 @@ export class MailChangeFeed {
   private sequence: number;
   private readonly entries: { readonly sequence: number; readonly change: MailServiceChange }[] =
     [];
-  private waiter: (() => void) | null = null;
+  /** The held read: `wake` answers it if there is news, `release` answers it
+   *  empty whatever the ring holds. */
+  private waiter: { readonly wake: () => void; readonly release: () => void } | null = null;
+  private closed = false;
 
   constructor(
     options: { readonly capacity?: number; readonly initialCursor?: number } = {},
@@ -110,7 +121,24 @@ export class MailChangeFeed {
     this.sequence += 1;
     this.entries.push(Object.freeze({ sequence: this.sequence, change: validated }));
     if (this.entries.length > this.capacity) this.entries.shift();
-    this.waiter?.();
+    this.waiter?.wake();
+  }
+
+  /**
+   * THE STOP PATH, CALLED BEFORE ANYTHING ELSE STOPS. The held read is an
+   * active keep-alive request, so `server.close()` would wait on it and the
+   * process would run into its shutdown deadline with Brain connected. Close
+   * answers it empty with its own cursor, and every read after it is refused
+   * (`MailChangeFeedClosedError`, answered on a connection that closes).
+   * Brain's loop reads either as a pause and asks the next process.
+   */
+  close(): void {
+    this.closed = true;
+    this.waiter?.release();
+  }
+
+  isClosed(): boolean {
+    return this.closed;
   }
 
   /**
@@ -129,6 +157,7 @@ export class MailChangeFeed {
     readonly signal: AbortSignal;
   }): Promise<MailChangeFeedAnswer | null> {
     const { cursor, waitMs, paused, signal } = input;
+    if (this.closed) return Promise.reject(new MailChangeFeedClosedError());
     if (cursor === null) return Promise.resolve(this.answer([]));
     const quiet = (): MailChangeFeedAnswer =>
       Object.freeze({ apiVersion: 1, cursor, changes: Object.freeze([]) });
@@ -144,18 +173,21 @@ export class MailChangeFeed {
         settled = true;
         clearTimeout(timer);
         signal.removeEventListener("abort", onAbort);
-        if (this.waiter === wake) this.waiter = null;
+        if (this.waiter === waiter) this.waiter = null;
         resolve(answer);
       };
       const onAbort = () => finish(null);
-      const wake = () => {
-        if (paused()) return;
-        const answer = this.answerAfter(cursor);
-        if (answer !== null) finish(answer);
+      const waiter = {
+        wake: () => {
+          if (paused()) return;
+          const answer = this.answerAfter(cursor);
+          if (answer !== null) finish(answer);
+        },
+        release: () => finish(quiet()),
       };
       const timer = setTimeout(() => finish(quiet()), waitMs);
       signal.addEventListener("abort", onAbort, { once: true });
-      this.waiter = wake;
+      this.waiter = waiter;
     });
   }
 

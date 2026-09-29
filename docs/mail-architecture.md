@@ -387,6 +387,12 @@ number. One read may be held at a time and a second is refused
 read waits out its time and gets its own cursor back, and the records gathered
 meanwhile are still there after the resume. A record names an account, its
 mailboxes and at most a message id, never a subject, an address or a body.
+Stopping closes the feed before anything else: the held read is an active
+keep-alive request that `server.close()` would wait on until the 12-second
+shutdown deadline ended the process with exit 1, so it is answered empty with
+its own cursor on a connection the service then closes, and any read after it
+is refused `503 mail_sync_unavailable` the same way. The artifact smoke holds a
+long poll and expects SIGTERM to exit 0 within eight seconds.
 
 Brain reads the feed from one loop per process,
 [`lib/mail/change-feed.ts`](../lib/mail/change-feed.ts), started beside the

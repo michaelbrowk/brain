@@ -4,13 +4,17 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { MailDraftMutationInput } from "../draft-types";
+import type {
+  MailDraftMutationInput,
+  MailDraftSummaryDto,
+} from "../draft-types";
 import {
   fingerprintMailDraftMutation,
   MAIL_DRAFT_LIMITS,
   validateMailDraftMutationInput,
 } from "../draft-codec";
 import {
+  listDraftSourceMessageIds,
   mailSendInputFromDraft,
   MailDraftError,
   ProviderNeutralMailDraftService,
@@ -44,6 +48,30 @@ afterEach(async () => {
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
   );
   vi.restoreAllMocks();
+});
+
+describe("draft source messages", () => {
+  it("names each message a live draft answers or forwards, once", async () => {
+    const summary = (
+      state: MailDraftSummaryDto["state"],
+      intent: MailDraftSummaryDto["intent"],
+    ) => ({ state, intent }) as MailDraftSummaryDto;
+    const listDraftSummaries = vi.fn(async () => [
+      summary("editing", { kind: "compose" }),
+      summary("editing", { kind: "reply", sourceMessageId: "message-answered" }),
+      summary("failed", { kind: "forward", sourceMessageId: "message-forwarded" }),
+      summary("sent", { kind: "reply", sourceMessageId: "message-already-sent" }),
+      summary("delivery_unknown", {
+        kind: "reply_all",
+        sourceMessageId: "message-answered",
+      }),
+    ]);
+
+    await expect(
+      listDraftSourceMessageIds({ listDraftSummaries }, ACCOUNT_ID),
+    ).resolves.toEqual(["message-answered", "message-forwarded"]);
+    expect(listDraftSummaries).toHaveBeenCalledWith(ACCOUNT_ID);
+  });
 });
 
 describe("provider-neutral draft service", () => {

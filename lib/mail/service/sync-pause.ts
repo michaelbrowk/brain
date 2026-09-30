@@ -84,22 +84,31 @@ export function createMailSyncPause(options: {
   };
 }
 
-/** THE THREE THINGS THE SWITCH TURNS OFF, NAMED IN ONE PLACE.
+/** THE THINGS THE SWITCH TURNS OFF, NAMED IN ONE PLACE.
  *
  *  `main.ts` wires the service together and has no test of its own, so a
  *  worker quietly missing from this list is a change nothing would see: Mail
- *  would report itself off while one of its three engines kept running. The
- *  list is built here instead, where `sync-pause.test.ts` asserts its members
- *  by identity, and the required fields below turn a dropped worker into a
+ *  would report itself off while one of its engines kept running. The list is
+ *  built here instead, where `sync-pause.test.ts` asserts its members by
+ *  identity, and the required fields below turn a dropped worker into a
  *  compile error.
  *
- *  The order is the order `main.ts` starts them in. The scheduler is adapted
- *  rather than passed because its `start()` is synchronous.
+ *  The body prefetch is one of them. It carries itself forward, each body
+ *  that lands claiming the next, so stopping the scheduler alone would leave
+ *  it fetching. It stops after the scheduler, so no step claims in between.
+ *
+ *  The order is the order `main.ts` starts them in. The scheduler and the
+ *  prefetch are adapted rather than passed: the scheduler's `start()` is
+ *  synchronous, and the prefetch's two are named for what they start.
  */
 export function mailSyncPauseWorkers(runtime: {
   readonly outboundWorker: MailSyncPauseWorker;
   readonly smtpWorker?: MailSyncPauseWorker;
   readonly backgroundSync: { start(): void; stop(): Promise<void> };
+  readonly bodyPrefetch: {
+    startBackgroundPrefetch(): void;
+    stopBackgroundPrefetch(): Promise<void>;
+  };
 }): readonly MailSyncPauseWorker[] {
   return Object.freeze([
     runtime.outboundWorker,
@@ -107,6 +116,10 @@ export function mailSyncPauseWorkers(runtime: {
     {
       start: () => runtime.backgroundSync.start(),
       stop: () => runtime.backgroundSync.stop(),
+    },
+    {
+      start: () => runtime.bodyPrefetch.startBackgroundPrefetch(),
+      stop: () => runtime.bodyPrefetch.stopBackgroundPrefetch(),
     },
   ]);
 }

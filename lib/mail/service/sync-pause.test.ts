@@ -208,14 +208,21 @@ describe("the workers the pause turns off", () => {
   const outboundWorker = { start: async () => {}, stop: async () => {} };
   const smtpWorker = { start: async () => {}, stop: async () => {} };
 
-  it("carries the outbox drainer, the SMTP worker and the scheduler", async () => {
+  const prefetch = () => ({
+    startBackgroundPrefetch: vi.fn(),
+    stopBackgroundPrefetch: vi.fn(async () => {}),
+  });
+
+  it("carries the outbox drainer, the SMTP worker, the scheduler and the body prefetch", async () => {
     const backgroundSync = { start: vi.fn(), stop: vi.fn(async () => {}) };
+    const bodyPrefetch = prefetch();
     const workers = mailSyncPauseWorkers({
       outboundWorker,
       smtpWorker,
       backgroundSync,
+      bodyPrefetch,
     });
-    expect(workers).toHaveLength(3);
+    expect(workers).toHaveLength(4);
     expect(workers[0]).toBe(outboundWorker);
     expect(workers[1]).toBe(smtpWorker);
     // The scheduler is adapted rather than passed, because its `start()` is
@@ -224,12 +231,22 @@ describe("the workers the pause turns off", () => {
     expect(backgroundSync.stop).toHaveBeenCalledTimes(1);
     await workers[2]!.start();
     expect(backgroundSync.start).toHaveBeenCalledTimes(1);
+    // The prefetch carries itself forward, so the scheduler stopping is not
+    // enough: it has a place of its own, after the scheduler.
+    await workers[3]!.stop();
+    expect(bodyPrefetch.stopBackgroundPrefetch).toHaveBeenCalledTimes(1);
+    await workers[3]!.start();
+    expect(bodyPrefetch.startBackgroundPrefetch).toHaveBeenCalledTimes(1);
   });
 
   it("drops only the SMTP worker when the runtime has none", () => {
     const backgroundSync = { start: vi.fn(), stop: vi.fn(async () => {}) };
-    const workers = mailSyncPauseWorkers({ outboundWorker, backgroundSync });
-    expect(workers).toHaveLength(2);
+    const workers = mailSyncPauseWorkers({
+      outboundWorker,
+      backgroundSync,
+      bodyPrefetch: prefetch(),
+    });
+    expect(workers).toHaveLength(3);
     expect(workers[0]).toBe(outboundWorker);
   });
 });

@@ -22,6 +22,7 @@ import {
 } from "./content-work-runner";
 import { CompleteSetMailDnsResolver } from "./dns";
 import {
+  listDraftSourceMessageIds,
   ProviderNeutralMailDraftService,
 } from "./drafts";
 import { MailImapIdleSupervisor } from "./imap-idle";
@@ -140,6 +141,10 @@ async function main(): Promise<void> {
       }),
       parser: new UnixSocketMailMimeParser(),
     }),
+    draftSources: {
+      listDraftSourceMessageIds: (accountId) =>
+        listDraftSourceMessageIds(outbox, accountId),
+    },
     onBackgroundWorkAvailable: () => kickBackgroundSync(),
     onEvent: writeServiceLog,
     onContentReady: (accountId, messageId) =>
@@ -267,6 +272,7 @@ async function main(): Promise<void> {
       outboundWorker,
       ...(smtpRuntime ? { smtpWorker: smtpRuntime.worker } : {}),
       backgroundSync,
+      bodyPrefetch: content,
     }),
   });
   const server = createMailServiceHttpServer({
@@ -300,6 +306,10 @@ async function main(): Promise<void> {
     await smtpRuntime?.worker.start();
     backgroundSync.start();
     workersRunning = true;
+  } else {
+    // Nothing drives the prefetch with the scheduler down, but it comes up
+    // stopped all the same, so a resume is the one thing that starts it.
+    await content.stopBackgroundPrefetch();
   }
   // The `phase` is what this start actually did, not what the stored flag
   // says. An operator reading the journal after a restart needs to see that

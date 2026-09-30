@@ -521,6 +521,27 @@ function assertIntentCapabilities(
 }
 
 /**
+ * The messages an account's live drafts answer or forward: what the body
+ * cache keeps under its byte budget so reopening the draft finds its letter.
+ * A sent draft is a tombstone and a compose has no source.
+ */
+export async function listDraftSourceMessageIds(
+  store: Pick<MailDraftStore, "listDraftSummaries">,
+  accountId: string,
+): Promise<readonly string[]> {
+  const summaries = await store.listDraftSummaries(accountId);
+  return Object.freeze([
+    ...new Set(
+      summaries.flatMap((summary) =>
+        summary.state === "sent" || summary.intent.kind === "compose"
+          ? []
+          : [summary.intent.sourceMessageId],
+      ),
+    ),
+  ]);
+}
+
+/**
  * The one derivation of a send input from a stored draft. The outbox re-runs it
  * inside the commit transaction to prove the submission still matches the
  * draft, so both sides must normalize recipients identically — a second parser

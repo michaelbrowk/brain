@@ -397,8 +397,10 @@ export function registerMailTools(server: McpToolServer): void {
       }
       try {
         const client = createBrainMailClient();
-        // The body cache drops rows outside the three-newest-Inbox cohort
-        // unless a live demand holds them, so the POST is not an optimisation:
+        // The body cache drops rows outside the prefetch cohort (the 200
+        // newest Inbox messages of the last 30 days) unless a live demand
+        // holds them, and the byte budget can evict even those, so the POST
+        // is not an optimisation:
         // without it the GET can answer `not_requested` forever. Brain records
         // the demand, then polls its own cache. The poll is capped by the
         // caller's own `wait` and answers `fetching` rather than holding the

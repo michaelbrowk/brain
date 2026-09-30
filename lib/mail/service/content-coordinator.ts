@@ -20,6 +20,7 @@ import {
   type MailBlobReadSnapshot,
 } from "./content-blob-store";
 import {
+  MAIL_PARSER_FAILURE_CODES,
   MailContentCacheError,
   type MailContentCapacityReclaimer,
   type CachedMailContent,
@@ -39,6 +40,18 @@ const DEFAULT_RETRY_BASE_MS = 1_000;
 const DEFAULT_RETRY_MAX_MS = 60_000;
 const DEFAULT_RETRY_ATTEMPTS = 4;
 const MAX_CONCURRENT_REMOTE_IMAGE_DRAINS = 2;
+/** Bodies one account's prefetch keeps claimed at a time, queued or running. */
+const MAX_BACKGROUND_FETCHES_PER_ACCOUNT = 2;
+/**
+ * The least time between two prefetch fetches on one IMAP account. Every
+ * fetch there is a session of its own, DNS to LOGIN, so two hundred bodies at
+ * full speed would be two hundred logins in a few minutes against a host that
+ * may count them. Paced, the first fill takes about seventeen minutes and
+ * makes twelve logins a minute at most; afterwards only new mail is fetched.
+ * Batching bodies into one session would save the logins themselves, but it
+ * belongs in the session factory, which IMAP IDLE is reshaping.
+ */
+const IMAP_PREFETCH_SPACING_MS = 5_000;
 
 export type MailContentServiceErrorCode =
   | "mail_content_request_invalid"
@@ -104,17 +117,43 @@ export interface MailContentRetryPolicyPort {
 
 export type MailContentQueueRunResult =
   | { readonly kind: "complete" }
-  | { readonly kind: "retry"; readonly notBefore: number };
+  | { readonly kind: "retry"; readonly notBefore: number }
+  /**
+   * Prefetch work that chose to wait without trying, such as its pacing on an
+   * account where every fetch is a login. It is the prefetch's own wait: work
+   * an owner has taken over runs again at once.
+   */
+  | { readonly kind: "deferred"; readonly notBefore: number };
 
 export interface MailContentQueueTask {
   readonly accountId: string;
   readonly providerMessageId: string;
-  run(signal: AbortSignal): Promise<MailContentQueueRunResult>;
+  /**
+   * Work nobody is waiting for: the body prefetch. It runs behind every
+   * owner request and in one worker slot at most, and an owner asking for the
+   * same message moves it into the owner's lane (`promote`).
+   */
+  readonly background?: boolean;
+  /** Called once when the queue lets go of the task, however it ended. */
+  readonly onSettled?: () => void;
+  run(
+    signal: AbortSignal,
+    lane: { readonly background: boolean },
+  ): Promise<MailContentQueueRunResult>;
 }
 
 export interface MailContentWorkQueuePort {
   has(accountId: string, providerMessageId: string): boolean;
   enqueue(task: MailContentQueueTask): "queued" | "coalesced";
+  /** Moves this message's background work into the owner's lane. */
+  promote(accountId: string, providerMessageId: string): void;
+  /** Background work this account has queued, waiting or running. */
+  backgroundCount(accountId: string): number;
+  /** All of this account's work queued, waiting or running, whoever it is for. */
+  workCount(accountId: string): number;
+  /** Aborts and drops all background work and refuses more until resumed. */
+  abortAndDrainBackground(): Promise<void>;
+  resumeBackground(): void;
   abortAndDrainAccount(accountId: string): Promise<void>;
   restoreAccount(accountId: string): void;
   close(): Promise<void>;
@@ -154,6 +193,11 @@ export interface MailContentService {
 
 export interface MailBackgroundContentPrefetchResult {
   readonly hasMore: boolean;
+}
+
+/** The messages a live draft answers or forwards, whose bodies stay put. */
+export interface MailContentDraftSourcePort {
+  listDraftSourceMessageIds(accountId: string): Promise<readonly string[]>;
 }
 
 /**
@@ -198,21 +242,53 @@ export type MailContentCoordinatorEvent =
 interface QueueEntry {
   readonly key: string;
   readonly task: MailContentQueueTask;
-  readonly controller: AbortController;
+  controller: AbortController;
   readonly drained: Array<() => void>;
   timer: ReturnType<typeof setTimeout> | null;
   queued: boolean;
   running: boolean;
+  /** Still prefetch work: no owner has asked for this message. */
+  background: boolean;
+  /** Holds the one worker slot prefetch work may use. */
+  runningBackground: boolean;
+  /**
+   * Aborted and still winding down in its slot; it goes back in line once it
+   * has, unless it is dropped meanwhile.
+   */
+  winding: boolean;
+  /** A drain, a pause or the close ended it for good. */
+  dropped: boolean;
+  settled: boolean;
 }
 
-/** Process-local content queue. Durable truth remains in SqliteMailContentCache. */
+/**
+ * Prefetch work never holds more than this many of the parser slots, so an
+ * owner opening a message always finds one free unless another owner request
+ * holds it.
+ */
+const MAX_BACKGROUND_WORKERS = MAIL_RESOURCE_LIMITS.concurrentMimeParsers - 1;
+
+/**
+ * Process-local content queue. Durable truth remains in SqliteMailContentCache.
+ * Two lanes feed the same parser slots: an owner's request always starts
+ * before queued prefetch work, and prefetch work takes one slot at most. When
+ * an owner's request would still wait, because the other slot is an owner's
+ * too, the running prefetch gives up its slot: it is aborted, and once its run
+ * has wound down the slot passes on and the prefetch goes back in line. The
+ * parser socket accepts two connections, the same two, so this is also what
+ * keeps a second letter the owner opens from waiting on a letter nobody asked
+ * for.
+ */
 export class InMemoryMailContentWorkQueue implements MailContentWorkQueuePort {
   private readonly clock: () => number;
   private readonly maxPending: number;
   private readonly entries = new Map<string, QueueEntry>();
-  private readonly pending: QueueEntry[] = [];
+  private readonly ownerPending: QueueEntry[] = [];
+  private readonly backgroundPending: QueueEntry[] = [];
   private readonly invalidatedAccounts = new Set<string>();
   private active = 0;
+  private activeBackground = 0;
+  private backgroundStopped = false;
   private closed = false;
 
   constructor(options: {
@@ -237,7 +313,14 @@ export class InMemoryMailContentWorkQueue implements MailContentWorkQueuePort {
   enqueue(task: MailContentQueueTask): "queued" | "coalesced" {
     const accountId = contentAccountId(task.accountId);
     const providerMessageId = contentMessageId(task.providerMessageId);
-    if (typeof task.run !== "function" || this.closed) throw unavailable();
+    if (
+      typeof task.run !== "function" ||
+      (task.onSettled !== undefined && typeof task.onSettled !== "function") ||
+      (task.background === true && this.backgroundStopped) ||
+      this.closed
+    ) {
+      throw unavailable();
+    }
     if (this.invalidatedAccounts.has(accountId)) throw accountNotFound();
     const key = contentWorkKey(accountId, providerMessageId);
     if (this.entries.has(key)) return "coalesced";
@@ -252,22 +335,100 @@ export class InMemoryMailContentWorkQueue implements MailContentWorkQueuePort {
       timer: null,
       queued: true,
       running: false,
+      background: task.background === true,
+      runningBackground: false,
+      winding: false,
+      dropped: false,
+      settled: false,
     };
     this.entries.set(key, entry);
-    this.pending.push(entry);
+    this.laneOf(entry).push(entry);
     queueMicrotask(() => this.pump());
     return "queued";
+  }
+
+  promote(accountIdInput: string, providerMessageIdInput: string): void {
+    const accountId = contentAccountId(accountIdInput);
+    const entry = this.entries.get(
+      contentWorkKey(accountId, contentMessageId(providerMessageIdInput)),
+    );
+    if (entry === undefined || !entry.background) return;
+    if (entry.dropped) {
+      // Only the pause drops work whose account is still here. What the owner
+      // asks for is not the pause's to stop: it runs again as the owner's
+      // once this run has wound down, and the pause stops waiting for it.
+      if (this.closed || this.invalidatedAccounts.has(accountId)) return;
+      entry.dropped = false;
+      entry.winding = entry.running;
+      for (const resolve of entry.drained.splice(0)) resolve();
+    }
+    entry.background = false;
+    if (entry.running && entry.runningBackground) {
+      // The owner's own letter no longer counts as prefetch work, so it is
+      // never the one given up for the owner's next letter.
+      entry.runningBackground = false;
+      this.activeBackground -= 1;
+    }
+    if (entry.queued) {
+      removeFrom(this.backgroundPending, entry);
+      this.ownerPending.push(entry);
+    } else if (entry.timer !== null) {
+      // A prefetch waiting out its pacing or a retry has an owner now, and an
+      // owner does not wait for the prefetch's clock.
+      clearTimeout(entry.timer);
+      entry.timer = null;
+      this.queuePending(entry);
+      return;
+    }
+    this.pump();
+  }
+
+  backgroundCount(accountIdInput: string): number {
+    const accountId = contentAccountId(accountIdInput);
+    let total = 0;
+    for (const entry of this.entries.values()) {
+      if (entry.background && entry.task.accountId === accountId) total += 1;
+    }
+    return total;
+  }
+
+  workCount(accountIdInput: string): number {
+    const accountId = contentAccountId(accountIdInput);
+    let total = 0;
+    for (const entry of this.entries.values()) {
+      if (entry.task.accountId === accountId) total += 1;
+    }
+    return total;
   }
 
   async abortAndDrainAccount(accountIdInput: string): Promise<void> {
     const accountId = contentAccountId(accountIdInput);
     this.invalidatedAccounts.add(accountId);
-    const matching = [...this.entries.values()].filter(
+    await this.dropAndDrain(
       (entry) => entry.task.accountId === accountId,
+      new MailContentServiceError("mail_content_account_not_found"),
     );
+  }
+
+  async abortAndDrainBackground(): Promise<void> {
+    this.backgroundStopped = true;
+    await this.dropAndDrain((entry) => entry.background, unavailable());
+  }
+
+  resumeBackground(): void {
+    if (this.closed) return;
+    this.backgroundStopped = false;
+  }
+
+  private async dropAndDrain(
+    matches: (entry: QueueEntry) => boolean,
+    reason: Error,
+  ): Promise<void> {
     const waits: Promise<void>[] = [];
-    for (const entry of matching) {
-      entry.controller.abort(new MailContentServiceError("mail_content_account_not_found"));
+    for (const entry of [...this.entries.values()]) {
+      if (!matches(entry)) continue;
+      entry.dropped = true;
+      entry.controller.abort(reason);
       if (entry.timer !== null) {
         clearTimeout(entry.timer);
         entry.timer = null;
@@ -310,8 +471,16 @@ export class InMemoryMailContentWorkQueue implements MailContentWorkQueuePort {
     }
     entry.running = true;
     this.active += 1;
+    entry.runningBackground = entry.background;
+    if (entry.runningBackground) this.activeBackground += 1;
+    // Read when asked: an owner can take the work over while it runs.
+    const lane = Object.freeze({
+      get background() {
+        return entry.runningBackground;
+      },
+    });
     void Promise.resolve()
-      .then(() => entry.task.run(entry.controller.signal))
+      .then(() => entry.task.run(entry.controller.signal, lane))
       .then(
         (result) => this.onResult(entry, result),
         () => this.onRejected(entry),
@@ -320,6 +489,10 @@ export class InMemoryMailContentWorkQueue implements MailContentWorkQueuePort {
 
   private onResult(entry: QueueEntry, result: MailContentQueueRunResult): void {
     this.releaseActive(entry);
+    if (entry.winding) {
+      this.onWound(entry);
+      return;
+    }
     if (
       result.kind === "complete" ||
       entry.controller.signal.aborted ||
@@ -331,12 +504,17 @@ export class InMemoryMailContentWorkQueue implements MailContentWorkQueuePort {
       return;
     }
     if (
-      result.kind !== "retry" ||
+      (result.kind !== "retry" && result.kind !== "deferred") ||
       !Number.isSafeInteger(result.notBefore) ||
       result.notBefore < 0
     ) {
       this.finish(entry);
       this.pump();
+      return;
+    }
+    if (result.kind === "deferred" && !entry.background) {
+      // An owner took this over while the prefetch was deciding to wait.
+      this.queuePending(entry);
       return;
     }
     const delay = Math.max(0, result.notBefore - this.clock());
@@ -350,11 +528,55 @@ export class InMemoryMailContentWorkQueue implements MailContentWorkQueuePort {
 
   private onRejected(entry: QueueEntry): void {
     this.releaseActive(entry);
+    if (entry.winding) {
+      this.onWound(entry);
+      return;
+    }
     this.finish(entry);
     this.pump();
   }
 
-  private queuePending(entry: QueueEntry): void {
+  /**
+   * A prefetch that gave its slot to an owner has finished winding down. It
+   * goes back to the head of the line with a fresh signal, in whichever lane
+   * it now belongs to, since it was first in line when it was displaced,
+   * unless a drain, the pause or the close ended it meanwhile.
+   */
+  private onWound(entry: QueueEntry): void {
+    entry.winding = false;
+    if (entry.dropped || this.closed || this.entries.get(entry.key) !== entry) {
+      this.finish(entry);
+      this.pump();
+      return;
+    }
+    entry.controller = new AbortController();
+    this.queuePending(entry, true);
+  }
+
+  /**
+   * When an owner's request would wait and a prefetch holds a slot, the
+   * prefetch is aborted. It keeps the slot until its run has let go of the
+   * provider and the parser: the parser socket counts a connection until its
+   * worker exits, and one slot freed early let a third connection in, which
+   * the socket dropped, failing the owner's letter it was meant to speed up.
+   */
+  private preemptForOwner(): void {
+    if (
+      this.closed ||
+      this.ownerPending.length === 0 ||
+      this.active < MAIL_RESOURCE_LIMITS.concurrentMimeParsers
+    ) {
+      return;
+    }
+    for (const entry of this.entries.values()) {
+      if (!entry.running || !entry.runningBackground || entry.winding) continue;
+      entry.winding = true;
+      entry.controller.abort(unavailable());
+      return;
+    }
+  }
+
+  private queuePending(entry: QueueEntry, first = false): void {
     if (
       this.entries.get(entry.key) !== entry ||
       entry.controller.signal.aborted ||
@@ -366,7 +588,8 @@ export class InMemoryMailContentWorkQueue implements MailContentWorkQueuePort {
     }
     if (!entry.queued) {
       entry.queued = true;
-      this.pending.push(entry);
+      if (first) this.laneOf(entry).unshift(entry);
+      else this.laneOf(entry).push(entry);
     }
     this.pump();
   }
@@ -374,21 +597,35 @@ export class InMemoryMailContentWorkQueue implements MailContentWorkQueuePort {
   private pump(): void {
     while (
       !this.closed &&
-      this.active < MAIL_RESOURCE_LIMITS.concurrentMimeParsers &&
-      this.pending.length > 0
+      this.active < MAIL_RESOURCE_LIMITS.concurrentMimeParsers
     ) {
-      const entry = this.pending.shift()!;
+      let entry = this.ownerPending.shift();
+      if (entry === undefined) {
+        if (this.activeBackground >= MAX_BACKGROUND_WORKERS) break;
+        entry = this.backgroundPending.shift();
+        if (entry === undefined) break;
+      }
       entry.queued = false;
       this.start(entry);
     }
+    this.preemptForOwner();
+  }
+
+  private laneOf(entry: QueueEntry): QueueEntry[] {
+    return entry.background ? this.backgroundPending : this.ownerPending;
   }
 
   private releaseActive(entry: QueueEntry): void {
     if (!entry.running) return;
     entry.running = false;
     this.active -= 1;
-    if (this.active < 0) {
-      this.active = 0;
+    if (entry.runningBackground) {
+      entry.runningBackground = false;
+      this.activeBackground -= 1;
+    }
+    if (this.active < 0 || this.activeBackground < 0) {
+      this.active = Math.max(0, this.active);
+      this.activeBackground = Math.max(0, this.activeBackground);
       throw new MailContentServiceError("mail_content_unavailable");
     }
   }
@@ -405,14 +642,27 @@ export class InMemoryMailContentWorkQueue implements MailContentWorkQueuePort {
     if (entry.timer !== null) clearTimeout(entry.timer);
     entry.timer = null;
     if (entry.queued) {
-      const index = this.pending.indexOf(entry);
-      if (index >= 0) this.pending.splice(index, 1);
+      removeFrom(this.ownerPending, entry);
+      removeFrom(this.backgroundPending, entry);
       entry.queued = false;
     }
     entry.running = false;
+    entry.winding = false;
     if (this.entries.get(entry.key) === entry) this.entries.delete(entry.key);
     for (const resolve of entry.drained.splice(0)) resolve();
+    if (entry.settled) return;
+    entry.settled = true;
+    try {
+      entry.task.onSettled?.();
+    } catch {
+      // The listener's failure is its own; the queue has already let go.
+    }
   }
+}
+
+function removeFrom(lane: QueueEntry[], entry: QueueEntry): void {
+  const index = lane.indexOf(entry);
+  if (index >= 0) lane.splice(index, 1);
 }
 
 export class ExponentialMailContentRetryPolicy
@@ -469,6 +719,22 @@ interface RegistryEntry {
   readonly drained: Array<() => void>;
 }
 
+/** What a fill may claim: see `readClaimPolicy`. */
+interface BackgroundClaimPolicy {
+  readonly claim: boolean;
+  readonly newerThan: number | null;
+  /** What the account can take before it reaches the budget. */
+  readonly roomBytes: number;
+}
+
+interface RemoteImageDrain {
+  /** Settles once the drain has let go of its slot and every image. */
+  readonly done: Promise<void>;
+  readonly controller: AbortController;
+  /** Started by a prefetch commit and not yet asked for by an open. */
+  background: boolean;
+}
+
 export class MailContentCoordinator
   implements MailContentService, MailAccountRemovalGuard
 {
@@ -485,14 +751,27 @@ export class MailContentCoordinator
   private readonly remoteImageFetcher: RemoteImageFetcherPort;
   private readonly remoteImageFetches = new Map<string, Promise<void>>();
   private readonly remoteImageMessageTails = new Map<string, Promise<void>>();
-  private readonly remoteImageDrains = new Map<string, Promise<void>>();
+  private readonly remoteImageDrains = new Map<string, RemoteImageDrain>();
   private readonly remoteImageDrainWaiters: Array<() => void> = [];
   private activeRemoteImageDrains = 0;
   private readonly entries = new Map<string, RegistryEntry>();
   private readonly invalidatedAccounts = new Set<string>();
+  private readonly bodyCacheMaxBytes: number;
+  private readonly imapPrefetchSpacingMs: number;
+  private readonly draftSources: MailContentDraftSourcePort | null;
+  private readonly backgroundFillTails = new Map<string, Promise<void>>();
+  private readonly lastImapPrefetchAt = new Map<string, number>();
+  private readonly leaseReleases = new Set<Promise<void>>();
   private resolutionTail: Promise<void> = Promise.resolve();
+  private backgroundStopped = false;
   private closed = false;
 
+  /*
+   * The prefetch takes no fetch stream from the download routes' ledger. It
+   * did once, and the reader's pictures, which ask for two streams at once,
+   * then found one taken for the whole of a fetch and gave up on the second.
+   * The prefetch's own bound is its single worker slot in the queue.
+   */
   constructor(options: {
     readonly stateDirectory: string;
     readonly store: MultiMailAccountStore;
@@ -500,6 +779,11 @@ export class MailContentCoordinator
     readonly queue?: MailContentWorkQueuePort;
     readonly retryPolicy?: MailContentRetryPolicyPort;
     readonly remoteImageFetcher?: RemoteImageFetcherPort;
+    /** Per account; `MAIL_RESOURCE_LIMITS.bodyCacheMaxBytes` unless a test sets it. */
+    readonly bodyCacheMaxBytes?: number;
+    /** `IMAP_PREFETCH_SPACING_MS` unless a test sets it. */
+    readonly imapPrefetchSpacingMs?: number;
+    readonly draftSources?: MailContentDraftSourcePort;
     readonly onBackgroundWorkAvailable?: () => void;
     readonly onEvent?: (event: MailContentCoordinatorEvent) => void;
     /** Each ready commit, for the change feed: a reader waiting on this
@@ -513,6 +797,16 @@ export class MailContentCoordinator
       typeof options.runner?.run !== "function" ||
       (options.remoteImageFetcher !== undefined &&
         typeof options.remoteImageFetcher.fetch !== "function") ||
+      (options.bodyCacheMaxBytes !== undefined &&
+        (!Number.isSafeInteger(options.bodyCacheMaxBytes) ||
+          options.bodyCacheMaxBytes < 0 ||
+          options.bodyCacheMaxBytes > MAIL_RESOURCE_LIMITS.bodyCacheMaxBytes)) ||
+      (options.imapPrefetchSpacingMs !== undefined &&
+        (!Number.isSafeInteger(options.imapPrefetchSpacingMs) ||
+          options.imapPrefetchSpacingMs < 0 ||
+          options.imapPrefetchSpacingMs > 24 * 60 * 60 * 1_000)) ||
+      (options.draftSources !== undefined &&
+        typeof options.draftSources.listDraftSourceMessageIds !== "function") ||
       (options.onBackgroundWorkAvailable !== undefined &&
         typeof options.onBackgroundWorkAvailable !== "function") ||
       (options.onEvent !== undefined && typeof options.onEvent !== "function")
@@ -525,6 +819,11 @@ export class MailContentCoordinator
     this.clock = options.clock ?? Date.now;
     this.queue = options.queue ?? new InMemoryMailContentWorkQueue({ clock: this.clock });
     this.retryPolicy = options.retryPolicy ?? new ExponentialMailContentRetryPolicy();
+    this.bodyCacheMaxBytes =
+      options.bodyCacheMaxBytes ?? MAIL_RESOURCE_LIMITS.bodyCacheMaxBytes;
+    this.imapPrefetchSpacingMs =
+      options.imapPrefetchSpacingMs ?? IMAP_PREFETCH_SPACING_MS;
+    this.draftSources = options.draftSources ?? null;
     this.onBackgroundWorkAvailable = options.onBackgroundWorkAvailable ?? null;
     this.onEvent = options.onEvent ?? null;
     this.onContentReady = options.onContentReady ?? null;
@@ -562,17 +861,17 @@ export class MailContentCoordinator
         // The body is cached but its images may not be. Opening the message
         // is the owner's approval to fetch them, so the drain starts now
         // rather than when the scheduler next reaches this account.
-        this.startRemoteImageDrain(accountId, messageId);
+        this.startRemoteImageDrain(accountId, messageId, false);
         return this.projectSnapshot(entry, messageId, snapshot);
       }
-      // Only work in flight short-circuits. A background start whose content
-      // never landed (transient failure waiting out its retry window, a row
-      // invalidated by a format or generation change) must not strand the
-      // owner's explicit demand: it re-claims now.
-      if (
-        snapshot.kind === "fetching" &&
-        (await entry.cache.isBackgroundContentPrefetchStarted(messageId))
-      ) {
+      // Only work this process has in flight short-circuits, and it becomes
+      // the owner's, so it no longer waits behind the rest of the prefetch.
+      // Anything else re-claims now: a background start whose content never
+      // landed (a transient failure waiting out its retry window, a row a
+      // format or generation change invalidated) and a row still marked
+      // fetching by a process that has stopped.
+      if (snapshot.kind === "fetching" && this.queue.has(accountId, messageId)) {
+        this.queue.promote(accountId, messageId);
         return this.projectSnapshot(entry, messageId, snapshot);
       }
       return this.requestContentForEntry(entry, accountId, messageId);
@@ -585,6 +884,7 @@ export class MailContentCoordinator
     messageId: string,
   ): Promise<MailMessageContent> {
     if (this.queue.has(accountId, messageId)) {
+      this.queue.promote(accountId, messageId);
       return contentState(accountId, messageId, "fetching");
     }
     const claim = await entry.cache.claim(messageId, this.readTime());
@@ -602,13 +902,66 @@ export class MailContentCoordinator
     if (claim.kind === "busy") {
       return contentState(accountId, messageId, "fetching");
     }
-    let firstLease: MailContentLease | null = claim.lease;
+    await this.enqueueClaimed(entry, accountId, messageId, claim.lease, false);
+    return contentState(accountId, messageId, "fetching");
+  }
+
+  /**
+   * The prefetch's own claim: true when it queued a fetch. Unlike an owner's
+   * request it answers nothing, so a body that turns out ready is not read.
+   */
+  private async startBackgroundFetch(
+    entry: RegistryEntry,
+    accountId: string,
+    messageId: string,
+  ): Promise<boolean> {
+    if (this.queue.has(accountId, messageId)) return false;
+    const claim = await entry.cache.claim(messageId, this.readTime());
+    if (claim.kind !== "claimed") return false;
+    if (this.backgroundStopped) {
+      // The pause came while this claim was being made: give it back.
+      await entry.cache.voidLease(claim.lease).catch(() => undefined);
+      return false;
+    }
+    await this.enqueueClaimed(entry, accountId, messageId, claim.lease, true);
+    return true;
+  }
+
+  private async enqueueClaimed(
+    entry: RegistryEntry,
+    accountId: string,
+    messageId: string,
+    claimedLease: MailContentLease,
+    background: boolean,
+  ): Promise<void> {
+    let firstLease: MailContentLease | null = claimedLease;
     let attempt = 0;
     try {
       this.queue.enqueue({
         accountId,
         providerMessageId: messageId,
-        run: async (signal) => {
+        background,
+        // Each prefetch that lets go claims the next one for its account, so
+        // the pipeline refills itself instead of waking the whole scheduler,
+        // whose pass would visit every account to find it. One dropped before
+        // its fetch began, by the pause or while it waited for its turn,
+        // gives its claim back first.
+        ...(background
+          ? {
+              onSettled: () => {
+                const unused = firstLease;
+                firstLease = null;
+                if (unused !== null) this.releaseUnusedLease(accountId, unused);
+                this.refillBackgroundPrefetch(accountId);
+              },
+            }
+          : {}),
+        run: async (signal, lane) => {
+          if (lane.background) {
+            // The claimed lease is kept for the turn this waits for.
+            const turnAt = await this.imapPrefetchTurn(accountId);
+            if (turnAt !== null) return deferredUntil(turnAt);
+          }
           const lease = firstLease;
           firstLease = null;
           return this.runQueuedAttempt({
@@ -616,6 +969,7 @@ export class MailContentCoordinator
             messageId,
             lease,
             signal,
+            lane,
             nextAttempt: () => {
               attempt += 1;
               return attempt;
@@ -630,7 +984,7 @@ export class MailContentCoordinator
           : "content_queue_unavailable";
       await entry.cache
         .markFailure({
-          lease: claim.lease,
+          lease: claimedLease,
           kind: "transient",
           errorCode,
           now: this.readTime(),
@@ -638,7 +992,6 @@ export class MailContentCoordinator
         .catch(() => undefined);
       throw contentServiceError(error);
     }
-    return contentState(accountId, messageId, "fetching");
   }
 
   async downloadAttachment(input: {
@@ -745,7 +1098,9 @@ export class MailContentCoordinator
     ) {
       throw requestInvalid();
     }
-    if (signal.aborted || this.closed) return backgroundPrefetchComplete();
+    if (signal.aborted || this.closed || this.backgroundStopped) {
+      return backgroundPrefetchComplete();
+    }
 
     const selection = await this.withEntry(accountId, async (entry) => {
       const cohort = await entry.cache.refreshBackgroundPrivacyCohort(
@@ -775,21 +1130,193 @@ export class MailContentCoordinator
         }
         return Object.freeze({ kind: "worked" as const });
       }
-      const messageId = await entry.cache.findBackgroundContentCandidate(
-        this.readTime(),
-      );
-      if (messageId !== null) {
-        await entry.cache.markBackgroundContentPrefetchStarted(
-          messageId,
-          this.readTime(),
-        );
-        await this.requestContentForEntry(entry, accountId, messageId);
+      if ((await this.fillBackgroundPrefetch(entry, accountId)) > 0) {
         return Object.freeze({ kind: "worked" as const });
       }
       return Object.freeze({ kind: "complete" as const });
     });
     if (selection.kind === "complete") return backgroundPrefetchComplete();
     return Object.freeze({ hasMore: true });
+  }
+
+  /**
+   * Brings the account under the byte budget, then claims cohort bodies for
+   * the prefetch until the account has `MAX_BACKGROUND_FETCHES_PER_ACCOUNT` in
+   * flight, and answers how many it claimed. A scheduler step calls it, and so
+   * does every prefetch that lets go, which is what carries the cohort forward
+   * between steps and keeps the budget checked after every body that lands.
+   * One call claims two at most, so a cache that has just grown its cohort
+   * fills it at that pace rather than all at once. Calls for one account take
+   * turns, or two of them could each see room for the same slot. The pause
+   * is checked before every claim, the budget before the first: an account
+   * with two in flight is left alone until one lands.
+   */
+  private fillBackgroundPrefetch(
+    entry: RegistryEntry,
+    accountId: string,
+  ): Promise<number> {
+    const previous = this.backgroundFillTails.get(accountId) ?? Promise.resolve();
+    const run = previous.then(async () => {
+      let policy: BackgroundClaimPolicy | null = null;
+      let roomBytes = 0;
+      let claimed = 0;
+      for (
+        let round = 0;
+        round < MAX_BACKGROUND_FETCHES_PER_ACCOUNT &&
+        !this.closed &&
+        !this.backgroundStopped &&
+        this.queue.backgroundCount(accountId) < MAX_BACKGROUND_FETCHES_PER_ACCOUNT;
+        round += 1
+      ) {
+        if (policy === null) {
+          policy = await this.readClaimPolicy(entry, accountId);
+          // A body still on its way is not in the byte count yet, so the room
+          // holds only while none is, the owner's or the prefetch's: a fill
+          // beside one would fetch a body back into room it is about to
+          // take, then evict it.
+          roomBytes = this.queue.workCount(accountId) === 0 ? policy.roomBytes : 0;
+        }
+        if (!policy.claim) break;
+        const candidate = await entry.cache.findBackgroundContentCandidate(
+          this.readTime(),
+          policy.newerThan,
+          roomBytes,
+        );
+        if (candidate === null) break;
+        await entry.cache.markBackgroundContentPrefetchStarted(
+          candidate.messageId,
+          this.readTime(),
+        );
+        if (await this.startBackgroundFetch(entry, accountId, candidate.messageId)) {
+          claimed += 1;
+          roomBytes = Math.max(0, roomBytes - candidate.estimatedBytes);
+        }
+      }
+      return claimed;
+    });
+    const tail = settledTail(run);
+    this.backgroundFillTails.set(accountId, tail);
+    void tail.then(() => {
+      if (this.backgroundFillTails.get(accountId) === tail) {
+        this.backgroundFillTails.delete(accountId);
+      }
+    });
+    return run;
+  }
+
+  /**
+   * Holds the account to the byte budget and says what the prefetch may claim
+   * next. Under the budget, anything, and the room left lets an evicted body
+   * back in once it fits (`findBackgroundContentCandidate`). At it, only a
+   * letter newer than the body the budget would give up next, since anything
+   * older would be that body. The drafts are asked only once the account is
+   * at the budget, since asking writes to the outbox. When they cannot
+   * answer, nothing is evicted and nothing is claimed: a body a draft needs
+   * is worth more than a prefetch.
+   */
+  private async readClaimPolicy(
+    entry: RegistryEntry,
+    accountId: string,
+  ): Promise<BackgroundClaimPolicy> {
+    const bytes = await entry.cache.readBodyCacheBytes();
+    if (bytes < this.bodyCacheMaxBytes) {
+      return claimUnderBudget(this.bodyCacheMaxBytes - bytes);
+    }
+    let pinnedMessageIds: readonly string[] = [];
+    if (this.draftSources !== null) {
+      try {
+        pinnedMessageIds = (
+          await this.draftSources.listDraftSourceMessageIds(accountId)
+        ).filter(isContentMessageId);
+      } catch {
+        return Object.freeze({ claim: false, newerThan: null, roomBytes: 0 });
+      }
+    }
+    const result = await entry.cache.evictBodiesOverBudget({
+      maxBytes: this.bodyCacheMaxBytes,
+      now: this.readTime(),
+      pinnedMessageIds,
+    });
+    if (result.evictedMessages > 0) await entry.cache.collectGarbage();
+    if (result.remainingBytes < this.bodyCacheMaxBytes) {
+      return claimUnderBudget(this.bodyCacheMaxBytes - result.remainingBytes);
+    }
+    return Object.freeze({
+      claim: result.oldestKeptKey !== null,
+      newerThan: result.oldestKeptKey,
+      roomBytes: 0,
+    });
+  }
+
+  /** Detached; the pause waits for it, so a resume finds the claim free. */
+  private releaseUnusedLease(accountId: string, lease: MailContentLease): void {
+    if (this.closed) return;
+    const release = this.withEntry(accountId, (entry) =>
+      voidAbandonedLease(entry, lease),
+    )
+      .catch(() => undefined)
+      .finally(() => this.leaseReleases.delete(release));
+    this.leaseReleases.add(release);
+  }
+
+  /**
+   * Detached: a failed refill waits for the account's next scheduler step.
+   * The fill itself answers the pause and the close.
+   */
+  private refillBackgroundPrefetch(accountId: string): void {
+    void this.withEntry(accountId, (entry) =>
+      this.fillBackgroundPrefetch(entry, accountId),
+    ).catch(() => undefined);
+  }
+
+  /**
+   * Null when a prefetch on this account may fetch now, or the time its turn
+   * comes. Only an IMAP account waits (`IMAP_PREFETCH_SPACING_MS`), and only
+   * the prefetch: an owner's fetch never asks.
+   */
+  private async imapPrefetchTurn(accountId: string): Promise<number | null> {
+    let account;
+    try {
+      account = await this.store.readAccount(accountId);
+    } catch {
+      return null;
+    }
+    if (account?.providerKind !== "imap") return null;
+    const now = this.readTime();
+    const previous = this.lastImapPrefetchAt.get(accountId);
+    if (previous !== undefined && now < previous + this.imapPrefetchSpacingMs) {
+      return previous + this.imapPrefetchSpacingMs;
+    }
+    this.lastImapPrefetchAt.set(accountId, now);
+    return null;
+  }
+
+  /**
+   * The Mail switch's stop for the prefetch: nothing more is claimed, and
+   * prefetch work queued, waiting or running is aborted and dropped, along
+   * with the image drains prefetch commits started. A body whose fetch it
+   * stopped reads as never fetched and is claimed again on resume, and an
+   * image it stopped stays pending for the scheduler. Owner work is
+   * untouched.
+   */
+  async stopBackgroundPrefetch(): Promise<void> {
+    this.backgroundStopped = true;
+    const drains = [...this.remoteImageDrains.values()].filter(
+      (drain) => drain.background,
+    );
+    for (const drain of drains) drain.controller.abort(unavailable());
+    await this.queue.abortAndDrainBackground();
+    await Promise.all([
+      ...this.backgroundFillTails.values(),
+      ...this.leaseReleases,
+      ...drains.map((drain) => drain.done),
+    ]);
+  }
+
+  startBackgroundPrefetch(): void {
+    if (this.closed) return;
+    this.backgroundStopped = false;
+    this.queue.resumeBackground();
   }
 
   private async loadRemoteImage(
@@ -981,12 +1508,22 @@ export class MailContentCoordinator
     readonly messageId: string;
     readonly lease: MailContentLease | null;
     readonly signal: AbortSignal;
+    /** Prefetch work until an owner takes it over, which can happen mid-run. */
+    readonly lane: { readonly background: boolean };
     readonly nextAttempt: () => number;
   }): Promise<MailContentQueueRunResult> {
-    if (input.signal.aborted || this.closed) return complete();
+    if (this.closed) return complete();
     try {
       return await this.withEntry(input.accountId, async (entry) => {
         let lease = input.lease;
+        if (input.signal.aborted) {
+          await voidAbandonedLease(entry, lease);
+          return complete();
+        }
+        // A prefetch can wait behind owner work and its pacing for longer
+        // than its lease lives. An expired lease is claimed afresh rather than
+        // run into a commit the cache would refuse.
+        if (lease !== null && lease.expiresAt <= this.readTime()) lease = null;
         if (lease === null) {
           const claim = await entry.cache.claim(input.messageId, this.readTime());
           if (
@@ -1025,12 +1562,25 @@ export class MailContentCoordinator
           // Freshly committed content may reference pending remote images.
           // Their drain starts here, detached from this attempt; the
           // scheduler still hears about it for whatever the drain leaves.
-          this.startRemoteImageDrain(input.accountId, input.messageId);
-          this.signalBackgroundWork();
+          // A prefetch does not wake it: two hundred bodies would be two
+          // hundred passes over every account for nothing, since the
+          // prefetch claims its own next body, and the scheduler's own
+          // interval already covers what a drain leaves behind. The change
+          // feed hears of every ready body, the prefetch's too: a reader
+          // waiting on a letter the prefetch lands fetches it at once.
+          const background = input.lane.background;
+          this.startRemoteImageDrain(input.accountId, input.messageId, background);
+          if (!background) this.signalBackgroundWork();
           this.signalContentReady(input.accountId, input.messageId);
           return complete();
         } catch (error) {
-          if (input.signal.aborted || this.closed) return complete();
+          if (input.signal.aborted || this.closed) {
+            // Stopped for an owner, the pause or a teardown, not failed: the
+            // lease is voided, so whoever comes next claims the body at once
+            // instead of waiting out this one.
+            await voidAbandonedLease(entry, lease);
+            return complete();
+          }
           const failure = workFailure(error);
           try {
             await entry.cache.markFailure({
@@ -1049,6 +1599,14 @@ export class MailContentCoordinator
             throw markError;
           }
           if (failure.kind === "permanent") return complete();
+          // A letter that brought the parser down may do so every time: the
+          // prefetch tries it once and leaves it for an open.
+          if (
+            input.lane.background &&
+            MAIL_PARSER_FAILURE_CODES.includes(failure.errorCode)
+          ) {
+            return complete();
+          }
           const attempt = input.nextAttempt();
           const delay = this.retryPolicy.nextDelayMs({
             accountId: input.accountId,
@@ -1186,6 +1744,11 @@ export class MailContentCoordinator
     });
     try {
       await cache.initialize();
+      // No work of this process holds a lease on this account yet, so any
+      // lease still live belongs to a process that stopped mid-fetch, and any
+      // body half received is one it was streaming.
+      await cache.voidInterruptedLeases();
+      await blobStore.removeIncomingFiles();
       const created: RegistryEntry = {
         cache,
         blobStore,
@@ -1210,25 +1773,47 @@ export class MailContentCoordinator
    * takes its own registry lease, so account teardown waits for it and the
    * entry's lifecycle abort stops it. One drain per message at a time: a
    * second open while it runs has nothing to add.
+   *
+   * A drain a prefetch commit started is the prefetch's, and the Mail switch
+   * stops it with the rest of the prefetch (`stopBackgroundPrefetch`). An
+   * open while it runs takes it out of the pause's reach and runs a drain of
+   * the owner's own after it, since the prefetch's drain listed only the
+   * images the prefetch may fetch, and may have been stopped already.
    */
-  private startRemoteImageDrain(accountId: string, messageId: string): void {
-    if (this.closed) return;
+  private startRemoteImageDrain(
+    accountId: string,
+    messageId: string,
+    background: boolean,
+  ): void {
+    if (this.closed || (background && this.backgroundStopped)) return;
     const key = contentWorkKey(accountId, messageId);
-    if (this.remoteImageDrains.has(key)) return;
-    const drain = this.acquireRemoteImageDrainSlot()
-      .then(() =>
-        this.withEntry(accountId, (entry) =>
-          this.drainRemoteImages(entry, messageId),
-        ),
-      )
-      .catch(() => undefined)
-      .finally(() => {
+    const existing = this.remoteImageDrains.get(key);
+    if (existing !== undefined) {
+      if (background || !existing.background) return;
+      existing.background = false;
+      void existing.done.then(() =>
+        this.startRemoteImageDrain(accountId, messageId, false),
+      );
+      return;
+    }
+    const controller = new AbortController();
+    const drain = (async () => {
+      if (!(await this.acquireRemoteImageDrainSlot(controller.signal))) return;
+      try {
+        await this.withEntry(accountId, (entry) =>
+          this.drainRemoteImages(entry, messageId, controller.signal),
+        );
+      } catch {
+        // Each image's outcome is on record; the drain itself answers no one.
+      } finally {
         this.releaseRemoteImageDrainSlot();
-        if (this.remoteImageDrains.get(key) === drain) {
-          this.remoteImageDrains.delete(key);
-        }
-      });
-    this.remoteImageDrains.set(key, drain);
+      }
+    })().finally(() => {
+      if (this.remoteImageDrains.get(key)?.done === drain) {
+        this.remoteImageDrains.delete(key);
+      }
+    });
+    this.remoteImageDrains.set(key, { done: drain, controller, background });
   }
 
   /**
@@ -1238,15 +1823,27 @@ export class MailContentCoordinator
    * Two: before the drain existed the process dialed one origin at a time,
    * one more lets a slow origin hold up only itself, and it matches the
    * parser and reader concurrency on either side of it. A freed slot passes
-   * straight to the next waiter, in arrival order.
+   * straight to the next waiter, in arrival order. A drain stopped while it
+   * waits leaves the line and takes no slot: false.
    */
-  private acquireRemoteImageDrainSlot(): Promise<void> {
+  private acquireRemoteImageDrainSlot(signal: AbortSignal): Promise<boolean> {
+    if (signal.aborted) return Promise.resolve(false);
     if (this.activeRemoteImageDrains < MAX_CONCURRENT_REMOTE_IMAGE_DRAINS) {
       this.activeRemoteImageDrains += 1;
-      return Promise.resolve();
+      return Promise.resolve(true);
     }
-    return new Promise<void>((resolve) => {
-      this.remoteImageDrainWaiters.push(resolve);
+    return new Promise<boolean>((resolve) => {
+      const waiter = () => {
+        signal.removeEventListener("abort", leave);
+        resolve(true);
+      };
+      const leave = () => {
+        const index = this.remoteImageDrainWaiters.indexOf(waiter);
+        if (index >= 0) this.remoteImageDrainWaiters.splice(index, 1);
+        resolve(false);
+      };
+      signal.addEventListener("abort", leave, { once: true });
+      this.remoteImageDrainWaiters.push(waiter);
     });
   }
 
@@ -1262,9 +1859,10 @@ export class MailContentCoordinator
   private async drainRemoteImages(
     entry: RegistryEntry,
     messageId: string,
+    drainSignal: AbortSignal,
   ): Promise<void> {
     const accountId = entry.cache.accountId;
-    const signal = entry.lifecycle.signal;
+    const signal = AbortSignal.any([entry.lifecycle.signal, drainSignal]);
     const pending = await entry.cache.listPendingRemoteImages(
       messageId,
       this.readTime(),
@@ -1578,6 +2176,15 @@ function contentMessageId(value: unknown): string {
   }
 }
 
+function isContentMessageId(value: unknown): value is string {
+  try {
+    validateMailContentMessageId(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function contentAttachmentId(value: unknown): string {
   try {
     return validateMailContentAttachmentId(value);
@@ -1608,8 +2215,26 @@ function retryAt(notBefore: number): MailContentQueueRunResult {
   return Object.freeze({ kind: "retry" as const, notBefore });
 }
 
+function deferredUntil(notBefore: number): MailContentQueueRunResult {
+  if (!Number.isSafeInteger(notBefore) || notBefore < 0) throw unavailable();
+  return Object.freeze({ kind: "deferred" as const, notBefore });
+}
+
+/** Best effort: a failure leaves the lease to run out on its own. */
+async function voidAbandonedLease(
+  entry: RegistryEntry,
+  lease: MailContentLease | null,
+): Promise<void> {
+  if (lease === null) return;
+  await entry.cache.voidLease(lease).catch(() => undefined);
+}
+
 function backgroundPrefetchComplete(): MailBackgroundContentPrefetchResult {
   return Object.freeze({ hasMore: false });
+}
+
+function claimUnderBudget(roomBytes: number): BackgroundClaimPolicy {
+  return Object.freeze({ claim: true, newerThan: null, roomBytes });
 }
 
 function settledTail<T>(promise: Promise<T>): Promise<void> {

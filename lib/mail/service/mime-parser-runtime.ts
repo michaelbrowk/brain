@@ -118,6 +118,25 @@ export async function runMimeParserWorkerConnection(socket: Duplex): Promise<voi
         throw integrityFailure();
       }
       parser.end();
+      // A client that no longer wants the answer hangs up, as a prefetch
+      // displaced for an owner's letter does. The worker stops there rather
+      // than parse on: the parser socket counts a connection until its worker
+      // has exited, and one left parsing for nobody cost the owner's next
+      // letter its connection.
+      const hungUp = frames.next().then(
+        (next) => {
+          if (!next.done) throw permanentInvalid();
+          return true;
+        },
+        () => true,
+      );
+      const parsed = parserOutput.then(() => false);
+      if (await Promise.race([parsed, hungUp])) {
+        parser.destroy();
+        await parserOutput.catch(() => undefined);
+        socket.destroy();
+        return;
+      }
       const output = await parserOutput;
       assertBeforeDeadline(request);
       await writeBmp1JsonFrame(socket, BMP1_FRAME.done, output);

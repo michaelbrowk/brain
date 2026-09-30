@@ -123,9 +123,38 @@ export const MAIL_RESOURCE_LIMITS = Object.freeze({
   remoteImageFetchDeadlineMs: 8_000,
   remoteImageMaxRedirects: 3,
   remoteImageTransientRetryMs: 5 * 60_000,
-  privacyPrefetchMaxMessagesPerAccount: 3,
-  privacyPrefetchMaxAgeMs: 7 * 24 * 60 * 60 * 1_000,
+  /* The body cohort: the newest Inbox messages whose bodies a sync fetches
+   * before anyone opens them, so opening one renders from disk. Two hundred
+   * inside thirty days is the owner's figure; `bodyCacheMaxBytes` below is
+   * what bounds the disk it takes. */
+  privacyPrefetchMaxMessagesPerAccount: 200,
+  privacyPrefetchMaxAgeMs: 30 * 24 * 60 * 60 * 1_000,
   privacyPrefetchMaxFutureSkewMs: 5 * 60 * 1_000,
+  /* A cohort message whose thread the provider sizes past this is fetched
+   * when opened, not before. The size is what the sync already has, the sum
+   * of the thread's messages, so a long conversation can be held back with a
+   * big attachment, and so does one the provider gave no size for. On the
+   * prefetch probe the service's peak follows the largest letter it parses:
+   * 135 MiB with 1 MiB marketing letters, 151 MiB with a 1.85 MiB attachment
+   * on them (about the most this admits), 186 MiB at 6 MiB and 220 MiB at
+   * 15 MiB, past the 217 MiB bar. Letters that size would also fill
+   * `bodyCacheMaxBytes` on their own: ten with 15 MiB attachments left 27 of
+   * 200 bodies under it. */
+  privacyPrefetchMaxThreadBytes: 4 * 1024 * 1024,
+  /* The images a sync may fetch without an open, a prefix of the body cohort.
+   * These stayed where they were when the body cohort grew: a fetched image
+   * can be a tracking pixel, so more bodies on disk must not mean more pings
+   * the owner never asked for. Everything past this prefix fetches its images
+   * when a reader opens it. */
+  remoteImagePrefetchMaxMessagesPerAccount: 3,
+  remoteImagePrefetchMaxAgeMs: 7 * 24 * 60 * 60 * 1_000,
+  /* Every blob a ready body holds on disk, per account: raw MIME, the text and
+   * sanitized HTML parts, attachments and fetched images. Two hundred letters
+   * at a median of 60 KiB of HTML and text are about 15 MiB before the raw
+   * copy and the heavier marketing mail. Past the budget the body least
+   * recently sent or opened goes first, after any nobody opened whose raw
+   * message is over `privacyPrefetchMaxThreadBytes`. */
+  bodyCacheMaxBytes: 48 * 1024 * 1024,
   maxInlineImagePixels: 12_000_000,
   maxInlineImageFrames: 100,
   idleRestartMs: 25 * 60_000,

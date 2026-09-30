@@ -227,6 +227,107 @@ describe("production mail content runner", () => {
     );
   });
 
+  it("parses again, without fetching again, a message whose parser connection was dropped", async () => {
+    const fixture = await createFixture();
+    const raw = Buffer.from("From: sender@example.test\r\n\r\nHello");
+    const text = Buffer.from("Hello");
+    let fetches = 0;
+    const source = sourceFactoryFor(raw);
+    const outcomes: MailMimeParseOutcome[] = [
+      { kind: "transient_failure", errorCode: "mail_mime_worker_dropped" },
+      { kind: "transient_failure", errorCode: "mail_mime_worker_dropped" },
+      {
+        kind: "parsed",
+        artifacts: {
+          text: { descriptor: descriptor(text), data: text },
+          sanitizedHtml: null,
+          remoteImages: [],
+          attachments: [],
+        },
+      },
+    ];
+    const parsedRaw: Buffer[] = [];
+    const runner = new ProductionMailContentWorkRunner({
+      sourceFactory: {
+        async create(input) {
+          fetches += 1;
+          return source.create(input);
+        },
+      },
+      parser: {
+        isolation: { networkAccess: false, credentialAccess: false, sandboxVersion: 1 },
+        async parse(request) {
+          parsedRaw.push(await collect(request.rawMimeStream));
+          return outcomes.shift()!;
+        },
+      },
+      now: () => fixture.now,
+    });
+
+    await runner.run(fixture.input, new AbortController().signal);
+
+    expect(fetches).toBe(1);
+    expect(parsedRaw).toEqual([raw, raw, raw]);
+    await expect(fixture.cache.inspect(MESSAGE_ID)).resolves.toMatchObject({
+      kind: "ready",
+      content: { text: descriptor(Buffer.from("Hello")) },
+    });
+  });
+
+  it("gives up on a parser that keeps dropping the connection after three tries", async () => {
+    const fixture = await createFixture();
+    const parse = vi.fn<IsolatedMailParserPort["parse"]>(async () => ({
+      kind: "transient_failure" as const,
+      errorCode: "mail_mime_worker_dropped" as const,
+    }));
+    const runner = new ProductionMailContentWorkRunner({
+      sourceFactory: sourceFactoryFor(Buffer.from("raw")),
+      parser: {
+        isolation: { networkAccess: false, credentialAccess: false, sandboxVersion: 1 },
+        parse,
+      },
+      now: () => fixture.now,
+    });
+    await expect(
+      runner.run(fixture.input, new AbortController().signal),
+    ).rejects.toEqual(new MailContentWorkError("transient", "mail_mime_worker_dropped"));
+    expect(parse).toHaveBeenCalledTimes(3);
+    // A worker that crashed after answering is a failure at once.
+    parse.mockClear();
+    parse.mockResolvedValue({
+      kind: "transient_failure",
+      errorCode: "mail_mime_worker_crashed",
+    });
+    await expect(
+      runner.run(fixture.input, new AbortController().signal),
+    ).rejects.toEqual(new MailContentWorkError("transient", "mail_mime_worker_crashed"));
+    expect(parse).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops waiting to parse again when the fetch is aborted", async () => {
+    const fixture = await createFixture();
+    const controller = new AbortController();
+    const parse = vi.fn<IsolatedMailParserPort["parse"]>(async () => {
+      controller.abort();
+      return {
+        kind: "transient_failure" as const,
+        errorCode: "mail_mime_worker_dropped" as const,
+      };
+    });
+    const runner = new ProductionMailContentWorkRunner({
+      sourceFactory: sourceFactoryFor(Buffer.from("raw")),
+      parser: {
+        isolation: { networkAccess: false, credentialAccess: false, sandboxVersion: 1 },
+        parse,
+      },
+      now: () => fixture.now,
+    });
+    await expect(runner.run(fixture.input, controller.signal)).rejects.toBeInstanceOf(
+      MailContentWorkError,
+    );
+    expect(parse).toHaveBeenCalledTimes(1);
+  });
+
   it("creates a provider-matched source and stops reauthentication-required accounts", async () => {
     const gmailStore = {
       readAccount: async () =>

@@ -15,6 +15,8 @@ import type { MailBlobDescriptor } from "../ports";
 import { MAIL_RESOURCE_LIMITS } from "../security";
 import { FakeMailContentWorkRunner } from "../testing/content-fakes";
 import type { MultiMailAccountStore } from "./account-store";
+import { AtomicMailSystemAdmission } from "./admission";
+import { MailBackgroundSyncScheduler } from "./background-sync";
 import { AtomicMailBlobStore } from "./content-blob-store";
 import { SqliteMailContentCache } from "./content-cache";
 import {
@@ -22,10 +24,14 @@ import {
   InMemoryMailContentWorkQueue,
   MailContentCoordinator,
   type MailContentCoordinatorEvent,
+  type MailContentQueueTask,
   MailContentServiceError,
   MailContentWorkError,
   type MailContentWorkInput,
+  type MailContentWorkQueuePort,
+  type MailContentWorkRunnerPort,
 } from "./content-coordinator";
+import { ProductionMailContentWorkRunner } from "./content-work-runner";
 import {
   type CachedProviderMessage,
   type CachedProviderThread,
@@ -39,6 +45,8 @@ import {
 const ACCOUNT_ID = "account-a11111111111111111111111111111111";
 const SECOND_ACCOUNT_ID = "account-a22222222222222222222222222222222";
 const MESSAGE_ID = "message-thread-a";
+const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
 const roots: string[] = [];
 const messageCaches: SqliteMailMessageCache[] = [];
 const coordinators: MailContentCoordinator[] = [];
@@ -339,6 +347,240 @@ describe("MailContentCoordinator", () => {
     expect(pendingAccountWork).toBe(0);
     expect(queue.has(ACCOUNT_ID, "message-queue-running")).toBe(false);
     expect(queue.has(ACCOUNT_ID, "message-queue-pending")).toBe(false);
+  });
+
+  it("starts an owner's request ahead of prefetch work, which never takes the last slot", async () => {
+    const queue = new InMemoryMailContentWorkQueue({ maxPending: 10 });
+    workQueues.push(queue);
+    const work = queueHarness(queue);
+    work.enqueue("first", true);
+    work.enqueue("second", true);
+    work.enqueue("third", true);
+    expect(queue.backgroundCount(ACCOUNT_ID)).toBe(3);
+    expect(queue.backgroundCount(SECOND_ACCOUNT_ID)).toBe(0);
+
+    // One prefetch at a time: the second worker slot waits for an owner.
+    await vi.waitFor(() => expect(work.started).toEqual(["first:prefetch"]));
+    await nextTurn();
+    expect(work.started).toEqual(["first:prefetch"]);
+    work.enqueue("owner", false);
+    await vi.waitFor(() =>
+      expect(work.started).toEqual(["first:prefetch", "owner:owner"]),
+    );
+
+    // An owner asking for queued prefetch work moves it into the owner's lane.
+    // With both slots taken, the running prefetch is aborted, and keeps its
+    // slot until its run has let go: the parser counts it until then.
+    work.holdWindDown("first");
+    queue.promote(ACCOUNT_ID, "message-queue-third");
+    await vi.waitFor(() => expect(work.signals.get("first")?.aborted).toBe(true));
+    await nextTurn();
+    expect(work.started).toEqual(["first:prefetch", "owner:owner"]);
+    expect(queue.backgroundCount(ACCOUNT_ID)).toBe(2);
+    work.letGo("first");
+    await vi.waitFor(() =>
+      expect(work.started).toEqual([
+        "first:prefetch",
+        "owner:owner",
+        "third:owner",
+      ]),
+    );
+    // The displaced prefetch went back to the head of its line, so it runs
+    // again, with a fresh signal, before the second once a slot frees.
+    work.release("owner");
+    await vi.waitFor(() =>
+      expect(work.started).toEqual([
+        "first:prefetch",
+        "owner:owner",
+        "third:owner",
+        "first:prefetch",
+      ]),
+    );
+    expect(work.signals.get("first")?.aborted).toBe(false);
+    await nextTurn();
+    expect(work.started).toHaveLength(4);
+    work.release("first");
+    await vi.waitFor(() =>
+      expect(work.started).toEqual([
+        "first:prefetch",
+        "owner:owner",
+        "third:owner",
+        "first:prefetch",
+        "second:prefetch",
+      ]),
+    );
+    work.release("third");
+    work.release("second");
+    await vi.waitFor(() =>
+      expect(work.settled.toSorted()).toEqual(["first", "owner", "second", "third"]),
+    );
+    expect(queue.backgroundCount(ACCOUNT_ID)).toBe(0);
+  });
+
+  it("never gives up the owner's own letter, taken over mid-run, for the owner's next one", async () => {
+    const queue = new InMemoryMailContentWorkQueue({ maxPending: 10 });
+    workQueues.push(queue);
+    const work = queueHarness(queue);
+    work.enqueue("taken", true);
+    work.enqueue("waiting", true);
+    await vi.waitFor(() => expect(work.started).toEqual(["taken:prefetch"]));
+
+    // The owner opens the letter the prefetch is fetching. It is the owner's
+    // now, to the run already under way too, and the prefetch slot is free.
+    queue.promote(ACCOUNT_ID, "message-queue-taken");
+    expect(work.lanes.get("taken")?.background).toBe(false);
+    expect(queue.backgroundCount(ACCOUNT_ID)).toBe(1);
+    await vi.waitFor(() =>
+      expect(work.started).toEqual(["taken:prefetch", "waiting:prefetch"]),
+    );
+
+    // The owner's next letter displaces the prefetch, not the owner's own.
+    work.enqueue("next", false);
+    await vi.waitFor(() =>
+      expect(work.started).toEqual([
+        "taken:prefetch",
+        "waiting:prefetch",
+        "next:owner",
+      ]),
+    );
+    expect(work.signals.get("waiting")?.aborted).toBe(true);
+    expect(work.signals.get("taken")?.aborted).toBe(false);
+    for (const name of ["taken", "next", "waiting"]) work.release(name);
+    await vi.waitFor(() =>
+      expect(work.settled.toSorted()).toEqual(["next", "taken", "waiting"]),
+    );
+  });
+
+  it("runs as the owner's an open of prefetch work the pause is dropping", async () => {
+    const queue = new InMemoryMailContentWorkQueue({ maxPending: 10 });
+    workQueues.push(queue);
+    const work = queueHarness(queue);
+    work.enqueue("opened", true);
+    await vi.waitFor(() => expect(work.started).toEqual(["opened:prefetch"]));
+    work.holdWindDown("opened");
+    let paused = false;
+    const pause = queue.abortAndDrainBackground().then(() => {
+      paused = true;
+    });
+    await vi.waitFor(() => expect(work.signals.get("opened")?.aborted).toBe(true));
+    expect(paused).toBe(false);
+
+    // The owner opens it while its fetch winds down: the pause stops waiting
+    // for what is now the owner's, and the letter is fetched again as that.
+    queue.promote(ACCOUNT_ID, "message-queue-opened");
+    await vi.waitFor(() => expect(paused).toBe(true));
+    await pause;
+    expect(work.started).toEqual(["opened:prefetch"]);
+    work.letGo("opened");
+    await vi.waitFor(() =>
+      expect(work.started).toEqual(["opened:prefetch", "opened:owner"]),
+    );
+    work.release("opened");
+    await vi.waitFor(() => expect(work.settled).toEqual(["opened"]));
+  });
+
+  it("leaves dropped the work of an account being drained, whoever asks for it", async () => {
+    const queue = new InMemoryMailContentWorkQueue({ maxPending: 10 });
+    workQueues.push(queue);
+    const work = queueHarness(queue);
+    work.enqueue("removed", true);
+    await vi.waitFor(() => expect(work.started).toEqual(["removed:prefetch"]));
+    work.holdWindDown("removed");
+    const drained = queue.abortAndDrainAccount(ACCOUNT_ID);
+    await vi.waitFor(() => expect(work.signals.get("removed")?.aborted).toBe(true));
+    queue.promote(ACCOUNT_ID, "message-queue-removed");
+    work.letGo("removed");
+    await drained;
+    await nextTurn();
+    expect(work.started).toEqual(["removed:prefetch"]);
+    expect(work.settled).toEqual(["removed"]);
+  });
+
+  it("drops for good a displaced prefetch the pause stops while it winds down", async () => {
+    const queue = new InMemoryMailContentWorkQueue({ maxPending: 10 });
+    workQueues.push(queue);
+    const work = queueHarness(queue);
+    work.enqueue("prefetch", true);
+    await vi.waitFor(() => expect(work.started).toEqual(["prefetch:prefetch"]));
+    work.enqueue("one", false);
+    work.holdWindDown("prefetch");
+    work.enqueue("two", false);
+    await vi.waitFor(() =>
+      expect(work.signals.get("prefetch")?.aborted).toBe(true),
+    );
+    const pause = queue.abortAndDrainBackground();
+    work.letGo("prefetch");
+    await pause;
+    await vi.waitFor(() =>
+      expect(work.started).toEqual(["prefetch:prefetch", "one:owner", "two:owner"]),
+    );
+    // A freed slot finds nothing: the pause ended the prefetch for good.
+    work.release("one");
+    await nextTurn();
+    await nextTurn();
+    expect(work.started).toEqual(["prefetch:prefetch", "one:owner", "two:owner"]);
+    expect(queue.has(ACCOUNT_ID, "message-queue-prefetch")).toBe(false);
+    work.release("two");
+  });
+
+  it("gives an owner who took over a prefetch mid-run no part of the prefetch's wait", async () => {
+    const queue = new InMemoryMailContentWorkQueue({ maxPending: 10 });
+    workQueues.push(queue);
+    const deciding = deferred<void>();
+    const decided = deferred<void>();
+    const lanes: string[] = [];
+    queue.enqueue({
+      accountId: ACCOUNT_ID,
+      providerMessageId: "message-queue-paced",
+      background: true,
+      async run(_signal, lane) {
+        lanes.push(lane.background ? "prefetch" : "owner");
+        if (!lane.background) return { kind: "complete" };
+        deciding.resolve();
+        await decided.promise;
+        // The prefetch decides to wait a minute for its turn.
+        return { kind: "deferred", notBefore: Date.now() + 60_000 };
+      },
+    });
+    await deciding.promise;
+    queue.promote(ACCOUNT_ID, "message-queue-paced");
+    decided.resolve();
+    await vi.waitFor(() => expect(lanes).toEqual(["prefetch", "owner"]));
+  });
+
+  it("hands a freed slot to a waiting owner before waiting prefetch work", async () => {
+    const queue = new InMemoryMailContentWorkQueue({ maxPending: 10 });
+    workQueues.push(queue);
+    const started: string[] = [];
+    const releases = new Map<string, ReturnType<typeof deferred<void>>>();
+    const enqueue = (name: string, background: boolean) => {
+      releases.set(name, deferred<void>());
+      queue.enqueue({
+        accountId: ACCOUNT_ID,
+        providerMessageId: `message-queue-${name}`,
+        background,
+        async run() {
+          started.push(name);
+          await releases.get(name)!.promise;
+          return { kind: "complete" };
+        },
+      });
+    };
+    enqueue("one", false);
+    enqueue("two", false);
+    await vi.waitFor(() => expect(started).toEqual(["one", "two"]));
+    enqueue("prefetch", true);
+    enqueue("three", false);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(started).toEqual(["one", "two"]);
+    releases.get("one")!.resolve();
+    await vi.waitFor(() => expect(started).toEqual(["one", "two", "three"]));
+    releases.get("two")!.resolve();
+    await vi.waitFor(() =>
+      expect(started).toEqual(["one", "two", "three", "prefetch"]),
+    );
+    releases.get("three")!.resolve();
+    releases.get("prefetch")!.resolve();
   });
 
   it("invalidates the exact ready snapshot when a body blob read fails", async () => {
@@ -1038,9 +1280,6 @@ describe("MailContentCoordinator", () => {
     await contentCache.initialize();
     await contentCache.refreshBackgroundPrivacyCohort(1_000);
     await contentCache.markBackgroundContentPrefetchStarted(MESSAGE_ID, 1_000);
-    await expect(
-      contentCache.isBackgroundContentPrefetchStarted(MESSAGE_ID),
-    ).resolves.toBe(true);
     await expect(contentCache.inspect(MESSAGE_ID)).resolves.toEqual({
       kind: "not_requested",
     });
@@ -1121,7 +1360,7 @@ describe("MailContentCoordinator", () => {
       undefined,
       undefined,
       undefined,
-      onContentReady,
+      { onContentReady },
     );
 
     await expect(
@@ -1139,49 +1378,79 @@ describe("MailContentCoordinator", () => {
     expect(onContentReady).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps an opened N+1 Inbox message outside the stable top-N cohort", async () => {
+  it("announces each body the prefetch lands once, and nothing for a run it gave up", async () => {
     const fixture = await createFixture([ACCOUNT_ID]);
-    const cache = fixture.caches[0]!;
-    const recent = [
-      { threadId: "thread-b", messageId: "message-thread-b", sentAt: 200 },
-      { threadId: "thread-c", messageId: "message-thread-c", sentAt: 300 },
-      { threadId: "thread-d", messageId: "message-thread-d", sentAt: 400 },
+    seedInbox(fixture.caches[0]!, ["p1", "p2", "p3"]);
+    const gated = gatedRunner(10);
+    const onContentReady = vi.fn();
+    const coordinator = fixture.coordinator(
+      gated.runner,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { onContentReady },
+    );
+    const id = (name: string) => `message-thread-${name}`;
+    await coordinator.runBackgroundPrefetchStep(ACCOUNT_ID, new AbortController().signal);
+    await vi.waitFor(() => expect(gated.started()).toEqual([id("p3")]));
+
+    // The owner's thread of two displaces the prefetch: aborted, it lands
+    // nothing and announces nothing.
+    for (const name of ["p1", "p2"]) {
+      await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: id(name) });
+    }
+    await vi.waitFor(() => expect(gated.signals.get(id("p3"))?.aborted).toBe(true));
+    await vi.waitFor(() => expect(gated.started()).toContain(id("p2")));
+    expect(onContentReady).not.toHaveBeenCalled();
+
+    // Each body that lands is announced once, the owner's and the prefetch's.
+    gated.release(id("p1"));
+    gated.release(id("p2"));
+    await vi.waitFor(() =>
+      expect(gated.started().filter((value) => value === id("p3"))).toHaveLength(2),
+    );
+    gated.release(id("p3"));
+    await vi.waitFor(() => expect(gated.started()).toContain(MESSAGE_ID));
+    await vi.waitFor(() => expect(onContentReady).toHaveBeenCalledTimes(3));
+
+    // Mail goes off while the prefetch fetches the last one: nothing lands.
+    await coordinator.stopBackgroundPrefetch();
+    await sleep(20);
+    expect(onContentReady.mock.calls.map(([, messageId]) => messageId).sort()).toEqual(
+      [id("p1"), id("p2"), id("p3")],
+    );
+    for (const call of onContentReady.mock.calls) expect(call[0]).toBe(ACCOUNT_ID);
+  });
+
+  it("prefetches every cohort body but fetches images unasked only for the newest three", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    const recent = seedInbox(fixture.caches[0]!, ["b", "c", "d", "e"]);
+    const all = [
+      { threadId: "thread-a", messageId: MESSAGE_ID, sentAt: 100 },
+      ...recent,
     ];
-    cache.applyIncrementalPage({
-      expectedHistoryId: "100",
-      expectedPageToken: null,
-      changes: recent.map((candidate) => ({
-        kind: "upsert" as const,
-        value: threadFixture(ACCOUNT_ID, candidate),
-      })),
-      nextPageToken: null,
-      resultingHistoryId: "101",
-      now: 500,
-    });
-    const oldRemoteImageId = `remote-image-a${"5".repeat(32)}`;
-    const expectedBackgroundOrder = recent.toReversed();
-    const runner = new FakeMailContentWorkRunner([
-      (input) => {
-        expect(input.providerMessageId).toBe(MESSAGE_ID);
+    const imageFor = (messageId: string) => {
+      const letter = messageId.slice(-1);
+      return {
+        remoteImageId: `remote-image-a${letter.repeat(32)}`,
+        sourceUrl: `https://images.example.com/${letter}.png`,
+      };
+    };
+    const runner = new FakeMailContentWorkRunner(
+      all.map(() => (input: MailContentWorkInput) => {
+        const remoteImage = imageFor(input.providerMessageId);
         return publish(input, {
           html: Buffer.from(
-            `<img data-brain-remote-image="${oldRemoteImageId}" alt="Old">`,
+            `<img data-brain-remote-image="${remoteImage.remoteImageId}">`,
           ),
-          remoteImages: [
-            {
-              remoteImageId: oldRemoteImageId,
-              sourceUrl: "https://images.example.com/n-plus-one.png",
-            },
-          ],
+          remoteImages: [remoteImage],
         });
-      },
-      ...expectedBackgroundOrder.map((candidate) => (input: MailContentWorkInput) => {
-        expect(input.providerMessageId).toBe(candidate.messageId);
-        return publish(input, { text: Buffer.from(candidate.messageId) });
       }),
-    ]);
+    );
     const image = testPng(10, 10);
-    const fetch = vi.fn(async () => ({
+    const fetch = vi.fn<RemoteImageFetcherPort["fetch"]>(async () => ({
       mimeType: "image/png",
       data: Buffer.from(image),
       raster: { width: 10, height: 10, frames: 1 },
@@ -1192,54 +1461,1510 @@ describe("MailContentCoordinator", () => {
       { fetch } satisfies RemoteImageFetcherPort,
     );
 
+    await vi.waitFor(async () => {
+      await coordinator.runBackgroundPrefetchStep(
+        ACCOUNT_ID,
+        new AbortController().signal,
+      );
+      for (const entry of all) {
+        await expect(
+          coordinator.getContent({ accountId: ACCOUNT_ID, messageId: entry.messageId }),
+        ).resolves.toMatchObject({ state: "ready" });
+      }
+    });
+    expect(runner.calls).toHaveLength(all.length);
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(3));
+    await coordinator.runBackgroundPrefetchStep(
+      ACCOUNT_ID,
+      new AbortController().signal,
+    );
+    expect(fetch.mock.calls.map(([url]) => url).sort()).toEqual(
+      ["c", "d", "e"].map((letter) => `https://images.example.com/${letter}.png`),
+    );
+
+    // The fourth newest body sits on disk; its images wait for the open.
     await coordinator.requestContent({
       accountId: ACCOUNT_ID,
-      messageId: MESSAGE_ID,
+      messageId: "message-thread-b",
     });
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(4));
+    expect(fetch.mock.calls[3]?.[0]).toBe("https://images.example.com/b.png");
+    expect(runner.calls).toHaveLength(all.length);
+  });
+
+  it("keeps two prefetches in flight per account and starts the next as each lands", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    const seeded = seedInbox(fixture.caches[0]!, ["m1", "m2", "m3", "m4", "m5"]);
+    const ids = [
+      ...seeded.map((entry) => entry.messageId).toReversed(),
+      MESSAGE_ID,
+    ];
+    const gated = gatedRunner(ids.length);
+    const wakeScheduler = vi.fn();
+    const coordinator = fixture.coordinator(
+      gated.runner,
+      undefined,
+      undefined,
+      undefined,
+      wakeScheduler,
+    );
+    const step = () =>
+      coordinator.runBackgroundPrefetchStep(ACCOUNT_ID, new AbortController().signal);
+    const fetching = () => statesOf(coordinator, ids, "fetching");
+
+    await expect(step()).resolves.toEqual({ hasMore: true });
+    await vi.waitFor(() => expect(gated.started()).toEqual([ids[0]]));
+    await expect(fetching()).resolves.toEqual([ids[0], ids[1]]);
+    // Two in flight is the account's share, so a second step adds nothing.
+    await expect(step()).resolves.toEqual({ hasMore: false });
+    await expect(fetching()).resolves.toEqual([ids[0], ids[1]]);
+
+    // Each landing claims the next one without waiting for a scheduler step.
+    for (const [index, messageId] of ids.entries()) {
+      gated.release(messageId);
+      await vi.waitFor(async () => {
+        await expect(fetching()).resolves.toEqual(ids.slice(index + 1, index + 3));
+      });
+    }
+    await expect(statesOf(coordinator, ids, "ready")).resolves.toEqual(ids);
+    expect(gated.started()).toEqual(ids);
+    await expect(step()).resolves.toEqual({ hasMore: false });
+    // The whole cohort landed without waking the scheduler, the one part of
+    // the service that syncs with the provider.
+    expect(wakeScheduler).not.toHaveBeenCalled();
+  });
+
+  it("runs an owner's open of a queued prefetch ahead of the prefetch still running", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    seedInbox(fixture.caches[0]!, ["m1", "m2"]);
+    const gated = gatedRunner(3);
+    const coordinator = fixture.coordinator(gated.runner);
+    await coordinator.runBackgroundPrefetchStep(
+      ACCOUNT_ID,
+      new AbortController().signal,
+    );
+    // The prefetch takes one worker at a time, so m1 waits behind m2.
+    await vi.waitFor(() => expect(gated.started()).toEqual(["message-thread-m2"]));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(gated.started()).toEqual(["message-thread-m2"]);
+
+    // Opening m1 moves it to the owner's lane: it starts in the free slot at
+    // once, while the prefetch it was queued behind is still running.
+    await expect(
+      coordinator.requestContent({
+        accountId: ACCOUNT_ID,
+        messageId: "message-thread-m1",
+      }),
+    ).resolves.toMatchObject({ state: "fetching" });
+    await vi.waitFor(() =>
+      expect(gated.started()).toEqual(["message-thread-m2", "message-thread-m1"]),
+    );
+    gated.release("message-thread-m1");
+    await vi.waitFor(async () => {
+      await expect(
+        coordinator.getContent({
+          accountId: ACCOUNT_ID,
+          messageId: "message-thread-m1",
+        }),
+      ).resolves.toMatchObject({ state: "ready" });
+    });
+    gated.release("message-thread-m2");
+    gated.release(MESSAGE_ID);
+    await vi.waitFor(async () => {
+      await expect(
+        statesOf(coordinator, ["message-thread-m2", MESSAGE_ID], "ready"),
+      ).resolves.toHaveLength(2);
+    });
+  });
+
+  it("leaves both of the reader's fetch streams to the reader while a prefetch runs", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    const gated = gatedRunner(1);
+    const coordinator = fixture.coordinator(gated.runner);
+    await coordinator.runBackgroundPrefetchStep(
+      ACCOUNT_ID,
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(gated.started()).toEqual([MESSAGE_ID]));
+    // The ledger the download routes admit against, with their exact delta:
+    // the prefetch is bounded by its one worker, not by this.
+    const ledger = new AtomicMailSystemAdmission();
+    const download = {
+      concurrentFetchStreams: 1,
+      temporaryBytes: MAIL_RESOURCE_LIMITS.rawMessageBytes,
+      openFileDescriptors: 2,
+    };
+    const first = await ledger.reserve("attachment-download:one", download);
+    const second = await ledger.reserve("attachment-download:two", download);
+    await ledger.release(first.reservationId);
+    await ledger.release(second.reservationId);
+    gated.release(MESSAGE_ID);
+  });
+
+  it("runs an owner's second open once the prefetch it displaces lets go, and puts that back", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    seedInbox(fixture.caches[0]!, ["p1", "p2", "p3", "p4", "p5"]);
+    const gated = gatedRunner(10);
+    const coordinator = fixture.coordinator(gated.runner);
+    await coordinator.runBackgroundPrefetchStep(
+      ACCOUNT_ID,
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(gated.started()).toEqual(["message-thread-p5"]));
+    // The owner opens a two-letter thread: one takes the free slot, the other
+    // would wait behind the prefetch, so the prefetch gives way. Its fetch
+    // and parse keep the slot until they hang up, or the owner's second
+    // letter would be a third connection the parser socket drops.
+    gated.holdWindDown("message-thread-p5");
+    for (const messageId of ["message-thread-p1", "message-thread-p2"]) {
+      await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId });
+    }
+    await vi.waitFor(() =>
+      expect(gated.signals.get("message-thread-p5")?.aborted).toBe(true),
+    );
+    await nextTurn();
+    expect(gated.started()).toEqual(["message-thread-p5", "message-thread-p1"]);
+    gated.letGo("message-thread-p5");
+    await vi.waitFor(() =>
+      expect(gated.started()).toEqual([
+        "message-thread-p5",
+        "message-thread-p1",
+        "message-thread-p2",
+      ]),
+    );
+    // Once the owner's letters land, the displaced prefetch runs again and
+    // lands too.
+    for (const messageId of [
+      "message-thread-p1",
+      "message-thread-p2",
+      "message-thread-p5",
+    ]) {
+      gated.release(messageId);
+    }
+    await vi.waitFor(async () => {
+      await expect(
+        statesOf(
+          coordinator,
+          ["message-thread-p1", "message-thread-p2", "message-thread-p5"],
+          "ready",
+        ),
+      ).resolves.toHaveLength(3);
+    });
+    for (const messageId of ["message-thread-p4", "message-thread-p3", MESSAGE_ID]) {
+      gated.release(messageId);
+    }
+  });
+
+  it("fetches at once on an open of a body a stopped process left fetching", async () => {
+    let now = 1_000;
+    const fixture = await createFixture([ACCOUNT_ID]);
+    // The previous process claimed the body for the prefetch and stopped.
+    const blobStore = new AtomicMailBlobStore({
+      cacheRoot: path.join(fixture.root, "cache"),
+      accountId: ACCOUNT_ID,
+    });
+    const previous = new SqliteMailContentCache({
+      cacheRoot: path.join(fixture.root, "cache"),
+      accountId: ACCOUNT_ID,
+      blobStore,
+      clock: () => 1_000,
+    });
+    await previous.initialize();
+    await previous.refreshBackgroundPrivacyCohort(1_000);
+    await previous.markBackgroundContentPrefetchStarted(MESSAGE_ID, 1_000);
+    expect((await previous.claim(MESSAGE_ID, 1_000)).kind).toBe("claimed");
+    await previous.close();
+    await blobStore.close();
+
+    const runner = openRunner();
+    const coordinator = fixture.coordinator(runner, undefined, undefined, () => now);
+    now = 11_000; // ten seconds later the owner opens it
+    await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID });
+    await vi.waitFor(() =>
+      expect(runner.calls.map((call) => call.providerMessageId)).toEqual([MESSAGE_ID]),
+    );
     await vi.waitFor(async () => {
       await expect(
         coordinator.getContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID }),
       ).resolves.toMatchObject({ state: "ready" });
     });
+  });
 
-    // The opened N+1 message's image loads at once through its demand row,
-    // but the message itself never displaces the stable top-N content cohort.
-    const opened = await vi.waitFor(() =>
-      coordinator.downloadRemoteImage({
-        accountId: ACCOUNT_ID,
-        remoteImageId: oldRemoteImageId,
+  it("stops the prefetch with the pause and takes it up again on resume", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    seedInbox(fixture.caches[0]!, ["s1", "s2", "s3", "s4", "s5"]);
+    const gated = gatedRunner(10);
+    const coordinator = fixture.coordinator(gated.runner);
+    const scheduler = new MailBackgroundSyncScheduler(
+      {
+        listAccountIds: async () => [ACCOUNT_ID],
+        runBackgroundSyncStep: async () =>
+          Object.freeze({
+            result: Object.freeze({
+              apiVersion: 1 as const,
+              status: "idle" as const,
+              changedCount: 0,
+              hasMore: false,
+            }),
+            hasMore: false,
+          }),
+      },
+      {
+        privacyCache: coordinator,
+        initialDelayMs: 1,
+        intervalMs: 60_000,
+        continuationDelayMs: 1,
+      },
+    );
+    scheduler.start();
+    await vi.waitFor(() => expect(gated.started()).toEqual(["message-thread-s5"]));
+
+    // The owner switches Mail off: the pause stops both, and waits for the
+    // fetch in flight, which the abort ends.
+    await scheduler.stop();
+    const stopped = coordinator.stopBackgroundPrefetch();
+    await vi.waitFor(() =>
+      expect(gated.signals.get("message-thread-s5")?.aborted).toBe(true),
+    );
+    for (const name of ["s5", "s4", "s3", "s2", "s1"]) {
+      gated.release(`message-thread-${name}`);
+    }
+    gated.release(MESSAGE_ID);
+    await stopped;
+    await new Promise<void>((resolve) => setTimeout(resolve, 200));
+    expect(gated.started()).toEqual(["message-thread-s5"]);
+    await expect(
+      coordinator.runBackgroundPrefetchStep(ACCOUNT_ID, new AbortController().signal),
+    ).resolves.toEqual({ hasMore: false });
+    expect(gated.started()).toEqual(["message-thread-s5"]);
+
+    // On resume the step claims again, the stopped fetch included.
+    coordinator.startBackgroundPrefetch();
+    await coordinator.runBackgroundPrefetchStep(
+      ACCOUNT_ID,
+      new AbortController().signal,
+    );
+    await vi.waitFor(async () => {
+      await expect(
+        statesOf(
+          coordinator,
+          ["s5", "s4", "s3", "s2", "s1"].map((name) => `message-thread-${name}`),
+          "ready",
+        ),
+      ).resolves.toHaveLength(5);
+    });
+  });
+
+  it("fetches an owner's open of a letter whose prefetch the pause is stopping", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    seedInbox(fixture.caches[0]!, ["s1"]);
+    const gated = gatedRunner(5);
+    const coordinator = fixture.coordinator(gated.runner);
+    await coordinator.runBackgroundPrefetchStep(ACCOUNT_ID, new AbortController().signal);
+    await vi.waitFor(() => expect(gated.started()).toEqual(["message-thread-s1"]));
+    gated.holdWindDown("message-thread-s1");
+    let paused = false;
+    const stopped = coordinator.stopBackgroundPrefetch().then(() => {
+      paused = true;
+    });
+    await vi.waitFor(() =>
+      expect(gated.signals.get("message-thread-s1")?.aborted).toBe(true),
+    );
+
+    // Within the fetch's wind down, the owner opens that letter. The pause
+    // stops waiting for what is the owner's now, and the letter is fetched.
+    await expect(
+      coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: "message-thread-s1" }),
+    ).resolves.toMatchObject({ state: "fetching" });
+    await vi.waitFor(() => expect(paused).toBe(true));
+    await stopped;
+    gated.letGo("message-thread-s1");
+    await vi.waitFor(() =>
+      expect(gated.started()).toEqual(["message-thread-s1", "message-thread-s1"]),
+    );
+    gated.release("message-thread-s1");
+    await vi.waitFor(async () => {
+      await expect(
+        coordinator.getContent({ accountId: ACCOUNT_ID, messageId: "message-thread-s1" }),
+      ).resolves.toMatchObject({ state: "ready" });
+    });
+  });
+
+  it("finishes the pause only once the claims of prefetches it dropped unstarted are free", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    seedInbox(fixture.caches[0]!, ["q1"]);
+    const gated = gatedRunner(5);
+    const coordinator = fixture.coordinator(gated.runner);
+    await coordinator.runBackgroundPrefetchStep(ACCOUNT_ID, new AbortController().signal);
+    // q1 runs in the prefetch slot; the fixture's own letter waits behind it.
+    await vi.waitFor(() => expect(gated.started()).toEqual(["message-thread-q1"]));
+    await expect(
+      coordinator.getContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID }),
+    ).resolves.toMatchObject({ state: "fetching" });
+
+    // Giving the waiting letter's claim back goes through the account store,
+    // held here: the pause is not over until it is back.
+    const store = deferred<void>();
+    fixture.accounts.hold = store.promise;
+    let paused = false;
+    const stopped = coordinator.stopBackgroundPrefetch().then(() => {
+      paused = true;
+    });
+    await sleep(50);
+    expect(paused).toBe(false);
+    fixture.accounts.hold = null;
+    store.resolve();
+    await stopped;
+    // Free at once: an open fetches it without waiting out the claim.
+    await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID });
+    await vi.waitFor(() =>
+      expect(gated.started()).toEqual(["message-thread-q1", MESSAGE_ID]),
+    );
+    gated.release(MESSAGE_ID);
+  });
+
+  it("gives back a claim the pause lands on while it is being made", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    const gated = gatedRunner(5);
+    const coordinator = fixture.coordinator(gated.runner);
+    const claim = SqliteMailContentCache.prototype.claim;
+    const claimed = deferred<void>();
+    const pause = deferred<void>();
+    const spy = vi
+      .spyOn(SqliteMailContentCache.prototype, "claim")
+      .mockImplementationOnce(async function (
+        this: SqliteMailContentCache,
+        ...args: Parameters<SqliteMailContentCache["claim"]>
+      ) {
+        const result = await claim.apply(this, args);
+        claimed.resolve();
+        await pause.promise;
+        return result;
+      });
+    try {
+      const step = coordinator.runBackgroundPrefetchStep(
+        ACCOUNT_ID,
+        new AbortController().signal,
+      );
+      await claimed.promise;
+      const stopped = coordinator.stopBackgroundPrefetch();
+      pause.resolve();
+      await step;
+      await stopped;
+    } finally {
+      spy.mockRestore();
+    }
+    expect(gated.started()).toEqual([]);
+    // Given back rather than failed, so the resume fetches it at once.
+    await expect(
+      coordinator.getContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID }),
+    ).resolves.toMatchObject({ state: "fetching" });
+    coordinator.startBackgroundPrefetch();
+    await coordinator.runBackgroundPrefetchStep(ACCOUNT_ID, new AbortController().signal);
+    await vi.waitFor(() => expect(gated.started()).toEqual([MESSAGE_ID]));
+    gated.release(MESSAGE_ID);
+  });
+
+  it("claims nothing more once the pause lands between two claims", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    seedInbox(fixture.caches[0]!, ["n1"]);
+    const gated = gatedRunner(5);
+    let coordinator: MailContentCoordinator | null = null;
+    let stopped: Promise<void> | null = null;
+    const queue = new InMemoryMailContentWorkQueue({ maxPending: 10 });
+    workQueues.push(queue);
+    coordinator = fixture.coordinator(
+      gated.runner,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        // Mail goes off the moment the first claim is queued.
+        queue: hookedQueue(queue, () => {
+          stopped ??= coordinator!.stopBackgroundPrefetch();
+        }),
+      },
+    );
+    await coordinator.runBackgroundPrefetchStep(ACCOUNT_ID, new AbortController().signal);
+    await stopped;
+    await expect(
+      statesOf(coordinator, [MESSAGE_ID], "not_requested"),
+    ).resolves.toEqual([MESSAGE_ID]);
+    expect(gated.started()).toEqual([]);
+  });
+
+  it("fetches no image in a scheduler step that comes after the pause", async () => {
+    let now = 1_000;
+    const fixture = await createFixture([ACCOUNT_ID]);
+    const image = {
+      remoteImageId: `remote-image-a${"7".repeat(32)}`,
+      sourceUrl: "https://images.example.com/7.png",
+    };
+    const runner = new FakeMailContentWorkRunner([
+      (input: MailContentWorkInput) =>
+        publish(input, {
+          html: Buffer.from(`<img data-brain-remote-image="${image.remoteImageId}">`),
+          remoteImages: [image],
+        }),
+    ]);
+    const png = testPng(10, 10);
+    const fetch = vi
+      .fn<RemoteImageFetcherPort["fetch"]>()
+      .mockRejectedValueOnce(
+        new RemoteImageFetchError("transient", "remote_image_fetch_failed"),
+      )
+      .mockResolvedValue({
+        mimeType: "image/png",
+        data: Buffer.from(png),
+        raster: { width: 10, height: 10, frames: 1 },
+      });
+    const coordinator = fixture.coordinator(runner, undefined, { fetch }, () => now);
+    const step = () =>
+      coordinator.runBackgroundPrefetchStep(ACCOUNT_ID, new AbortController().signal);
+    await step();
+    // The drain the commit started met a failing origin; the retry is due.
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    await vi.waitFor(async () => {
+      await expect(
+        coordinator.downloadRemoteImage({
+          accountId: ACCOUNT_ID,
+          remoteImageId: image.remoteImageId,
+        }),
+      ).rejects.toMatchObject({ code: "mail_content_unavailable" });
+    });
+    now += MAIL_RESOURCE_LIMITS.remoteImageTransientRetryMs + 1;
+
+    await coordinator.stopBackgroundPrefetch();
+    await expect(step()).resolves.toEqual({ hasMore: false });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    coordinator.startBackgroundPrefetch();
+    await step();
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("gives back the claim of a prefetch the pause stopped before its fetch began", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    const gated = gatedRunner(5);
+    const queue = new InMemoryMailContentWorkQueue({ maxPending: 10 });
+    workQueues.push(queue);
+    const store = deferred<void>();
+    const coordinator = fixture.coordinator(
+      gated.runner,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        // The run's first stop is the account store: hold it there.
+        queue: hookedQueue(queue, () => {
+          fixture.accounts.hold = store.promise;
+        }),
+      },
+    );
+    await coordinator.runBackgroundPrefetchStep(ACCOUNT_ID, new AbortController().signal);
+    const stopped = coordinator.stopBackgroundPrefetch();
+    fixture.accounts.hold = null;
+    store.resolve();
+    await stopped;
+    expect(gated.started()).toEqual([]);
+    // The claim is free, so an open fetches at once.
+    await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID });
+    await vi.waitFor(() => expect(gated.started()).toEqual([MESSAGE_ID]));
+    gated.release(MESSAGE_ID);
+  });
+
+  it("stops the image drain a prefetch commit started when Mail goes off", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    const images = imageSet(["1", "2", "3"]);
+    const runner = new FakeMailContentWorkRunner([
+      (input: MailContentWorkInput) => publish(input, withImages(images)),
+    ]);
+    const origin = slowOrigin();
+    const coordinator = fixture.coordinator(runner, undefined, { fetch: origin.fetch });
+    // No owner asked for anything: this is the prefetch alone.
+    await coordinator.runBackgroundPrefetchStep(ACCOUNT_ID, new AbortController().signal);
+    await vi.waitFor(() => expect(origin.urls).toHaveLength(1));
+
+    await coordinator.stopBackgroundPrefetch();
+    expect(origin.signals[0]?.aborted).toBe(true);
+    origin.answer();
+    await sleep(50);
+    expect(origin.urls).toHaveLength(1);
+
+    // An open afterwards is the owner's approval: the images drain again.
+    await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID });
+    await vi.waitFor(() => expect(origin.urls).toHaveLength(4));
+    expect(origin.urls.slice(1)).toEqual(images.map((image) => image.sourceUrl));
+  });
+
+  it("waits for a stopped image drain to let go, and drains again for an open meanwhile", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    const images = imageSet(["1", "2", "3"]);
+    const runner = new FakeMailContentWorkRunner([
+      (input: MailContentWorkInput) => publish(input, withImages(images)),
+    ]);
+    const origin = slowOrigin();
+    const coordinator = fixture.coordinator(runner, undefined, { fetch: origin.fetch });
+    await coordinator.runBackgroundPrefetchStep(ACCOUNT_ID, new AbortController().signal);
+    await vi.waitFor(() => expect(origin.urls).toHaveLength(1));
+
+    // The origin takes its time to hang up: the pause waits for it.
+    origin.holdAbort();
+    let paused = false;
+    const stopped = coordinator.stopBackgroundPrefetch().then(() => {
+      paused = true;
+    });
+    await sleep(50);
+    expect(paused).toBe(false);
+    // The owner opens the letter while the stopped drain winds down.
+    await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID });
+    origin.letGo();
+    await stopped;
+    origin.answer();
+    await vi.waitFor(() => expect(origin.urls).toHaveLength(4));
+    expect(origin.urls.slice(1)).toEqual(images.map((image) => image.sourceUrl));
+  });
+
+  it("starts no image drain for a prefetch that lands as the pause begins", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    const images = imageSet(["1"]);
+    const landing = deferred<void>();
+    const started = deferred<void>();
+    const runner = new FakeMailContentWorkRunner([
+      // A fetch that has its body in hand and finishes whatever the signal says.
+      async (input: MailContentWorkInput) => {
+        started.resolve();
+        await landing.promise;
+        await publish(input, withImages(images));
+      },
+    ]);
+    const origin = slowOrigin();
+    const coordinator = fixture.coordinator(runner, undefined, { fetch: origin.fetch });
+    await coordinator.runBackgroundPrefetchStep(ACCOUNT_ID, new AbortController().signal);
+    await started.promise;
+    const stopped = coordinator.stopBackgroundPrefetch();
+    landing.resolve();
+    await stopped;
+    await expect(
+      coordinator.getContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID }),
+    ).resolves.toMatchObject({ state: "ready" });
+    await sleep(50);
+    expect(origin.urls).toEqual([]);
+  });
+
+  it("lets a stopped image drain waiting for a slot leave the line", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    // Both older than the fixture's own letter, which the prefetch takes first.
+    seedInbox(fixture.caches[0]!, ["b1"], { baseSentAt: 10 });
+    seedInbox(fixture.caches[0]!, ["b2"], {
+      baseSentAt: 20,
+      fromHistory: "101",
+      toHistory: "102",
+    });
+    const imagesFor = (messageId: string) => imageSet([messageId.slice(-1)]);
+    const prefetched = deferred<void>();
+    const runner = new FakeMailContentWorkRunner(
+      Array.from({ length: 5 }, () => async (input: MailContentWorkInput) => {
+        if (input.providerMessageId === MESSAGE_ID) await prefetched.promise;
+        await publish(input, withImages(imagesFor(input.providerMessageId)));
       }),
     );
-    await opened.dispose();
-    expect(fetch).toHaveBeenCalledTimes(1);
-    for (const candidate of expectedBackgroundOrder) {
-      await expect(
-        coordinator.runBackgroundPrefetchStep(
-          ACCOUNT_ID,
-          new AbortController().signal,
-        ),
-      ).resolves.toEqual({ hasMore: true });
-      await vi.waitFor(async () => {
-        await expect(
-          coordinator.getContent({
-            accountId: ACCOUNT_ID,
-            messageId: candidate.messageId,
-          }),
-        ).resolves.toMatchObject({ state: "ready" });
-      });
+    const origin = slowOrigin({ hangAll: true });
+    const coordinator = fixture.coordinator(runner, undefined, { fetch: origin.fetch });
+    await coordinator.runBackgroundPrefetchStep(ACCOUNT_ID, new AbortController().signal);
+    await vi.waitFor(() =>
+      expect(runner.calls.map((call) => call.providerMessageId)).toEqual([MESSAGE_ID]),
+    );
+    // The owner's two open letters hold both drain slots on slow origins.
+    for (const messageId of ["message-thread-b2", "message-thread-b1"]) {
+      await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId });
     }
+    await vi.waitFor(() => expect(origin.urls).toHaveLength(2));
+    // The prefetch lands its letter; that drain waits for a slot.
+    prefetched.resolve();
+    await vi.waitFor(async () => {
+      await expect(
+        coordinator.getContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID }),
+      ).resolves.toMatchObject({ state: "ready" });
+    });
+    await sleep(20);
+    let paused = false;
+    const stopped = coordinator.stopBackgroundPrefetch().then(() => {
+      paused = true;
+    });
+    await vi.waitFor(() => expect(paused).toBe(true));
+    await stopped;
+    origin.answer();
+    await sleep(50);
+    expect(origin.urls).toHaveLength(2);
+  });
+
+  it("leaves to the owner a prefetch's image drain for a letter the owner opened", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    const images = imageSet(["1", "2", "3"]);
+    const runner = new FakeMailContentWorkRunner([
+      (input: MailContentWorkInput) => publish(input, withImages(images)),
+    ]);
+    const origin = slowOrigin();
+    const coordinator = fixture.coordinator(runner, undefined, { fetch: origin.fetch });
+    await coordinator.runBackgroundPrefetchStep(ACCOUNT_ID, new AbortController().signal);
+    await vi.waitFor(() => expect(origin.urls).toHaveLength(1));
+
+    // The owner opens the letter while its images drain, then Mail goes off.
+    await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID });
+    await coordinator.stopBackgroundPrefetch();
+    expect(origin.signals[0]?.aborted).toBe(false);
+    origin.answer();
+    await vi.waitFor(() => expect(origin.urls).toHaveLength(3));
+    await sleep(50);
+    expect(origin.urls).toEqual(images.map((image) => image.sourceUrl));
+  });
+
+  it("drains as the owner's the images of a letter the owner opened mid-fetch", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    const images = imageSet(["1", "2", "3"]);
+    const fetched = deferred<void>();
+    const runner = new FakeMailContentWorkRunner([
+      async (input: MailContentWorkInput) => {
+        await fetched.promise;
+        await publish(input, withImages(images));
+      },
+    ]);
+    const origin = slowOrigin();
+    const coordinator = fixture.coordinator(runner, undefined, { fetch: origin.fetch });
+    await coordinator.runBackgroundPrefetchStep(ACCOUNT_ID, new AbortController().signal);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(1));
+    // Opened while the prefetch fetches it: the commit is the owner's.
+    await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID });
+    fetched.resolve();
+    await vi.waitFor(() => expect(origin.urls).toHaveLength(1));
+    await coordinator.stopBackgroundPrefetch();
+    expect(origin.signals[0]?.aborted).toBe(false);
+    origin.answer();
+    await vi.waitFor(() => expect(origin.urls).toHaveLength(3));
+  });
+
+  it("never aborts the owner's letter the prefetch was fetching for the owner's next one", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    seedInbox(fixture.caches[0]!, ["p1", "p2", "p3", "p4", "p5"]);
+    const gated = gatedRunner(10);
+    const coordinator = fixture.coordinator(gated.runner);
+    await coordinator.runBackgroundPrefetchStep(ACCOUNT_ID, new AbortController().signal);
+    await vi.waitFor(() => expect(gated.started()).toEqual(["message-thread-p5"]));
+    // The owner opens a thread of three whose newest letter the prefetch is
+    // fetching: that one is the owner's now, and the third waits for a slot.
+    for (const messageId of [
+      "message-thread-p5",
+      "message-thread-p1",
+      "message-thread-p2",
+    ]) {
+      await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId });
+    }
+    await vi.waitFor(() => expect(gated.started()).toContain("message-thread-p1"));
+    await nextTurn();
+    expect(gated.started()).not.toContain("message-thread-p2");
+    expect(gated.signals.get("message-thread-p5")?.aborted).toBe(false);
+    for (const messageId of ["message-thread-p5", "message-thread-p1", "message-thread-p2"]) {
+      gated.release(messageId);
+    }
+    await vi.waitFor(async () => {
+      await expect(
+        statesOf(
+          coordinator,
+          ["message-thread-p5", "message-thread-p1", "message-thread-p2"],
+          "ready",
+        ),
+      ).resolves.toHaveLength(3);
+    });
+    expect(gated.started().filter((id) => id === "message-thread-p5")).toHaveLength(1);
+    for (const messageId of ["message-thread-p4", "message-thread-p3", MESSAGE_ID]) {
+      gated.release(messageId);
+    }
+  });
+
+  it("brings evicted bodies back into the room a large open leaves, newer than the oldest kept first", async () => {
+    const setup = await cohortPushedOutByLargeOpen();
+    setup.advance(2 * HOUR);
+    // The owner opens a small old letter; its landing leaves the large one,
+    // past its hour, to go at the next step.
+    seedInbox(setup.caches[0]!, ["m1"], {
+      baseSentAt: 10,
+      fromHistory: "101",
+      toHistory: "102",
+    });
+    await setup.coordinator.requestContent({
+      accountId: ACCOUNT_ID,
+      messageId: "message-thread-m1",
+    });
+    await vi.waitFor(async () => {
+      await expect(
+        statesOf(setup.coordinator, ["message-thread-m1"], "ready"),
+      ).resolves.toHaveLength(1);
+    });
+    // One step gives the large letter up and claims back what fits in the
+    // 114 bytes left beside c3, which a draft holds: c5, and not c4 too.
+    await setup.step();
+    await vi.waitFor(() => expect(setup.fetchesOf("message-thread-c5")).toBe(2));
+    // While c5 is on its way its bytes are not counted yet, so no other step
+    // counts that room again.
+    await setup.step();
+    await setup.step();
+    expect(setup.fetchesOf("message-thread-c4")).toBe(1);
+    setup.returning.resolve();
+    await vi.waitFor(async () => {
+      await expect(
+        statesOf(setup.coordinator, ["message-thread-c5"], "ready"),
+      ).resolves.toHaveLength(1);
+    });
+    await setup.step();
+    await sleep(20);
+    await expect(
+      statesOf(setup.coordinator, [MESSAGE_ID, "message-thread-c4"], "not_requested"),
+    ).resolves.toEqual([MESSAGE_ID, "message-thread-c4"]);
+    expect(setup.fetchesOf("message-thread-c4")).toBe(1);
+  });
+
+  it("counts an owner's fetch still on its way as room already taken", async () => {
+    const setup = await cohortPushedOutByLargeOpen();
+    setup.advance(2 * HOUR);
+    seedInbox(setup.caches[0]!, ["m1"], {
+      baseSentAt: 10,
+      fromHistory: "101",
+      toHistory: "102",
+    });
+    const opened = deferred<void>();
+    setup.hold("message-thread-m1", opened.promise);
+    await setup.coordinator.requestContent({
+      accountId: ACCOUNT_ID,
+      messageId: "message-thread-m1",
+    });
+    await vi.waitFor(() => expect(setup.fetchesOf("message-thread-m1")).toBe(1));
+    // The step gives the large letter up, but m1 is still on its way: none
+    // of the room it leaves is handed out yet.
+    await setup.step();
+    await setup.step();
+    await sleep(20);
+    expect(setup.fetchesOf("message-thread-c5")).toBe(1);
+    opened.resolve();
+    await vi.waitFor(async () => {
+      await expect(
+        statesOf(setup.coordinator, ["message-thread-m1"], "ready"),
+      ).resolves.toHaveLength(1);
+    });
+    // Landed, it is in the count, and the room left takes c5 back.
+    await setup.step();
+    await vi.waitFor(() => expect(setup.fetchesOf("message-thread-c5")).toBe(2));
+    expect(setup.fetchesOf("message-thread-c4")).toBe(1);
+    setup.returning.resolve();
+  });
+
+  it("never brings back a body older than everything it keeps, however many letters land", async () => {
+    let now = 60 * DAY;
+    const fixture = await createFixture([ACCOUNT_ID]);
+    seedInbox(fixture.caches[0]!, ["c1", "c2", "c3"], { baseSentAt: now - 5 * DAY });
+    const sizes: Record<string, number> = { c1: 40, c2: 150, c3: 60 };
+    const runner = new FakeMailContentWorkRunner(
+      Array.from({ length: 40 }, () => (input: MailContentWorkInput) => {
+        const name = input.providerMessageId.replace("message-thread-", "");
+        return publish(input, {
+          text: Buffer.from(input.providerMessageId.padEnd(sizes[name] ?? 100, ".")),
+        });
+      }),
+    );
+    const coordinator = fixture.coordinator(
+      runner,
+      undefined,
+      undefined,
+      () => now,
+      undefined,
+      undefined,
+      { bodyCacheMaxBytes: 300 },
+    );
+    const step = () =>
+      coordinator.runBackgroundPrefetchStep(ACCOUNT_ID, new AbortController().signal);
+    const cohort = ["c1", "c2", "c3"].map((name) => `message-thread-${name}`);
+    await vi.waitFor(async () => {
+      await step();
+      await expect(statesOf(coordinator, cohort, "ready")).resolves.toEqual(cohort);
+    });
+    // Each new letter pushes the oldest body out. The room that leaves is
+    // not for it: back, it would be the next to go.
+    for (const [index, name] of ["n1", "n2", "n3", "n4", "n5", "n6"].entries()) {
+      now += HOUR;
+      seedInbox(fixture.caches[0]!, [name], {
+        baseSentAt: now - 60_000,
+        fromHistory: String(101 + index),
+        toHistory: String(102 + index),
+      });
+      await vi.waitFor(async () => {
+        await step();
+        await expect(
+          statesOf(coordinator, [`message-thread-${name}`], "ready"),
+        ).resolves.toHaveLength(1);
+      });
+      for (let settle = 0; settle < 3; settle += 1) {
+        await step();
+        await sleep(10);
+      }
+    }
+    const fetches = runner.calls.map((call) => call.providerMessageId);
+    expect(fetches.filter((id) => cohort.includes(id))).toHaveLength(3);
+  });
+
+  it("keeps a large letter the owner opened by when it was opened, and its attachment with it", async () => {
+    let now = 60 * DAY;
+    const fixture = await createFixture([ACCOUNT_ID]);
+    seedInbox(fixture.caches[0]!, ["c1", "c2", "c3"], { baseSentAt: now - 5 * DAY });
+    const big = Buffer.alloc(MAIL_RESOURCE_LIMITS.privacyPrefetchMaxThreadBytes + 1, 0x62);
+    const attachment = Buffer.from("the report");
+    const runner = new FakeMailContentWorkRunner(
+      Array.from({ length: 20 }, () => async (input: MailContentWorkInput) => {
+        if (input.providerMessageId !== MESSAGE_ID) {
+          await publish(input, { text: bodyText(input.providerMessageId) });
+          return;
+        }
+        // A raw message past 4 MiB, staged whole, with a small attachment.
+        const text = Buffer.from("see attached");
+        for (const value of [big, text, attachment]) {
+          await input.cache.stageBlob(input.lease, descriptor(value), chunks(value), 1_001);
+        }
+        await input.cache.commitReady({
+          lease: input.lease,
+          rawMime: descriptor(big),
+          text: descriptor(text),
+          sanitizedHtml: null,
+          attachments: [
+            {
+              filename: "report.pdf",
+              mimeType: "application/pdf",
+              disposition: "attachment",
+              contentId: null,
+              blob: descriptor(attachment),
+            },
+          ],
+          remoteImages: [],
+          now: 1_002,
+        });
+      }),
+    );
+    const coordinator = fixture.coordinator(
+      runner,
+      undefined,
+      undefined,
+      () => now,
+      undefined,
+      undefined,
+      { bodyCacheMaxBytes: big.byteLength + 22 + 3 * 72 },
+    );
+    const step = () =>
+      coordinator.runBackgroundPrefetchStep(ACCOUNT_ID, new AbortController().signal);
+    const cohort = ["c1", "c2", "c3"].map((name) => `message-thread-${name}`);
+    await vi.waitFor(async () => {
+      await step();
+      await expect(statesOf(coordinator, cohort, "ready")).resolves.toEqual(cohort);
+    });
+    await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID });
+    let attachmentId = "";
+    await vi.waitFor(async () => {
+      const opened = await coordinator.getContent({
+        accountId: ACCOUNT_ID,
+        messageId: MESSAGE_ID,
+      });
+      expect(opened.state).toBe("ready");
+      attachmentId = opened.state === "ready" ? opened.attachments[0]!.attachmentId : "";
+    });
+    // An hour and a minute later a new letter lands. The budget gives up
+    // the oldest body, not the large letter the owner opened after it.
+    now += 61 * 60_000;
+    seedInbox(fixture.caches[0]!, ["n1"], {
+      baseSentAt: now - 60_000,
+      fromHistory: "101",
+      toHistory: "102",
+    });
+    await vi.waitFor(async () => {
+      await step();
+      await expect(
+        statesOf(coordinator, ["message-thread-n1"], "ready"),
+      ).resolves.toHaveLength(1);
+    });
+    await step();
+    await expect(statesOf(coordinator, [MESSAGE_ID], "ready")).resolves.toEqual([
+      MESSAGE_ID,
+    ]);
+    await expect(
+      statesOf(coordinator, ["message-thread-c1"], "not_requested"),
+    ).resolves.toEqual(["message-thread-c1"]);
+    const download = await coordinator.downloadAttachment({
+      accountId: ACCOUNT_ID,
+      attachmentId,
+    });
+    try {
+      expect(await collectBytes(download.body)).toEqual(attachment);
+    } finally {
+      await download.dispose();
+    }
+  });
+
+  it("tries a letter that brings the parser down once in the background, and leaves it for an open", async () => {
+    let now = 1_000;
+    const fixture = await createFixture([ACCOUNT_ID]);
+    const fetches: string[] = [];
+    let parses = 0;
+    const runner = new ProductionMailContentWorkRunner({
+      sourceFactory: {
+        async create({ incomingBlobStore }) {
+          return {
+            source: {
+              async fetchRaw(request) {
+                fetches.push(request.providerMessageId);
+                return {
+                  descriptor: await incomingBlobStore.putIncoming(
+                    chunks(Buffer.from("raw MIME that kills the parser")),
+                    1024,
+                  ),
+                };
+              },
+            },
+            destroy() {},
+          };
+        },
+      },
+      // The worker dies before answering, every time.
+      parser: {
+        isolation: { networkAccess: false, credentialAccess: false, sandboxVersion: 1 },
+        async parse() {
+          parses += 1;
+          return { kind: "transient_failure", errorCode: "mail_mime_worker_dropped" };
+        },
+      },
+      now: () => now,
+    });
+    const coordinator = fixture.coordinator(
+      runner,
+      { nextDelayMs: () => 1 },
+      undefined,
+      () => now,
+    );
+    const step = () =>
+      coordinator.runBackgroundPrefetchStep(ACCOUNT_ID, new AbortController().signal);
+    await step();
+    await vi.waitFor(async () => {
+      await expect(
+        coordinator.getContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID }),
+      ).resolves.toMatchObject({ state: "transient" });
+    });
+    // One try: one download, parsed three times, and no retry after it.
+    await sleep(700);
+    expect({ fetches: fetches.length, parses }).toEqual({ fetches: 1, parses: 3 });
+    // Nor once its retry window has passed.
+    now += MAIL_RESOURCE_LIMITS.remoteImageTransientRetryMs + 1;
+    await expect(step()).resolves.toEqual({ hasMore: false });
+    expect(fetches).toHaveLength(1);
+    // The owner's open fetches it again, and tries again after a failure as
+    // any open does.
+    await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID });
+    await vi.waitFor(() => expect(fetches.length).toBeGreaterThanOrEqual(3), {
+      timeout: 4_000,
+    });
+  });
+
+  it("claims nothing at the budget while every body it holds is pinned", async () => {
+    const now = 40 * DAY;
+    const fixture = await createFixture([ACCOUNT_ID]);
+    seedInbox(fixture.caches[0]!, ["r1", "r2"], { baseSentAt: now - 2 * DAY });
+    const runner = openRunner();
+    const coordinator = fixture.coordinator(
+      runner,
+      undefined,
+      undefined,
+      () => now,
+      undefined,
+      undefined,
+      { bodyCacheMaxBytes: 72 },
+    );
+    // The owner's open of r1 fills the budget and holds it for the hour. r2
+    // would be fetched only to be the one body the budget could give up.
+    await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: "message-thread-r1" });
+    await vi.waitFor(async () => {
+      await expect(
+        statesOf(coordinator, ["message-thread-r1"], "ready"),
+      ).resolves.toHaveLength(1);
+    });
+    await coordinator.runBackgroundPrefetchStep(ACCOUNT_ID, new AbortController().signal);
+    await sleep(20);
+    expect(runner.calls.map((call) => call.providerMessageId)).toEqual([
+      "message-thread-r1",
+    ]);
+  });
+
+  it("clears a body a stopped process was receiving at the first open, however recent", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    const cacheRoot = path.join(fixture.root, "cache");
+    // The last process was streaming a body when it stopped, a moment ago.
+    const before = new AtomicMailBlobStore({ cacheRoot, accountId: ACCOUNT_ID });
+    await before.initialize();
+    const hang = deferred<void>();
+    const received = before
+      .receiveIncoming(
+        (async function* () {
+          yield Buffer.alloc(4096, 1);
+          await hang.promise;
+        })(),
+        1024 * 1024,
+      )
+      .catch(() => undefined);
+    const incoming = path.join(cacheRoot, ACCOUNT_ID, "content-incoming");
+    await vi.waitFor(async () => expect(await readdir(incoming)).toHaveLength(1));
+
+    const coordinator = fixture.coordinator(openRunner());
+    await coordinator.getContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID });
+    expect(await readdir(incoming)).toEqual([]);
+    hang.resolve();
+    await received;
+    await before.close();
+  });
+
+  it("keeps a new letter over bodies opened hours ago once the budget is full", async () => {
+    let now = 40 * DAY;
+    const fixture = await createFixture([ACCOUNT_ID]);
+    // Three letters from three weeks ago that the owner opened this morning.
+    seedInbox(fixture.caches[0]!, ["o1", "o2", "o3"], {
+      baseSentAt: now - 21 * DAY,
+    });
+    const runner = openRunner();
+    const coordinator = fixture.coordinator(
+      runner,
+      undefined,
+      undefined,
+      () => now,
+      undefined,
+      undefined,
+      // Room for three bodies of 72 bytes.
+      { bodyCacheMaxBytes: 3 * 72 },
+    );
+    const opened = ["message-thread-o1", "message-thread-o2", "message-thread-o3"];
+    for (const messageId of opened) {
+      await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId });
+    }
+    await vi.waitFor(async () => {
+      await expect(statesOf(coordinator, opened, "ready")).resolves.toEqual(opened);
+    });
+
+    // Two hours later a letter arrives. It is newer than any of the three by
+    // the one key the budget keeps, so it is fetched and kept, and the
+    // least recent of the opened ones makes room.
+    now += 2 * HOUR;
+    seedInbox(fixture.caches[0]!, ["new"], {
+      baseSentAt: now - 60_000,
+      fromHistory: "101",
+      toHistory: "102",
+    });
+    await coordinator.runBackgroundPrefetchStep(
+      ACCOUNT_ID,
+      new AbortController().signal,
+    );
+    await vi.waitFor(async () => {
+      await expect(
+        statesOf(coordinator, [...opened, "message-thread-new"], "ready"),
+      ).resolves.toEqual(["message-thread-o2", "message-thread-o3", "message-thread-new"]);
+    });
+    expect(
+      runner.calls.filter((call) => call.providerMessageId === "message-thread-new"),
+    ).toHaveLength(1);
+  });
+
+  it("fetches newest first, stops once the budget is full, and removes what it evicts from disk", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    seedInbox(fixture.caches[0]!, ["m1", "m2", "m3", "m4", "m5"]);
+    const runner = openRunner();
+    const coordinator = fixture.coordinator(
+      runner,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { bodyCacheMaxBytes: 2 * 72 },
+    );
+    await coordinator.runBackgroundPrefetchStep(
+      ACCOUNT_ID,
+      new AbortController().signal,
+    );
+    const all = [
+      "message-thread-m5",
+      "message-thread-m4",
+      "message-thread-m3",
+      "message-thread-m2",
+      "message-thread-m1",
+      MESSAGE_ID,
+    ];
+    await vi.waitFor(async () => {
+      await expect(statesOf(coordinator, all, "ready")).resolves.toEqual([
+        "message-thread-m5",
+        "message-thread-m4",
+      ]);
+      await expect(statesOf(coordinator, all, "fetching")).resolves.toEqual([]);
+    });
+    await coordinator.runBackgroundPrefetchStep(
+      ACCOUNT_ID,
+      new AbortController().signal,
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    // m3 was already on its way when the budget filled; nothing older is
+    // fetched after it, since the budget would only take it back.
+    expect(runner.calls.map((call) => call.providerMessageId)).toEqual([
+      "message-thread-m5",
+      "message-thread-m4",
+      "message-thread-m3",
+    ]);
+    // The evicted body's own blob left the disk with it.
+    const blobs = path.join(fixture.root, "cache", ACCOUNT_ID, "content-blobs");
+    const onDisk = new Set(await readdir(blobs));
+    expect(onDisk.has(descriptor(bodyText("message-thread-m3")).sha256)).toBe(false);
+    expect(onDisk.has(descriptor(bodyText("message-thread-m4")).sha256)).toBe(true);
+  });
+
+  it("spares a body a draft answers when the budget has to give one up", async () => {
+    let now = 1_000;
+    const fixture = await createFixture([ACCOUNT_ID]);
+    const runner = openRunner();
+    const listDraftSourceMessageIds = vi.fn(async () => [MESSAGE_ID]);
+    const coordinator = fixture.coordinator(
+      runner,
+      undefined,
+      undefined,
+      () => now,
+      undefined,
+      undefined,
+      {
+        bodyCacheMaxBytes: 2 * 72,
+        draftSources: { listDraftSourceMessageIds },
+      },
+    );
+    // The owner opened the fixture's letter and began a reply to it.
+    await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID });
+    await vi.waitFor(async () => {
+      await expect(
+        statesOf(coordinator, [MESSAGE_ID], "ready"),
+      ).resolves.toHaveLength(1);
+    });
+    now += 2 * HOUR;
+    seedInbox(fixture.caches[0]!, ["m1", "m2", "m3"], { baseSentAt: now - 1_000 });
+    await coordinator.runBackgroundPrefetchStep(
+      ACCOUNT_ID,
+      new AbortController().signal,
+    );
+    // The letter the draft answers is the least recent, and it stays.
+    await vi.waitFor(async () => {
+      await expect(
+        statesOf(
+          coordinator,
+          [MESSAGE_ID, "message-thread-m3", "message-thread-m2"],
+          "ready",
+        ),
+      ).resolves.toEqual([MESSAGE_ID, "message-thread-m3"]);
+      await expect(
+        statesOf(coordinator, ["message-thread-m2"], "not_requested"),
+      ).resolves.toHaveLength(1);
+    });
+    expect(listDraftSourceMessageIds).toHaveBeenCalledWith(ACCOUNT_ID);
+  });
+
+  it("claims nothing past the budget while the drafts cannot say what they need", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    seedInbox(fixture.caches[0]!, ["d1", "d2", "d3", "d4", "d5", "d6"]);
+    const runner = openRunner();
+    const coordinator = fixture.coordinator(
+      runner,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        bodyCacheMaxBytes: 72,
+        draftSources: {
+          listDraftSourceMessageIds: async () => {
+            throw new Error("outbox locked");
+          },
+        },
+      },
+    );
+    await coordinator.runBackgroundPrefetchStep(
+      ACCOUNT_ID,
+      new AbortController().signal,
+    );
+    const two = ["message-thread-d6", "message-thread-d5"];
+    await vi.waitFor(async () => {
+      await expect(statesOf(coordinator, two, "ready")).resolves.toEqual(two);
+    });
+    await coordinator.runBackgroundPrefetchStep(
+      ACCOUNT_ID,
+      new AbortController().signal,
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    // The two claimed before the budget filled landed; nothing was evicted
+    // without knowing what a draft needs, and nothing more was claimed.
+    await expect(statesOf(coordinator, two, "ready")).resolves.toEqual(two);
+    expect(runner.calls).toHaveLength(2);
+  });
+
+  it("never makes an owner wait out the prefetch's pacing", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    fixture.accounts.providerKind = "imap";
+    seedInbox(fixture.caches[0]!, ["m1", "m2"]);
+    const runner = openRunner();
+    const coordinator = fixture.coordinator(
+      runner,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { imapPrefetchSpacingMs: 60_000 },
+    );
+    await coordinator.runBackgroundPrefetchStep(
+      ACCOUNT_ID,
+      new AbortController().signal,
+    );
+    await vi.waitFor(async () => {
+      await expect(
+        statesOf(coordinator, ["message-thread-m2"], "ready"),
+      ).resolves.toHaveLength(1);
+    });
+    // m1 is claimed and waits a minute for its turn on the IMAP account.
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    expect(runner.calls).toHaveLength(1);
+    await coordinator.requestContent({
+      accountId: ACCOUNT_ID,
+      messageId: "message-thread-m1",
+    });
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(2));
+    expect(runner.calls[1]?.providerMessageId).toBe("message-thread-m1");
+  });
+
+  it("runs at once an owner's open of a prefetch waiting to retry a failure", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    let failures = 0;
+    const runner = new FakeMailContentWorkRunner([
+      () => {
+        failures += 1;
+        throw new MailContentWorkError("transient", "provider_hiccup");
+      },
+      (input) => publish(input, { text: bodyText(input.providerMessageId) }),
+    ]);
+    // A minute before the prefetch would try again.
+    const coordinator = fixture.coordinator(runner, { nextDelayMs: () => 60_000 });
+    await coordinator.runBackgroundPrefetchStep(
+      ACCOUNT_ID,
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(failures).toBe(1));
+    await vi.waitFor(async () => {
+      await expect(
+        statesOf(coordinator, [MESSAGE_ID], "transient"),
+      ).resolves.toHaveLength(1);
+    });
+    await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID });
+    await vi.waitFor(async () => {
+      await expect(
+        statesOf(coordinator, [MESSAGE_ID], "ready"),
+      ).resolves.toHaveLength(1);
+    });
+  });
+
+  it("paces the prefetch on an IMAP account, where every fetch is a login", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    fixture.accounts.providerKind = "imap";
+    seedInbox(fixture.caches[0]!, ["m1", "m2", "m3"], {
+      baseSentAt: Date.now() - 60_000,
+    });
+    const startedAt: number[] = [];
+    const runner = new FakeMailContentWorkRunner(
+      Array.from({ length: 5 }, () => (input: MailContentWorkInput) => {
+        startedAt.push(Date.now());
+        return publish(input, { text: bodyText(input.providerMessageId) });
+      }),
+    );
+    const coordinator = fixture.coordinator(
+      runner,
+      undefined,
+      undefined,
+      () => Date.now(),
+      undefined,
+      undefined,
+      { imapPrefetchSpacingMs: 300 },
+    );
+    await coordinator.runBackgroundPrefetchStep(
+      ACCOUNT_ID,
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(startedAt).toHaveLength(3), { timeout: 3_000 });
+    expect(startedAt[1]! - startedAt[0]!).toBeGreaterThanOrEqual(280);
+    expect(startedAt[2]! - startedAt[1]!).toBeGreaterThanOrEqual(280);
+  });
+
+  it("serves the reader's attachment while a prefetch is still streaming a body", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    seedInbox(fixture.caches[0]!, ["slow"], { baseSentAt: 50 });
+    const download = deferred<void>();
+    const runner = new FakeMailContentWorkRunner([
+      // The owner's earlier open of the fixture letter, with an attachment.
+      (input) =>
+        publish(input, {
+          text: Buffer.from("body"),
+          attachment: Buffer.from("attachment bytes"),
+          filename: "a.pdf",
+        }),
+      // The prefetch of an older letter, from a provider that stalls.
+      async (input) => {
+        async function* slowProvider(): AsyncIterable<Uint8Array> {
+          yield Buffer.from("From: a\r\n");
+          await download.promise;
+          yield Buffer.from("\r\nbody");
+        }
+        await input.cache.incomingBlobStore(input.lease).putIncoming(slowProvider(), 1024);
+        await publish(input, { text: Buffer.from("prefetched") });
+      },
+    ]);
+    const coordinator = fixture.coordinator(runner);
+    await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID });
+    let attachmentId = "";
+    await vi.waitFor(async () => {
+      const content = await coordinator.getContent({
+        accountId: ACCOUNT_ID,
+        messageId: MESSAGE_ID,
+      });
+      if (content.state !== "ready") throw new Error("not ready yet");
+      attachmentId = content.attachments[0]!.attachmentId;
+    });
+    await coordinator.runBackgroundPrefetchStep(
+      ACCOUNT_ID,
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(2));
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+
+    const read = coordinator
+      .downloadAttachment({ accountId: ACCOUNT_ID, attachmentId })
+      .then(async (value) => {
+        const bytes = await collectBytes(value.body);
+        await value.dispose();
+        return bytes;
+      });
+    const outcome = await Promise.race([
+      read,
+      new Promise<"blocked">((resolve) => setTimeout(() => resolve("blocked"), 1_000)),
+    ]);
+    expect(outcome).toEqual(Buffer.from("attachment bytes"));
+    download.resolve();
+    await vi.waitFor(async () => {
+      await expect(
+        statesOf(coordinator, ["message-thread-slow"], "ready"),
+      ).resolves.toHaveLength(1);
+    });
+  });
+
+  it("claims afresh a prefetch whose lease ran out while it waited its turn", async () => {
+    let now = 1_000;
+    const fixture = await createFixture([ACCOUNT_ID]);
+    seedInbox(fixture.caches[0]!, ["m1", "m2"]);
+    const gated = gatedRunner(5);
+    const coordinator = fixture.coordinator(gated.runner, undefined, undefined, () => now);
+    await coordinator.runBackgroundPrefetchStep(
+      ACCOUNT_ID,
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(gated.started()).toEqual(["message-thread-m2"]));
+    // m1 was claimed with m2 and waits behind it past its lease.
+    now += MAIL_RESOURCE_LIMITS.workerLeaseMs + 1;
+    gated.release("message-thread-m2");
+    gated.release("message-thread-m1");
+    gated.release(MESSAGE_ID);
+    await vi.waitFor(async () => {
+      await expect(
+        statesOf(coordinator, ["message-thread-m1"], "ready"),
+      ).resolves.toHaveLength(1);
+    });
+    // Its first fetch already ran on a fresh claim: none was spent on a lease
+    // the cache would have refused at the commit.
+    expect(
+      gated.started().filter((messageId) => messageId === "message-thread-m1"),
+    ).toHaveLength(1);
+  });
+
+  it("takes a deployed three-message cohort to the new size without a refetch storm", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    const seeded = seedInbox(fixture.caches[0]!, [
+      "m1",
+      "m2",
+      "m3",
+      "m4",
+      "m5",
+      "m6",
+    ]);
+    // What the three-message cohort left on disk: the newest three bodies.
+    const deployed = seeded.slice(-3).map((entry) => entry.messageId);
+    const blobStore = new AtomicMailBlobStore({
+      cacheRoot: path.join(fixture.root, "cache"),
+      accountId: ACCOUNT_ID,
+    });
+    const contentCache = new SqliteMailContentCache({
+      cacheRoot: path.join(fixture.root, "cache"),
+      accountId: ACCOUNT_ID,
+      blobStore,
+      clock: () => 1_000,
+    });
+    await contentCache.initialize();
+    await contentCache.refreshBackgroundPrivacyCohort(1_000);
+    for (const messageId of deployed) {
+      await contentCache.markBackgroundContentPrefetchStarted(messageId, 1_000);
+      const claim = await contentCache.claim(messageId, 1_000);
+      if (claim.kind !== "claimed") throw new Error("expected a claim");
+      await publish(
+        {
+          accountId: ACCOUNT_ID,
+          providerMessageId: messageId,
+          lease: claim.lease,
+          cache: contentCache,
+          blobStore,
+          deadlineAt: claim.lease.expiresAt,
+        },
+        { text: Buffer.from(messageId) },
+      );
+    }
+    await contentCache.close();
+    await blobStore.close();
+
+    const missing = [
+      ...seeded.slice(0, 3).map((entry) => entry.messageId).toReversed(),
+      MESSAGE_ID,
+    ];
+    const gated = gatedRunner(missing.length);
+    const coordinator = fixture.coordinator(gated.runner);
     await expect(
       coordinator.runBackgroundPrefetchStep(
         ACCOUNT_ID,
         new AbortController().signal,
       ),
-    ).resolves.toEqual({ hasMore: false });
-    expect(fetch).toHaveBeenCalledTimes(1);
-    const cached = await coordinator.downloadRemoteImage({
-      accountId: ACCOUNT_ID,
-      remoteImageId: oldRemoteImageId,
+    ).resolves.toEqual({ hasMore: true });
+    // One step claims the account's two and nothing that is already on disk.
+    await expect(
+      statesOf(coordinator, [...deployed, ...missing], "fetching"),
+    ).resolves.toEqual(missing.slice(0, 2));
+    await expect(statesOf(coordinator, deployed, "ready")).resolves.toEqual(
+      deployed,
+    );
+    for (const messageId of missing) gated.release(messageId);
+    await vi.waitFor(async () => {
+      await expect(statesOf(coordinator, missing, "ready")).resolves.toEqual(
+        missing,
+      );
     });
-    await cached.dispose();
+    expect(gated.started()).toEqual(missing);
   });
 
   it("permanently stops remote fetches after the message raster budget is spent", async () => {
@@ -1462,14 +3187,24 @@ describe("MailContentCoordinator", () => {
 async function createFixture(accountIds: readonly string[]): Promise<{
   readonly root: string;
   readonly caches: readonly SqliteMailMessageCache[];
+  /** What the fake account store answers: the provider, and a hold on reads. */
+  readonly accounts: { providerKind: "gmail" | "imap" | null; hold: Promise<void> | null };
   coordinator(
-    runner: FakeMailContentWorkRunner,
+    runner: MailContentWorkRunnerPort,
     retryPolicy?: { nextDelayMs(): number | null },
     remoteImageFetcher?: RemoteImageFetcherPort,
     clock?: () => number,
     onBackgroundWorkAvailable?: () => void,
     onEvent?: (event: MailContentCoordinatorEvent) => void,
-    onContentReady?: (accountId: string, messageId: string) => void,
+    extra?: {
+      readonly bodyCacheMaxBytes?: number;
+      readonly imapPrefetchSpacingMs?: number;
+      readonly draftSources?: {
+        listDraftSourceMessageIds(accountId: string): Promise<readonly string[]>;
+      };
+      readonly queue?: MailContentWorkQueuePort;
+      readonly onContentReady?: (accountId: string, messageId: string) => void;
+    },
   ): MailContentCoordinator;
 }> {
   const root = await mkdtemp(path.join(tmpdir(), "brain-mail-content-coordinator-"));
@@ -1488,14 +3223,26 @@ async function createFixture(accountIds: readonly string[]): Promise<{
     cache.putInitialPage(generation, [threadFixture(accountId)], null, null);
     cache.completeInitial(generation, 200);
   }
-  const accounts = new Set(accountIds);
+  const known = new Set(accountIds);
+  const accounts: {
+    providerKind: "gmail" | "imap" | null;
+    hold: Promise<void> | null;
+  } = { providerKind: null, hold: null };
   const store = {
-    readAccount: async (accountId: string) =>
-      accounts.has(accountId) ? ({ account: { accountId } } as never) : null,
+    readAccount: async (accountId: string) => {
+      if (accounts.hold !== null) await accounts.hold;
+      if (!known.has(accountId)) return null;
+      return (
+        accounts.providerKind === null
+          ? { account: { accountId } }
+          : { account: { accountId }, providerKind: accounts.providerKind }
+      ) as never;
+    },
   } as unknown as MultiMailAccountStore;
   return {
     root,
     caches,
+    accounts,
     coordinator(
       runner,
       retryPolicy,
@@ -1503,19 +3250,19 @@ async function createFixture(accountIds: readonly string[]): Promise<{
       clock,
       onBackgroundWorkAvailable,
       onEvent,
-      onContentReady,
+      extra,
     ) {
       const coordinator = new MailContentCoordinator({
         stateDirectory: root,
         store,
         runner,
+        ...extra,
         ...(retryPolicy === undefined ? {} : { retryPolicy }),
         ...(remoteImageFetcher === undefined ? {} : { remoteImageFetcher }),
         ...(onBackgroundWorkAvailable === undefined
           ? {}
           : { onBackgroundWorkAvailable }),
         ...(onEvent === undefined ? {} : { onEvent }),
-        ...(onContentReady === undefined ? {} : { onContentReady }),
         clock: clock ?? (() => 1_000),
       });
       coordinators.push(coordinator);
@@ -1602,7 +3349,7 @@ function threadFixture(
     references: Object.freeze([]),
     listMessage: false,
     category: "people",
-    sizeEstimate: null,
+    sizeEstimate: 2_048,
   });
   const thread: MailThreadListItem = Object.freeze({
     accountId,
@@ -1616,7 +3363,7 @@ function threadFixture(
     starred: false,
     hasAttachments: true,
     listMessage: false,
-    sizeBytes: 0,
+    sizeBytes: 2_048,
     category: "people",
     newSender: false,
   });
@@ -1626,6 +3373,364 @@ function threadFixture(
     inInbox: true,
     mailboxes: Object.freeze(["all", "inbox"] as const),
   });
+}
+
+/**
+ * A runner whose every fetch waits for its message to be released, so a test
+ * can hold work in flight and watch what starts behind it. An abort ends a
+ * fetch the way it ends a real one, unless the test holds the fetch's wind
+ * down (`holdWindDown`) to watch what waits for it.
+ */
+function gatedRunner(count: number): {
+  readonly runner: FakeMailContentWorkRunner;
+  /** The signal each message's latest fetch was handed. */
+  readonly signals: Map<string, AbortSignal>;
+  started(): readonly string[];
+  release(messageId: string): void;
+  /** Keeps this message's next aborted fetch running until `letGo`. */
+  holdWindDown(messageId: string): void;
+  letGo(messageId: string): void;
+} {
+  const gates = new Map<string, ReturnType<typeof deferred<void>>>();
+  const windDowns = new Map<string, ReturnType<typeof deferred<void>>>();
+  const signals = new Map<string, AbortSignal>();
+  const gate = (messageId: string) => {
+    let value = gates.get(messageId);
+    if (value === undefined) {
+      value = deferred<void>();
+      gates.set(messageId, value);
+    }
+    return value;
+  };
+  const runner = new FakeMailContentWorkRunner(
+    Array.from(
+      { length: count },
+      () => async (input: MailContentWorkInput, signal: AbortSignal) => {
+        const messageId = input.providerMessageId;
+        signals.set(messageId, signal);
+        const aborted = await new Promise<boolean>((resolve) => {
+          void gate(messageId).promise.then(() => resolve(false));
+          if (signal.aborted) resolve(true);
+          signal.addEventListener("abort", () => resolve(true), { once: true });
+        });
+        if (aborted) {
+          await windDowns.get(messageId)?.promise;
+          throw new MailContentWorkError("transient", "mail_mime_aborted");
+        }
+        await publish(input, { text: Buffer.from(messageId) });
+      },
+    ),
+  );
+  return {
+    runner,
+    signals,
+    started: () => runner.calls.map((call) => call.providerMessageId),
+    release: (messageId) => gate(messageId).resolve(),
+    holdWindDown: (messageId) => windDowns.set(messageId, deferred<void>()),
+    letGo: (messageId) => {
+      windDowns.get(messageId)?.resolve();
+      windDowns.delete(messageId);
+    },
+  };
+}
+
+/**
+ * Queue work that runs until the test releases it or, once aborted, until its
+ * wind down ends, which is at once unless the test holds it. Each run records
+ * its name and lane.
+ */
+function queueHarness(queue: InMemoryMailContentWorkQueue) {
+  const started: string[] = [];
+  const settled: string[] = [];
+  const signals = new Map<string, AbortSignal>();
+  const lanes = new Map<string, { readonly background: boolean }>();
+  const gates = new Map<string, ReturnType<typeof deferred<void>>>();
+  const windDowns = new Map<string, ReturnType<typeof deferred<void>>>();
+  const gate = (name: string) => {
+    let value = gates.get(name);
+    if (value === undefined) {
+      value = deferred<void>();
+      gates.set(name, value);
+    }
+    return value;
+  };
+  return {
+    started,
+    settled,
+    signals,
+    lanes,
+    enqueue(name: string, background: boolean): void {
+      queue.enqueue({
+        accountId: ACCOUNT_ID,
+        providerMessageId: `message-queue-${name}`,
+        background,
+        onSettled: () => settled.push(name),
+        async run(signal, lane) {
+          signals.set(name, signal);
+          lanes.set(name, lane);
+          started.push(`${name}:${lane.background ? "prefetch" : "owner"}`);
+          const aborted = new Promise<void>((resolve) => {
+            if (signal.aborted) resolve();
+            signal.addEventListener("abort", () => resolve(), { once: true });
+          }).then(() => windDowns.get(name)?.promise);
+          await Promise.race([gate(name).promise, aborted]);
+          return { kind: "complete" };
+        },
+      });
+    },
+    release: (name: string) => gate(name).resolve(),
+    holdWindDown: (name: string) => windDowns.set(name, deferred<void>()),
+    letGo: (name: string) => {
+      windDowns.get(name)?.resolve();
+      windDowns.delete(name);
+    },
+  };
+}
+
+function nextTurn(): Promise<void> {
+  return new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * The start of the tests of what brings evicted bodies back. Three 72-byte
+ * cohort bodies fill a 216-byte budget, a draft answers the oldest of them,
+ * c3, and the owner's open of the fixture's own letter, sixty days old and
+ * holding 208 bytes, pushes c4 and c5 out while it stays pinned. A body
+ * fetched a second time waits for `returning`; `hold` keeps one letter's
+ * first fetch waiting too.
+ */
+async function cohortPushedOutByLargeOpen() {
+  let now = 60 * DAY;
+  const fixture = await createFixture([ACCOUNT_ID]);
+  seedInbox(fixture.caches[0]!, ["c1", "c2", "c3", "c4", "c5"], {
+    baseSentAt: now - 5 * DAY,
+  });
+  const returning = deferred<void>();
+  const held = new Map<string, Promise<void>>();
+  const text = (messageId: string) => {
+    if (messageId === MESSAGE_ID) return Buffer.alloc(200, 0x61);
+    if (messageId === "message-thread-m1") return Buffer.alloc(22, 0x62);
+    return bodyText(messageId);
+  };
+  const runner = new FakeMailContentWorkRunner(
+    Array.from({ length: 30 }, () => async (input: MailContentWorkInput) => {
+      await held.get(input.providerMessageId);
+      if (fetchesOf(input.providerMessageId) > 1) await returning.promise;
+      await publish(input, { text: text(input.providerMessageId) });
+    }),
+  );
+  const fetchesOf = (messageId: string) =>
+    runner.calls.filter((call) => call.providerMessageId === messageId).length;
+  const coordinator = fixture.coordinator(
+    runner,
+    undefined,
+    undefined,
+    () => now,
+    undefined,
+    undefined,
+    {
+      bodyCacheMaxBytes: 3 * 72,
+      draftSources: {
+        listDraftSourceMessageIds: async () => ["message-thread-c3"],
+      },
+    },
+  );
+  const step = () =>
+    coordinator.runBackgroundPrefetchStep(ACCOUNT_ID, new AbortController().signal);
+  const cohort = ["c5", "c4", "c3"].map((name) => `message-thread-${name}`);
+  await vi.waitFor(async () => {
+    await step();
+    await expect(statesOf(coordinator, cohort, "ready")).resolves.toEqual(cohort);
+  });
+  await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID });
+  await vi.waitFor(async () => {
+    await expect(statesOf(coordinator, [MESSAGE_ID], "ready")).resolves.toEqual([
+      MESSAGE_ID,
+    ]);
+  });
+  await step();
+  await expect(
+    statesOf(coordinator, ["message-thread-c5", "message-thread-c4"], "not_requested"),
+  ).resolves.toEqual(["message-thread-c5", "message-thread-c4"]);
+  return {
+    caches: fixture.caches,
+    coordinator,
+    step,
+    fetchesOf,
+    returning,
+    hold: (messageId: string, until: Promise<void>) => held.set(messageId, until),
+    advance: (ms: number) => {
+      now += ms;
+      return now;
+    },
+  };
+}
+
+/** The queue, with a hook that runs right after each enqueue. */
+function hookedQueue(
+  queue: InMemoryMailContentWorkQueue,
+  afterEnqueue: (task: MailContentQueueTask) => void,
+): MailContentWorkQueuePort {
+  return {
+    has: (accountId, messageId) => queue.has(accountId, messageId),
+    enqueue: (task) => {
+      const result = queue.enqueue(task);
+      afterEnqueue(task);
+      return result;
+    },
+    promote: (accountId, messageId) => queue.promote(accountId, messageId),
+    backgroundCount: (accountId) => queue.backgroundCount(accountId),
+    workCount: (accountId) => queue.workCount(accountId),
+    abortAndDrainBackground: () => queue.abortAndDrainBackground(),
+    resumeBackground: () => queue.resumeBackground(),
+    abortAndDrainAccount: (accountId) => queue.abortAndDrainAccount(accountId),
+    restoreAccount: (accountId) => queue.restoreAccount(accountId),
+    close: () => queue.close(),
+  };
+}
+
+function imageSet(names: readonly string[]): readonly {
+  readonly remoteImageId: string;
+  readonly sourceUrl: string;
+}[] {
+  return names.map((name) => ({
+    remoteImageId: `remote-image-a${name.repeat(32)}`,
+    sourceUrl: `https://images.example.com/${name}.png`,
+  }));
+}
+
+function withImages(
+  images: readonly { readonly remoteImageId: string; readonly sourceUrl: string }[],
+): { readonly html: Buffer; readonly remoteImages: typeof images } {
+  return {
+    html: Buffer.from(
+      images
+        .map((image) => `<img data-brain-remote-image="${image.remoteImageId}">`)
+        .join(""),
+    ),
+    remoteImages: images,
+  };
+}
+
+/**
+ * An image origin whose first answer, or every answer with `hangAll`, waits
+ * for the test (`answer`) unless the fetch is aborted first, as a real one
+ * is. Once answered, it answers at once. `holdAbort` keeps an aborted fetch
+ * hanging on until `letGo`, to watch what waits for it.
+ */
+function slowOrigin(options: { readonly hangAll?: boolean } = {}): {
+  readonly urls: string[];
+  readonly signals: (AbortSignal | undefined)[];
+  readonly fetch: RemoteImageFetcherPort["fetch"];
+  answer(): void;
+  holdAbort(): void;
+  letGo(): void;
+} {
+  const urls: string[] = [];
+  const signals: (AbortSignal | undefined)[] = [];
+  const answered = deferred<void>();
+  let hold: ReturnType<typeof deferred<void>> | null = null;
+  const png = testPng(10, 10);
+  return {
+    urls,
+    signals,
+    answer: () => answered.resolve(),
+    holdAbort: () => {
+      hold = deferred<void>();
+    },
+    letGo: () => hold?.resolve(),
+    fetch: async (url, _budget, signal) => {
+      urls.push(url);
+      signals.push(signal);
+      if (options.hangAll === true || urls.length === 1) {
+        await new Promise<void>((resolve, reject) => {
+          const abort = () => {
+            void (hold?.promise ?? Promise.resolve()).then(() =>
+              reject(
+                new RemoteImageFetchError("transient", "remote_image_fetch_aborted"),
+              ),
+            );
+          };
+          void answered.promise.then(resolve);
+          if (signal?.aborted) abort();
+          signal?.addEventListener("abort", abort, { once: true });
+        });
+      }
+      return {
+        mimeType: "image/png",
+        data: Buffer.from(png),
+        raster: { width: 10, height: 10, frames: 1 },
+      };
+    },
+  };
+}
+
+/** The messages, in the order given, whose content is in `state`. */
+async function statesOf(
+  coordinator: MailContentCoordinator,
+  messageIds: readonly string[],
+  state: string,
+): Promise<readonly string[]> {
+  const states = await Promise.all(
+    messageIds.map(async (messageId) => ({
+      messageId,
+      state: (await coordinator.getContent({ accountId: ACCOUNT_ID, messageId }))
+        .state,
+    })),
+  );
+  return states
+    .filter((entry) => entry.state === state)
+    .map((entry) => entry.messageId);
+}
+
+/**
+ * Adds one Inbox thread per name beside the fixture's own, each a hundred
+ * milliseconds newer than the one before it. A second batch names the history
+ * it follows on from.
+ */
+function seedInbox(
+  cache: SqliteMailMessageCache,
+  names: readonly string[],
+  options: {
+    readonly baseSentAt?: number;
+    readonly fromHistory?: string;
+    readonly toHistory?: string;
+  } = {},
+): readonly { threadId: string; messageId: string; sentAt: number }[] {
+  const entries = names.map((name, index) => ({
+    threadId: `thread-${name}`,
+    messageId: `message-thread-${name}`,
+    sentAt: (options.baseSentAt ?? 200) + index * 100,
+  }));
+  cache.applyIncrementalPage({
+    expectedHistoryId: options.fromHistory ?? "100",
+    expectedPageToken: null,
+    changes: entries.map((entry) => ({
+      kind: "upsert" as const,
+      value: threadFixture(ACCOUNT_ID, entry),
+    })),
+    nextPageToken: null,
+    resultingHistoryId: options.toHistory ?? "101",
+    now: 500,
+  });
+  return entries;
+}
+
+/** Publishes every body it is asked for: 8 bytes of shared raw MIME and 64 of text. */
+function openRunner(): FakeMailContentWorkRunner {
+  return new FakeMailContentWorkRunner(
+    Array.from({ length: 30 }, () => (input: MailContentWorkInput) =>
+      publish(input, { text: bodyText(input.providerMessageId) }),
+    ),
+  );
+}
+
+function bodyText(messageId: string): Buffer {
+  return Buffer.from(messageId.padEnd(64, "."));
 }
 
 function descriptor(value: Buffer): MailBlobDescriptor {

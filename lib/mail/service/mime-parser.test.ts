@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { MailMimeParseBudget, MailMimeParseOutcome } from "../ports";
 import { UnixSocketMailMimeParser } from "./mime-parser-client";
 import { runMimeParserWorkerConnection } from "./mime-parser-runtime";
+import { BMP1_FRAME, writeBmp1JsonFrame } from "./mime-protocol";
 
 let socketSequence = 0;
 const sockets = new Set<string>();
@@ -282,14 +283,15 @@ describe("isolated BMP1 MIME parser", () => {
     expect(["parsed", "permanent_failure"]).toContain(result.kind);
   });
 
-  it("recovers on the next message after a worker connection crashes", async () => {
+  it("reports a connection closed before any answer as dropped, and recovers on the next message", async () => {
+    // What the parser socket does with a connection past its limit.
     const socketPath = nextSocketPath();
     await startServer(socketPath, (socket) => socket.destroy());
     const parser = new UnixSocketMailMimeParser({ socketPath });
     const raw = Buffer.from("From: a@example.com\r\n\r\nfirst");
-    await expect(parse(parser, raw)).resolves.toMatchObject({
+    await expect(parse(parser, raw)).resolves.toEqual({
       kind: "transient_failure",
-      errorCode: "mail_mime_worker_crashed",
+      errorCode: "mail_mime_worker_dropped",
     });
 
     await unlink(socketPath).catch(() => undefined);
@@ -301,6 +303,40 @@ describe("isolated BMP1 MIME parser", () => {
     if (recovered.kind === "parsed") {
       expect(recovered.artifacts.text?.data.toString()).toBe("second");
     }
+  });
+
+  it("reports a worker that read the request and hung up without a word as dropped", async () => {
+    const socketPath = nextSocketPath();
+    await startServer(socketPath, (socket) => {
+      socket.on("error", () => undefined);
+      socket.once("data", () => socket.destroy());
+    });
+    const raw = Buffer.from("From: a@example.com\r\n\r\nunanswered");
+    await expect(
+      parse(new UnixSocketMailMimeParser({ socketPath }), raw),
+    ).resolves.toEqual({
+      kind: "transient_failure",
+      errorCode: "mail_mime_worker_dropped",
+    });
+  });
+
+  it("reports a worker that answered and then went quiet as crashed", async () => {
+    const socketPath = nextSocketPath();
+    await startServer(socketPath, (socket) => {
+      socket.on("error", () => undefined);
+      socket.once("data", () => {
+        void writeBmp1JsonFrame(socket, BMP1_FRAME.artifactBegin, { kind: "text" })
+          .catch(() => undefined)
+          .finally(() => socket.destroy());
+      });
+    });
+    const raw = Buffer.from("From: a@example.com\r\n\r\nhalf answered");
+    await expect(
+      parse(new UnixSocketMailMimeParser({ socketPath }), raw),
+    ).resolves.toEqual({
+      kind: "transient_failure",
+      errorCode: "mail_mime_worker_crashed",
+    });
   });
 
   it("cuts off a worker that exceeds the caller deadline", async () => {

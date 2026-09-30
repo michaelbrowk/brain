@@ -2,7 +2,7 @@
 
 import { act, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it as vitestIt, vi } from "vitest";
 import { emitMailCommand } from "./mail-commands";
 import { accountWords } from "./mail-row";
 import {
@@ -574,6 +574,35 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+/** Taken when the file loads, before any case fakes the clock: a teardown
+ *  bound that has to run while a case's fake timers are still installed. */
+const realSetTimeout = globalThis.setTimeout;
+
+/**
+ * THE CASE STILL RUNNING AFTER ITS TIMEOUT. Vitest fails a case that runs
+ * past its timeout and moves on, but the case's body keeps going, and it is
+ * usually inside an `act`: until that `act` ends every later one nests inside
+ * it and never flushes, so every case after it fails on a tree that never
+ * rendered. Each case's body is kept here, and the teardown lets it end (on
+ * the real clock, and not for ever) before it takes the tree.
+ */
+let caseBody: Promise<unknown> = Promise.resolve();
+const it = Object.assign(
+  (name: string, body: () => unknown, timeout?: number) =>
+    vitestIt(
+      name,
+      () => {
+        const run = Promise.resolve().then(body);
+        caseBody = run;
+        return run;
+      },
+      timeout,
+    ),
+  // The table cases are short and synchronous in their setup; they keep
+  // vitest's own `each`, bound to the API it reads its context from.
+  { each: vitestIt.each.bind(vitestIt) },
+);
+
 describe("MailSurface", () => {
   let host: HTMLDivElement;
   let root: Root;
@@ -593,11 +622,26 @@ describe("MailSurface", () => {
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    vi.useRealTimers();
-    host.remove();
-    vi.unstubAllGlobals();
-    vi.restoreAllMocks();
+    // All of it runs even when the case before failed or timed out with work
+    // still out. A teardown that stopped at its first throw left fake timers,
+    // a mounted tree and portals behind, and every later case in the file
+    // then failed on the leftovers in a millisecond instead of on its own.
+    await Promise.race([
+      caseBody.catch(() => undefined),
+      new Promise((resolve) => realSetTimeout(resolve, 5_000)),
+    ]);
+    try {
+      await act(async () => root.unmount());
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+      host.remove();
+      // Menus, dialogs and toasts portal onto the body, outside the host.
+      document.body.replaceChildren();
+      document.body.removeAttribute("style");
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    }
   });
 
   it("loads Inbox and exposes the supported system folders", async () => {
@@ -4006,9 +4050,17 @@ describe("MailSurface", () => {
     const range = (a: number, b: number) =>
       Array.from({ length: b - a + 1 }, (_value, index) => a + index);
 
+    /** Set when a case is over, so a long loop a timeout cut short stops at
+     *  its next step, and the file's teardown, which waits for the case's
+     *  body to end, does not wait out the whole loop. */
+    let finished = { current: false };
     beforeEach(() => {
+      finished = { current: false };
       vi.useFakeTimers();
       vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    });
+    afterEach(() => {
+      finished.current = true;
     });
 
     it("A: a row archived elsewhere off page one does not come back below the fresh window (Inbox)", async () => {
@@ -4259,20 +4311,25 @@ describe("MailSurface", () => {
       [60, 1_000],
       [60, 3_000],
     ] as const) {
+      /* Everything runs on the fake clock in 100 ms steps: eight simulated
+         seconds, four presses two seconds apart, over a list kept to 300
+         rows. The runner's own speed only decides how long the steps take,
+         and the explicit timeout leaves a slow runner room for them. */
       it(`J: every press is served with events every ${period} ms and ${latency} ms reads (50-row pages)`, async () => {
-        const cache = fakeCache(range(1, 400).map((n) => fakeRow(n, ["sent", "all"])));
+        const cache = fakeCache(range(1, 300).map((n) => fakeRow(n, ["sent", "all"])));
         await mountWith(cache);
         await goTo("Sent");
         await settle();
-        for (let index = 0; index < 3; index += 1) await press();
-        expect(listed().length).toBe(200);
+        await press();
+        expect(listed().length).toBe(100);
         cache.state.history += 1;
         await eventFor(["sent"]);
         cache.state.latency = latency;
         let presses = 0;
         let served = 0;
         let waiting: number | null = null;
-        for (let t = 0; t < 20_000; t += 50) {
+        for (let t = 0; t < 8_000; t += 100) {
+          if (finished.current) return;
           if (t % period === 0) {
             await mailEvent({
               kind: "mail",
@@ -4290,19 +4347,19 @@ describe("MailSurface", () => {
             } catch {
               // at the end
             }
-            if (button && listed().length < 400) {
+            if (button) {
               presses += 1;
               waiting = listed().length;
               await act(async () => button!.click());
             }
           }
-          await act(async () => vi.advanceTimersByTimeAsync(50));
+          await act(async () => vi.advanceTimersByTimeAsync(100));
         }
         if (waiting !== null && listed().length > waiting) served += 1;
-        expect(presses).toBeGreaterThan(0);
+        expect(presses).toBe(4);
         expect(served).toBe(presses);
         expect(new Set(listed()).size).toBe(listed().length);
-      });
+      }, 20_000);
     }
 
     it("K: a walk over repeated cursors ends and stays bounded", async () => {

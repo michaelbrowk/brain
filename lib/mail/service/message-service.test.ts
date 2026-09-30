@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { MailThreadListItem } from "../message-types";
+import { MAIL_CHANGE_ALL_MAILBOXES, type MailServiceChange } from "./change-feed-ring";
 import {
   type CachedProviderMessage,
   type CachedProviderThread,
@@ -1052,11 +1053,149 @@ describe("account mail message service", () => {
   });
 });
 
+describe("account mail message service change records", () => {
+  it("records a sync when an initial generation is published, not for a staged page", async () => {
+    const changes: MailServiceChange[] = [];
+    const fixture = await createService(
+      {
+        listInitialThreads: vi
+          .fn<MailProviderSyncPort["listInitialThreads"]>()
+          .mockResolvedValueOnce({
+            threads: [threadFixture("thread-a", 1000)],
+            nextPageToken: "page-two",
+          })
+          .mockResolvedValueOnce({ threads: [], nextPageToken: null }),
+      },
+      { hydrateHiddenMailboxes: false, onChange: (change) => changes.push(change) },
+    );
+
+    await fixture.service.syncAccount(ACCOUNT_ID, { maxItems: 20 });
+    expect(changes).toEqual([]);
+    // The last page brings nothing of its own, and the generation it
+    // completes is still news.
+    await fixture.service.syncAccount(ACCOUNT_ID, { maxItems: 20 });
+    expect(changes).toEqual([
+      { accountId: ACCOUNT_ID, mailboxIds: MAIL_CHANGE_ALL_MAILBOXES, kind: "sync" },
+    ]);
+    fixture.cache.close();
+  });
+
+  it("records an incremental page that changed threads and stays quiet for one that did not", async () => {
+    const changes: MailServiceChange[] = [];
+    const listChanges = vi
+      .fn<MailProviderSyncPort["listChanges"]>()
+      .mockResolvedValueOnce({
+        changedThreadIds: ["thread-a"],
+        nextPageToken: null,
+        resultingHistoryId: "200",
+      })
+      .mockResolvedValueOnce({
+        changedThreadIds: [],
+        nextPageToken: null,
+        resultingHistoryId: "200",
+      });
+    const fixture = await createService(
+      {
+        listInitialThreads: vi.fn().mockResolvedValue({
+          threads: [threadFixture("thread-a", 1000)],
+          nextPageToken: null,
+        }),
+        listChanges,
+        getThread: vi.fn().mockResolvedValue(threadFixture("thread-a", 3000, false)),
+      },
+      { hydrateHiddenMailboxes: false, onChange: (change) => changes.push(change) },
+    );
+    await fixture.service.syncAccount(ACCOUNT_ID, { maxItems: 20 });
+    changes.length = 0;
+
+    await fixture.service.runBackgroundSyncStep(ACCOUNT_ID, { maxItems: 20 });
+    expect(changes).toEqual([
+      { accountId: ACCOUNT_ID, mailboxIds: MAIL_CHANGE_ALL_MAILBOXES, kind: "sync" },
+    ]);
+    await fixture.service.runBackgroundSyncStep(ACCOUNT_ID, { maxItems: 20 });
+    expect(changes).toHaveLength(1);
+    fixture.cache.close();
+  });
+
+  it("records a mutation once the provider and the cache both have it", async () => {
+    const changes: MailServiceChange[] = [];
+    const fixture = await createService(
+      {
+        listInitialThreads: vi.fn().mockResolvedValue({
+          threads: [threadFixture("thread-a", 1000)],
+          nextPageToken: null,
+        }),
+        getThread: vi.fn().mockResolvedValue(threadFixture("thread-a", 1000, false)),
+        setThreadStarred: vi
+          .fn<MailProviderSyncPort["setThreadStarred"]>()
+          .mockRejectedValueOnce(new MailProviderSyncError("mail_provider_unavailable"))
+          .mockResolvedValue(undefined),
+      },
+      { hydrateHiddenMailboxes: false, onChange: (change) => changes.push(change) },
+    );
+    await fixture.service.syncAccount(ACCOUNT_ID, { maxItems: 20 });
+    changes.length = 0;
+
+    await expect(
+      fixture.service.updateThread(
+        { accountId: ACCOUNT_ID, threadId: "thread-a", starred: true },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow("mail_provider_unavailable");
+    expect(changes).toEqual([]);
+    await fixture.service.updateThread(
+      { accountId: ACCOUNT_ID, threadId: "thread-a", read: true },
+      new AbortController().signal,
+    );
+    expect(changes).toEqual([
+      { accountId: ACCOUNT_ID, mailboxIds: MAIL_CHANGE_ALL_MAILBOXES, kind: "mutation" },
+    ]);
+    fixture.cache.close();
+  });
+
+  it("records each hidden mailbox as its snapshot is published", async () => {
+    const changes: MailServiceChange[] = [];
+    const fixture = await createService({}, { onChange: (change) => changes.push(change) });
+
+    for (let pass = 0; pass < 9; pass += 1) {
+      await fixture.service.syncAccount(ACCOUNT_ID, { maxItems: 20 });
+    }
+
+    expect(
+      changes.filter((change) => change.mailboxIds.length === 1).map((change) => change.mailboxIds),
+    ).toEqual([["sent"], ["starred"], ["spam"], ["trash"]]);
+    fixture.cache.close();
+  });
+
+  it("keeps the sync's answer when the observer throws", async () => {
+    const fixture = await createService(
+      {
+        listInitialThreads: vi.fn().mockResolvedValue({
+          threads: [threadFixture("thread-a", 1000)],
+          nextPageToken: null,
+        }),
+      },
+      {
+        hydrateHiddenMailboxes: false,
+        onChange: () => {
+          throw new Error("observer");
+        },
+      },
+    );
+
+    await expect(
+      fixture.service.syncAccount(ACCOUNT_ID, { maxItems: 20 }),
+    ).resolves.toMatchObject({ status: "idle", changedCount: 1 });
+    fixture.cache.close();
+  });
+});
+
 async function createService(
   overrides: Partial<MailProviderSyncPort>,
   options: {
     readonly now?: () => number;
     readonly hydrateHiddenMailboxes?: boolean;
+    readonly onChange?: (change: MailServiceChange) => void;
   } = {},
 ): Promise<{
   readonly service: AccountMailMessageService;
@@ -1102,6 +1241,7 @@ async function createService(
       reauthErrorCode: "gmail_reauth_required",
       now: options.now,
       hydrateHiddenMailboxes: options.hydrateHiddenMailboxes,
+      onChange: options.onChange,
     }),
   };
 }

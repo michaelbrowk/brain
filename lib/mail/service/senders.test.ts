@@ -21,6 +21,7 @@ import {
   type MailSenderMailPort,
 } from "./senders";
 import { MailProviderSyncError, type MailMessageService } from "./message-service";
+import { MAIL_CHANGE_ALL_MAILBOXES, type MailServiceChange } from "./change-feed-ring";
 
 const ACCOUNT_A = "account-a11111111111111111111111111111111";
 const ACCOUNT_B = "account-a22222222222222222222222222222222";
@@ -838,6 +839,26 @@ describe("the new-senders screen", () => {
     world.mail.addThread(ACCOUNT_A, { threadId: "t2", from: "news@growth.test", at: LATER + 7 });
     await step(world, ACCOUNT_A, true);
     expect(world.mail.inbox(ACCOUNT_A)).toEqual([]);
+  });
+
+  it("tells the change feed that every connected account's lists read differently after a decision, an undo or a switch", async () => {
+    const changes: MailServiceChange[] = [];
+    const world = await readyWorld({ onChange: (change) => changes.push(change) });
+    world.mail.addThread(ACCOUNT_A, { threadId: "lena", from: "lena@example.net", at: LATER });
+    const everyAccount = [ACCOUNT_A, ACCOUNT_B].map((accountId) => ({
+      accountId,
+      mailboxIds: MAIL_CHANGE_ALL_MAILBOXES,
+      kind: "mutation",
+    }));
+
+    const decision = await world.screen.decide(accept("lena@example.net"), NO_DEADLINE);
+    expect(changes).toEqual(everyAccount);
+    changes.length = 0;
+    await world.screen.undo(decision.decisionId, { restore: true }, NO_DEADLINE);
+    expect(changes).toEqual(everyAccount);
+    changes.length = 0;
+    await world.screen.setEnabled(false);
+    expect(changes).toEqual(everyAccount);
   });
 
   it("undoes an accept by removing the decision and the known entry it added", async () => {
@@ -2475,7 +2496,12 @@ async function createStore(now: () => number) {
   return { store, stateDirectory };
 }
 
-async function createWorld(options: { readonly onEvent?: (event: unknown) => void } = {}) {
+interface WorldOptions {
+  readonly onEvent?: (event: unknown) => void;
+  readonly onChange?: (change: MailServiceChange) => void;
+}
+
+async function createWorld(options: WorldOptions = {}) {
   const clock = { now: ENABLED_AT };
   const { store } = await createStore(() => clock.now);
   const mail = createFakeMail({ [ACCOUNT_A]: "Me <me@a.test>", [ACCOUNT_B]: "me@b.test" });
@@ -2484,6 +2510,7 @@ async function createWorld(options: { readonly onEvent?: (event: unknown) => voi
     mail: mail.port,
     now: () => clock.now,
     onEvent: options.onEvent,
+    onChange: options.onChange,
     backfillWindow: 2,
   });
   return { store, mail, screen, clock };
@@ -2491,9 +2518,7 @@ async function createWorld(options: { readonly onEvent?: (event: unknown) => voi
 
 /** A screen whose backfill has run over both accounts, finishing at
  *  BACKFILLED, and whose clock then moves on. */
-async function readyWorld(
-  options: { readonly onEvent?: (event: unknown) => void } = {},
-): Promise<World> {
+async function readyWorld(options: WorldOptions = {}): Promise<World> {
   const world = await createWorld(options);
   await finishBackfill(world);
   return world;

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { BrainMailEvent } from "@/lib/mail/mail-events";
 import type { BrainNotification } from "@/lib/notifications/model";
 import {
   MAX_APPENDS_PER_SCAN,
@@ -542,6 +543,107 @@ describe("a scan that cannot open the store", () => {
       // about the mail service, which is another process.
       await vi.advanceTimersByTimeAsync(120_000);
       expect(polls).toBe(3);
+      dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("the mail scan on the change feed", () => {
+  const ACCOUNT = `account-a${"1".repeat(32)}`;
+
+  function feed() {
+    let listener: ((event: BrainMailEvent) => void) | null = null;
+    return {
+      onMailEvent: (next: (event: BrainMailEvent) => void) => {
+        listener = next;
+        return () => {
+          listener = null;
+        };
+      },
+      send: (event: BrainMailEvent) => listener?.(event),
+      subscribed: () => listener !== null,
+    };
+  }
+
+  it("scans two seconds after the last event that can bring a letter, and stops listening on dispose", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.useFakeTimers();
+    try {
+      let polls = 0;
+      const events = feed();
+      const dispose = scheduleReminderScans({
+        initialDelayMs: 15_000,
+        intervalMs: 30_000,
+        scan: async () => undefined,
+        mailScan: async () => {
+          polls += 1;
+        },
+        onMailEvent: events.onMailEvent,
+      });
+
+      // A ready body, a mutation and a Sent listing bring no new letter.
+      events.send({
+        kind: "mail",
+        changeKind: "content_ready",
+        accountId: ACCOUNT,
+        mailboxIds: [],
+        messageIds: ["message-1"],
+      });
+      events.send({ kind: "mail", changeKind: "mutation", accountId: ACCOUNT, mailboxIds: ["inbox"] });
+      events.send({ kind: "mail", changeKind: "sync", accountId: ACCOUNT, mailboxIds: ["sent"] });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(polls).toBe(0);
+
+      events.send({ kind: "mail", changeKind: "sync", accountId: ACCOUNT, mailboxIds: ["inbox"] });
+      await vi.advanceTimersByTimeAsync(1_000);
+      events.send({ kind: "mail", changeKind: "reset" });
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(polls).toBe(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(polls).toBe(1);
+
+      dispose();
+      expect(events.subscribed()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("runs once more after a scan that is still out, never beside it", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const warn = quiet();
+    vi.useFakeTimers();
+    try {
+      let starts = 0;
+      let release = () => {};
+      const events = feed();
+      const dispose = scheduleReminderScans({
+        initialDelayMs: 0,
+        intervalMs: 30_000,
+        scan: async () => undefined,
+        mailScan: () => {
+          starts += 1;
+          return new Promise<void>((resolve) => {
+            release = resolve;
+          });
+        },
+        onMailEvent: events.onMailEvent,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(starts).toBe(1);
+
+      // The letter landed after the scan out now read its inbox.
+      events.send({ kind: "mail", changeKind: "sync", accountId: ACCOUNT, mailboxIds: ["inbox"] });
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(starts).toBe(1);
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(starts).toBe(2);
+      // An event is not a tick, so waiting for one is not a skipped tick.
+      expect(warn).not.toHaveBeenCalled();
+      release();
       dispose();
     } finally {
       vi.useRealTimers();

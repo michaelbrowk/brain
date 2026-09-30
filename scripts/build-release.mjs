@@ -135,7 +135,8 @@ export const MAIL_RUNTIME_LISTING = Object.freeze({
   "providers/imap": ["sync-adapter.js|f"],
   service: [
     "account-store.js|f", "account-types.js|f", "accounts.js|f", "admission.js|f",
-    "background-sync.js|f", "content-blob-store.js|f", "content-cache.js|f",
+    "background-sync.js|f", "change-feed-ring.js|f", "content-blob-store.js|f",
+    "content-cache.js|f",
     "content-coordinator.js|f", "content-source.js|f", "content-work-runner.js|f",
     "dns.js|f", "drafts.js|f", "http.js|f", "imap-idle.js|f", "imapflow-adapter.js|f",
     "limits.js|f",

@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   scheduleUpdateChecks: vi.fn(),
   scheduleReminderScans: vi.fn(),
   tellMail: vi.fn<() => Promise<boolean>>(),
+  startMailChangeFeed: vi.fn(),
 }));
 
 vi.mock("./lib/store/standalone-startup-barrier", () => ({
@@ -31,6 +32,11 @@ vi.mock("./lib/reminders/scheduler", () => ({
 vi.mock("./lib/mail/module-sync", () => ({
   tellMailServiceAboutModules: mocks.tellMail,
 }));
+// Off under NODE_ENV=test on its own too, and mocked for the same reason as
+// the schedulers: a production case would leave a real long poll behind.
+vi.mock("./lib/mail/change-feed", () => ({
+  startMailChangeFeed: mocks.startMailChangeFeed,
+}));
 
 import { register } from "./instrumentation";
 
@@ -43,6 +49,14 @@ describe("register", () => {
     mocks.scheduleUpdateChecks.mockReset();
     mocks.scheduleReminderScans.mockReset();
     mocks.tellMail.mockReset().mockResolvedValue(true);
+    mocks.startMailChangeFeed.mockReset();
+  });
+
+  it("starts the mail change feed beside the reminder scan", async () => {
+    await register();
+
+    expect(mocks.scheduleReminderScans).toHaveBeenCalledOnce();
+    expect(mocks.startMailChangeFeed).toHaveBeenCalledOnce();
   });
 
   afterEach(() => {

@@ -29,6 +29,7 @@ import type {
   MailThreadView,
 } from "../message-types";
 import { MailAccountError } from "./account-types";
+import { MAIL_CHANGE_ALL_MAILBOXES, type MailServiceChange } from "./change-feed-ring";
 import {
   MailProviderSyncError,
   type MailBackgroundSyncHealth,
@@ -1214,6 +1215,7 @@ export class MailSenderScreen implements MailSenderScreenService {
   private readonly mail: MailSenderMailPort;
   private readonly now: () => number;
   private readonly onEvent: (value: unknown) => void;
+  private readonly onChange: ((change: MailServiceChange) => void) | null;
   private readonly backfillWindow: number;
   private readonly archiveBackoff = new Map<string, number>();
   /**
@@ -1231,12 +1233,17 @@ export class MailSenderScreen implements MailSenderScreenService {
     readonly mail: MailSenderMailPort;
     readonly now?: () => number;
     readonly onEvent?: (value: unknown) => void;
+    /** A decision, its undo and the switch change what every list says about
+     *  its threads without moving one, so the change feed hears about them
+     *  here. Archives and restores reach it through the thread mutation. */
+    readonly onChange?: (change: MailServiceChange) => void;
     readonly backfillWindow?: number;
   }) {
     this.store = options.store;
     this.mail = options.mail;
     this.now = options.now ?? Date.now;
     this.onEvent = options.onEvent ?? (() => undefined);
+    this.onChange = options.onChange ?? null;
     this.backfillWindow = options.backfillWindow ?? DEFAULT_BACKFILL_WINDOW;
     if (
       !Number.isSafeInteger(this.backfillWindow) ||
@@ -1266,7 +1273,23 @@ export class MailSenderScreen implements MailSenderScreenService {
 
   async setEnabled(enabled: boolean): Promise<MailSenderScreenState> {
     this.store.setEnabled(enabled, this.now());
+    await this.recordListsChanged();
     return this.readState();
+  }
+
+  /** Every connected account's lists, because a decision about an address or
+   *  a domain speaks for all of them. A failure here loses a hint, never the
+   *  decision. */
+  private async recordListsChanged(): Promise<void> {
+    if (this.onChange === null) return;
+    try {
+      const own = await this.readOwn();
+      for (const accountId of own.connectedAccountIds) {
+        this.onChange({ accountId, mailboxIds: MAIL_CHANGE_ALL_MAILBOXES, kind: "mutation" });
+      }
+    } catch {
+      // The next record, or the browser's own safety net, covers this one.
+    }
   }
 
   /**
@@ -1397,6 +1420,7 @@ export class MailSenderScreen implements MailSenderScreenService {
         }),
       context.signal,
     );
+    await this.recordListsChanged();
     if (input.decision === "accept") {
       return Object.freeze({
         apiVersion: 1,
@@ -1481,6 +1505,7 @@ export class MailSenderScreen implements MailSenderScreenService {
       return this.store.removeDecision(decisionId, { restore: options.restore });
     }, context.signal);
     if (removed === null) throw new MailSenderError("mail_sender_decision_not_found");
+    await this.recordListsChanged();
     const restored: MailSenderThreadRef[] = [];
     const dropped: MailSenderThreadRef[] = [];
     let pending = false;

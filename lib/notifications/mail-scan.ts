@@ -9,11 +9,14 @@ import { readMailWatermarks, writeMailWatermark } from "./watermarks";
 
 /** THE NEW-MAIL POLL.
  *
- *  The mail service is a separate process (ops/brain-mail.service) and emits
- *  nothing into this one: app/api/events/route.ts streams the store's own
- *  events and no mail event exists. So the producer polls one Inbox page per
- *  account against a per-account high-water mark, on every second tick of the
- *  reminder timer, which is once a minute.
+ *  The mail service is a separate process (ops/brain-mail.service) that never
+ *  dials this one; Brain's change-feed loop (lib/mail/change-feed.ts) asks it
+ *  what changed. So the producer reads one Inbox page per account against a
+ *  per-account high-water mark two seconds after a sync that changed an Inbox
+ *  (the reminder scheduler listens for the `mail` event), and on every second
+ *  tick of the reminder timer, once a minute, as the fallback for a feed that
+ *  is down or an event that was lost. The marks make the two the same scan:
+ *  a letter is reported once, by whichever reaches it first.
  *
  *  Nothing here logs an address or an endpoint. A poll that cannot reach the
  *  service raises no alarm of its own: the Mail surface already says so where

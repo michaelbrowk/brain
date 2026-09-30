@@ -45,6 +45,12 @@ import {
 } from "./security";
 import { MAIL_SERVICE_HTTP_LIMITS } from "./service/limits";
 import {
+  MAIL_CHANGE_FEED_CAPACITY,
+  MAIL_CHANGE_FEED_MAX_WAIT_MS,
+  type MailChangeFeedAnswer,
+  type MailServiceChange,
+} from "./service/change-feed-ring";
+import {
   MAIL_ACCOUNT_CAPABILITIES_CONTRACT_HEADER,
   MAIL_ACCOUNT_CAPABILITIES_CONTRACT_VALUE,
   mailAccountCapabilities,
@@ -116,8 +122,14 @@ const ATTACHMENTS_PATH = "/v1/attachments";
 const REMOTE_IMAGES_PATH = "/v1/remote-images";
 const SEARCH_PATH = "/v1/search";
 const SENDERS_PATH = "/v1/senders";
+const CHANGES_PATH = "/v1/changes";
 const REQUEST_TIMEOUT_MS = 12_000;
 const MAX_RESPONSE_BYTES = 32 * 1024;
+/** A full ring is 256 records, and the widest is a ready body's: a
+ *  42-character account id, a 255-character message id and the keys around
+ *  them, about 350 bytes. 256 KiB holds the ring with room to spare. */
+const MAX_CHANGES_RESPONSE_BYTES = 256 * 1024;
+const SAFE_CHANGE_MESSAGE_ID = /^[A-Za-z0-9_-]{1,255}$/;
 const MAX_THREAD_LIST_RESPONSE_BYTES = 512 * 1024;
 const MAX_THREAD_DETAIL_RESPONSE_BYTES = 4 * 1024 * 1024;
 /** A block or an undo names at most two hundred threads, and the worst of
@@ -208,6 +220,7 @@ export const SAFE_SERVICE_ERROR_CODES = new Set([
   "mail_sender_decision_not_found",
   "mail_sender_decision_changed",
   "mail_senders_unavailable",
+  "mail_changes_busy",
 ]);
 
 export type MailTlsMode = "implicit" | "starttls";
@@ -1216,6 +1229,107 @@ export function createBrainMailClient(options?: {
         // A thousand blocked keys, each an address or a domain and a count.
         MAX_THREAD_LIST_RESPONSE_BYTES,
       ),
+  });
+}
+
+/**
+ * One long-poll read of the service's change feed, for Brain's own loop in
+ * `change-feed.ts`; no surface calls it. It sits outside `BrainMailClient`
+ * because its timeout is the wait plus the ordinary one, where every method
+ * there shares a single ceiling shorter than the wait.
+ */
+export async function readMailChanges(
+  input: { readonly cursor: number | null; readonly waitMs: number },
+  signal?: AbortSignal,
+  options?: { readonly socketPath?: string; readonly requestTimeoutMs?: number },
+): Promise<MailChangeFeedAnswer> {
+  const socketPath = validateSocketPath(
+    options?.socketPath ?? process.env.BRAIN_MAIL_SOCKET_PATH ?? DEFAULT_SOCKET_PATH,
+  );
+  const requestTimeoutMs = validateRequestTimeout(
+    options?.requestTimeoutMs ?? REQUEST_TIMEOUT_MS,
+  );
+  if (
+    (input.cursor !== null &&
+      (!Number.isSafeInteger(input.cursor) || input.cursor < 0)) ||
+    !Number.isSafeInteger(input.waitMs) ||
+    input.waitMs < 0 ||
+    input.waitMs > MAIL_CHANGE_FEED_MAX_WAIT_MS
+  ) {
+    throw new BrainMailClientError(400, "mail_request_invalid");
+  }
+  const query = new URLSearchParams();
+  if (input.cursor !== null) query.set("cursor", String(input.cursor));
+  query.set("wait", String(input.waitMs));
+  return requestMailService(
+    socketPath,
+    input.waitMs + requestTimeoutMs,
+    `${CHANGES_PATH}?${query}`,
+    "GET",
+    undefined,
+    validateMailChangeFeedAnswer,
+    signal,
+    MAX_CHANGES_RESPONSE_BYTES,
+  );
+}
+
+function validateMailChangeFeedAnswer(value: unknown): MailChangeFeedAnswer {
+  const reset = isPlainRecord(value) && Object.hasOwn(value, "reset");
+  if (
+    !isExactRecord(
+      value,
+      reset ? ["apiVersion", "cursor", "changes", "reset"] : ["apiVersion", "cursor", "changes"],
+    ) ||
+    value.apiVersion !== 1 ||
+    (reset && value.reset !== true) ||
+    typeof value.cursor !== "number" ||
+    !Number.isSafeInteger(value.cursor) ||
+    value.cursor < 0 ||
+    !Array.isArray(value.changes) ||
+    value.changes.length > MAIL_CHANGE_FEED_CAPACITY
+  ) {
+    throw invalidResponse();
+  }
+  const changes = value.changes.map((change: unknown): MailServiceChange => {
+    const ready = isPlainRecord(change) && change.kind === "content_ready";
+    if (
+      !isExactRecord(
+        change,
+        ready
+          ? ["accountId", "mailboxIds", "kind", "messageId"]
+          : ["accountId", "mailboxIds", "kind"],
+      ) ||
+      typeof change.accountId !== "string" ||
+      !SAFE_ACCOUNT_ID.test(change.accountId) ||
+      (change.kind !== "sync" && change.kind !== "mutation" && !ready) ||
+      !Array.isArray(change.mailboxIds) ||
+      new Set(change.mailboxIds).size !== change.mailboxIds.length ||
+      (ready &&
+        (typeof change.messageId !== "string" ||
+          !SAFE_CHANGE_MESSAGE_ID.test(change.messageId)))
+    ) {
+      throw invalidResponse();
+    }
+    let mailboxIds: MailSystemMailbox[];
+    try {
+      mailboxIds = change.mailboxIds.map((mailboxId: unknown) =>
+        validateMailSystemMailbox(mailboxId),
+      );
+    } catch {
+      throw invalidResponse();
+    }
+    return Object.freeze({
+      accountId: change.accountId,
+      mailboxIds: Object.freeze(mailboxIds),
+      kind: change.kind as MailServiceChange["kind"],
+      ...(ready ? { messageId: change.messageId as string } : {}),
+    });
+  });
+  return Object.freeze({
+    apiVersion: 1,
+    cursor: value.cursor,
+    changes: Object.freeze(changes),
+    ...(reset ? { reset: true as const } : {}),
   });
 }
 

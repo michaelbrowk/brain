@@ -304,7 +304,7 @@ The service socket is not bound to TCP. Nginx and Cloudflare never expose it. A 
 
 PR2 fixes the service-shell limits below. The process fails closed unless systemd passes exactly one descriptor named `brain-mail` as file descriptor 3. It never binds a path, listens on TCP, or unlinks the socket.
 
-The immutable Brain release remains `root:brain` and is never made readable by the `brain-mail` identity. Immediately before service start, a root-owned helper resolves one immutable release and projects exactly 65 allowlisted compiled Mail files across four allowlisted directories into `/run/brain-mail-runtime/current`. The frozen release also carries generated third-party notices. The set includes twelve Gmail OAuth, API, sync, send, and content modules under `providers/gmail`, the custom-domain Inbox sync, thread-mutation, and raw-message content adapter under `providers/imap`, plus the provider-neutral message cache, background sync, the IMAP IDLE supervisor, durable outbox, dormant draft contracts, local search, content cache, bounded raster inspector, MIME client modules, the owner's sync pause, and the optional SMTP runtime bundle. ImapFlow, `ws`, and the SMTP transport are bundled into audited runtime artifacts, and `jose` is bundled into the Gmail OAuth module, so the isolated runtime does not read the application `node_modules` tree. That projection is `root:brain-mail-runtime`, directories are `0550`, files are `0440`, and the service has read-only membership in that dedicated group. The same group receives execute-only traversal on `/opt/brain` so the process can reach the separately root-owned Node runtime, but it cannot list the directory or traverse the `root:brain` release and notes directories. `/etc/brain` and `/opt/brain/notes` are also hidden from the Mail namespace. The main Brain unit remains unchanged until the staged `brain-mail-client` drop-in is deliberately installed through the operations gate.
+The immutable Brain release remains `root:brain` and is never made readable by the `brain-mail` identity. Immediately before service start, a root-owned helper resolves one immutable release and projects exactly 66 allowlisted compiled Mail files across four allowlisted directories into `/run/brain-mail-runtime/current`. The frozen release also carries generated third-party notices. The set includes twelve Gmail OAuth, API, sync, send, and content modules under `providers/gmail`, the custom-domain Inbox sync, thread-mutation, and raw-message content adapter under `providers/imap`, plus the provider-neutral message cache, background sync, the IMAP IDLE supervisor, the change feed Brain long-polls, durable outbox, dormant draft contracts, local search, content cache, bounded raster inspector, MIME client modules, the owner's sync pause, and the optional SMTP runtime bundle. ImapFlow, `ws`, and the SMTP transport are bundled into audited runtime artifacts, and `jose` is bundled into the Gmail OAuth module, so the isolated runtime does not read the application `node_modules` tree. That projection is `root:brain-mail-runtime`, directories are `0550`, files are `0440`, and the service has read-only membership in that dedicated group. The same group receives execute-only traversal on `/opt/brain` so the process can reach the separately root-owned Node runtime, but it cannot list the directory or traverse the `root:brain` release and notes directories. `/etc/brain` and `/opt/brain/notes` are also hidden from the Mail namespace. The main Brain unit remains unchanged until the staged `brain-mail-client` drop-in is deliberately installed through the operations gate.
 
 | Boundary | Limit |
 | --- | ---: |
@@ -366,6 +366,47 @@ answers the pair plus `mailService: "unreachable"`, and the Modules row says so
 in a sentence instead of reverting. Separately, every `/api/mail/*` route in
 Brain answers `409 { "error": "module_off", "module": "mail" }` while the switch
 is off, refused in `proxy.ts` before any handler builds a client.
+
+`GET /v1/changes?cursor=<n>&wait=<ms>` is how Brain hears that mail changed
+while the service still never dials out. The service keeps the last 256 change
+records in memory under a monotonic cursor
+([`change-feed-ring.ts`](../lib/mail/service/change-feed-ring.ts)), each
+`{ accountId, mailboxIds, kind }`: `sync` when a pass commits a new generation
+or changes threads, `mutation` when a thread action lands (the owner's, an
+agent's, or the new-senders screen's archive and restore) or a new-senders
+decision or switch changes what the lists show, and `content_ready`, with the
+`messageId`, when a body becomes ready. The answer is `{ apiVersion: 1, cursor,
+changes }`. A read without a cursor answers at once with the cursor to wait
+from. A caught-up read is held for `wait`, at most 25 seconds, and answers on
+the next record or empty with its own cursor. A cursor that has left the ring,
+or that this process never issued, answers `reset: true` rather than the part
+that is left; the cursor starts at a random point of a 2^48 range, so a cursor
+Brain kept across a service restart resets instead of matching a stranger's
+number. One read may be held at a time and a second is refused
+`409 mail_changes_busy`. While Mail is paused the route answers nothing: a held
+read waits out its time and gets its own cursor back, and the records gathered
+meanwhile are still there after the resume. A record names an account, its
+mailboxes and at most a message id, never a subject, an address or a body.
+Stopping closes the feed before anything else: the held read is an active
+keep-alive request that `server.close()` would wait on until the 12-second
+shutdown deadline ended the process with exit 1, so it is answered empty with
+its own cursor on a connection the service then closes, and any read after it
+is refused `503 mail_sync_unavailable` the same way. The artifact smoke holds a
+long poll and expects SIGTERM to exit 0 within eight seconds.
+
+Brain reads the feed from one loop per process,
+[`lib/mail/change-feed.ts`](../lib/mail/change-feed.ts), started beside the
+reminder scan in `instrumentation.ts` and stopped with the SSE streams on
+shutdown. It re-arms the moment an answer lands, backs off from one second to a
+minute after a failed read or a quiet answer the service did not hold, and
+sleeps while the Mail switch is off, waking on the switch's own event. Each
+answer leaves as one `mail` event per account and kind on `brainEvents`, which
+`/api/events` streams to open tabs as `event: mail` with no `id:` line. Mail
+events stay out of the 256-entry replay journal, so a burst of ready bodies
+cannot push out the note events a reconnecting tab needs; a tab that
+reconnects reads its mail again instead of being replayed. A `reset` from the
+service, or a first answer after reads that failed, is one `reset` event, and
+every tab reads what it shows again once.
 
 An edit may omit the password to keep the saved secret; first setup may not.
 `DELETE` is local-only, removes only the selected account and its cache, and
@@ -1091,6 +1132,8 @@ Remote images are served to the reader only from the server-side privacy cache; 
 
 The on-open fetch starts the moment it is approved, not when the scheduler gets round to it. A demand on a message whose body is already cached, and a ready commit of a body that references images, each start a drain of that message's pending images — detached from the response, serialised per message, deduplicated per image, bound to the account's lifecycle. The scheduler's own pass stays as the backstop: cohort messages the drain never saw, transient failures whose retry window has passed, rows left over from a restart. For a while the drain did not exist and the demand only marked the message eligible; the images waited for a scheduler pass that ran only after the provider sync step reported no more pages, and a provider mid-history-walk or failing outright held them back for tens of seconds while the reader, polling a cache-only endpoint, gave up. The prefetch step now runs on every scheduler page, whatever the provider said. At most two drains run at once across the process: the reader opens a thread's messages together, and without a ceiling a long thread would dial that many origins at the same time, each able to buffer a message's whole image budget. The reader also asks again: after a run of cache misses it re-POSTs the message-content request, which re-records the demand and starts the drain over. Body and images draw on one counter — three message-content POSTs per open, however they are split — and the image load deadline runs from the last answer rather than from the open. The reader endpoint answers 503 for an image the cache does not hold yet, 404 for one it has no live row for, and 410 for one it has refused for good (a blocked tracker, a spent raster budget), so the reader re-asks once for a missing row and never for a refusal.
 
+A body that is not cached when the reader opens it is announced when it is. Each ready commit puts a `content_ready` record with the message id into the change feed (section 4), and the tab holding that message open fetches it once, the moment the event arrives, instead of at its next poll. The polls, their backoff and the 30-second deadline stay underneath as the fallback for a feed that is down or an event that was lost; a failure is still only learned by polling, because the feed announces ready bodies and nothing else.
+
 The worker process, patched streaming MailParser/MailSplit limits, sanitizer,
 disk-backed cache, attachment streamer, and malicious corpus are implemented in
 the MIME content slice. The worker cannot share an OS identity, credential
@@ -1182,7 +1225,7 @@ That ceiling is also where a lowered cap now bites. A queued message above it is
 
 The queue listing carries identities, never messages. `listRunnable` returns the account and the operation for each runnable row and the worker reads each message at the moment it delivers it, because the worker takes twenty rows by default and delivers them one at a time — twenty messages at the cap is 274 MiB of message, which leaves the process less of `MemoryMax=296M` than a bare node takes. It was measured at the 8 MiB cap of the day: 219 MiB of message, 274 MiB resident, past the `MemoryMax` of 256M. One message is resident whatever the backlog, which the drain rows below measure. A compare-and-swap reads the JSON alone for the same reason: the message's identity is its two digests and both are in the JSON, so a transition never allocates the message to compare it.
 
-One bound sits outside that file because it belongs to the browser rather than the service. `UNIFIED_FANOUT_LIMIT` in [`components/mail-surface.tsx`](../components/mail-surface.tsx) caps how many per-account requests the merged inbox has in flight at once, across its first load, its load-more, and its 60-second refresh. The merge itself is generic in the number of accounts, so the account cap can rise without it noticing, and the merged inbox is the one surface that asks every account at the same moment. The peak it makes stays at three however many accounts are connected, and the accounts waiting a turn read as pending rather than as empty or as failed.
+One bound sits outside that file because it belongs to the browser rather than the service. `UNIFIED_FANOUT_LIMIT` in [`components/mail-surface.tsx`](../components/mail-surface.tsx) caps how many per-account requests the merged inbox has in flight at once, across its first load, its load-more, and its silent refresh (one account's page one on a `mail` event, every account's on the five-minute safety net and on a reset). The merge itself is generic in the number of accounts, so the account cap can rise without it noticing, and the merged inbox is the one surface that asks every account at the same moment. The peak it makes stays at three however many accounts are connected, and the accounts waiting a turn read as pending rather than as empty or as failed.
 
 [`MailSystemAdmissionPort`](../lib/mail/ports.ts) atomically reserves aggregate capacity before each connection, fetch, parse, SMTP submission, queue, temp blob, or WAL-growing operation. Its exact delta validator rejects unknown, negative, fractional, non-finite, accessor-backed, or individually oversized counters before arithmetic. [`admitMailSystemUsage`](../lib/mail/security.ts) rejects a snapshot above any quota, including the explicit fetch/parser/SMTP concurrency fields. Per-account limits cannot substitute for these global limits.
 

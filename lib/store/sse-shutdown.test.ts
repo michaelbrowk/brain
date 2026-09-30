@@ -64,6 +64,38 @@ describe("SseShutdownRegistry", () => {
     expect(registry.size()).toBe(0);
   });
 
+  it("stops a background worker with the streams without counting it as one", () => {
+    const registry = new SseShutdownRegistry();
+    const stream = vi.fn();
+    const worker = vi.fn();
+    registry.register(stream);
+    registry.registerWorker(worker);
+
+    // The count is what the shutdown line prints and what the standalone
+    // smoke waits for, so it covers streams and nothing else.
+    expect(registry.size()).toBe(1);
+    expect(registry.beginShutdown()).toEqual({ started: true, closed: 1 });
+    expect(stream).toHaveBeenCalledTimes(1);
+    expect(worker).toHaveBeenCalledTimes(1);
+
+    const late = vi.fn();
+    const unregister = registry.registerWorker(late);
+    unregister();
+    expect(late).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not stop a worker that unregistered before shutdown", () => {
+    const registry = new SseShutdownRegistry();
+    const worker = vi.fn();
+    const unregister = registry.registerWorker(worker);
+
+    unregister();
+    unregister();
+    registry.beginShutdown();
+
+    expect(worker).not.toHaveBeenCalled();
+  });
+
   it("closes registrations added reentrantly during the first drain", () => {
     const registry = new SseShutdownRegistry();
     const late = vi.fn();

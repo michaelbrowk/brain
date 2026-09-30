@@ -3809,6 +3809,696 @@ describe("MailSurface", () => {
     });
   });
 
+  /* A single account's list against a cache whose cursors behave like
+     message-cache.ts: keyset by the sort key, an Inbox cursor bound to the
+     generation only, a mailbox cursor bound to generation and history, and a
+     mismatch answered 409 mail_sync_in_progress. The review's round-3 probes,
+     A to O, each a case here under its letter. */
+  describe("a single account's list folded, walked and healed", () => {
+    type FakeRow = {
+      readonly n: number;
+      readonly id: string;
+      at: number;
+      unread: boolean;
+      boxes: Set<string>;
+    };
+    const pad = (n: number) => String(n).padStart(3, "0");
+    function fakeRow(
+      n: number,
+      boxes: string[],
+      options: { at?: number; unread?: boolean } = {},
+    ): FakeRow {
+      return {
+        n,
+        id: `r-${pad(n)}`,
+        at: options.at ?? 1_700_000_000_000 - n * 1_000,
+        unread: options.unread ?? false,
+        boxes: new Set(boxes),
+      };
+    }
+    function toItem(row: FakeRow): MailThreadListItem {
+      return {
+        ...thread,
+        accountId: accountA.accountId,
+        threadId: row.id,
+        subject: `Row ${pad(row.n)}`,
+        lastMessageAt: row.at,
+        unread: row.unread,
+      } as MailThreadListItem;
+    }
+    type Key = readonly (number | string)[];
+    const keyOf = (sort: string, row: FakeRow): Key =>
+      sort === "unread" ? [row.unread ? 1 : 0, row.at, row.id] : [row.at, row.id];
+    /** All-descending lexicographic order: negative when `a` sorts first. */
+    function cmpKey(a: Key, b: Key): number {
+      for (let index = 0; index < a.length; index += 1) {
+        if (a[index]! > b[index]!) return -1;
+        if (a[index]! < b[index]!) return 1;
+      }
+      return 0;
+    }
+    function fakeCache(rows: FakeRow[], pageSize?: number) {
+      const state = { rows, generation: 1, history: 1, latency: 0, bumpAfterRead: false };
+      const reads: string[] = [];
+      const answer = (box: string, input: Record<string, unknown>) => {
+        const limit = pageSize ?? (input.limit as number);
+        const view = (input.view as string | undefined) ?? null;
+        const sort = (input.sort as string | undefined) ?? "date";
+        let key: Key | null = null;
+        if (typeof input.cursor === "string") {
+          const cursor = JSON.parse(input.cursor) as {
+            g: number;
+            h: number | null;
+            box: string;
+            view: string | null;
+            sort: string;
+            key: Key;
+          };
+          if (
+            cursor.g !== state.generation ||
+            (box !== "inbox" && cursor.h !== state.history) ||
+            cursor.box !== box ||
+            cursor.view !== view ||
+            cursor.sort !== sort
+          ) {
+            reads.push(`${box}:STALE`);
+            throw new MailApiError(409, "mail_sync_in_progress");
+          }
+          key = cursor.key;
+        }
+        reads.push(`${box}:${key === null ? "p1" : String(key.at(-1))}`);
+        let items = state.rows
+          .filter((row) => row.boxes.has(box))
+          .filter((row) => view !== "unread" || row.unread)
+          .sort((a, b) => cmpKey(keyOf(sort, a), keyOf(sort, b)));
+        if (key !== null) items = items.filter((row) => cmpKey(keyOf(sort, row), key!) > 0);
+        const slice = items.slice(0, limit);
+        const tail = slice.at(-1);
+        const nextCursor =
+          items.length > limit && tail
+            ? JSON.stringify({
+                g: state.generation,
+                h: box === "inbox" ? null : state.history,
+                box,
+                view,
+                sort,
+                key: keyOf(sort, tail),
+              })
+            : null;
+        if (state.bumpAfterRead && box !== "inbox") state.history += 1;
+        return { items: slice.map(toItem), nextCursor };
+      };
+      const later = <T,>(work: () => T): Promise<T> =>
+        new Promise<T>((resolve, reject) => {
+          const run = () => {
+            try {
+              resolve(work());
+            } catch (error) {
+              reject(error);
+            }
+          };
+          if (state.latency > 0) setTimeout(run, state.latency);
+          else run();
+        });
+      const listThreads = vi.fn().mockImplementation((input: Record<string, unknown>) =>
+        later(() => {
+          const { items, nextCursor } = answer("inbox", input);
+          return { ...threadPage, items, nextCursor } as MailThreadPage;
+        }),
+      );
+      const listMailboxThreads = vi.fn().mockImplementation((input: Record<string, unknown>) =>
+        later(() => {
+          const box = input.mailboxId as MailSystemMailbox;
+          const { items, nextCursor } = answer(box, input);
+          return { ...mailboxThreadPage(box, items), nextCursor } as MailMailboxThreadPage;
+        }),
+      );
+      const find = (id: string) => state.rows.find((row) => row.id === id)!;
+      const readAny = vi.fn().mockImplementation(({ threadId }: { threadId: string }) =>
+        Promise.resolve({ ...detail, thread: toItem(find(threadId)), messages: [] }),
+      );
+      const updateThread = vi.fn().mockImplementation(async (input: Record<string, unknown>) => {
+        const row = find(input.threadId as string);
+        if ("read" in input) row.unread = input.read !== true;
+      });
+      return { state, reads, listThreads, listMailboxThreads, readAny, updateThread, find };
+    }
+    function listed(): number[] {
+      const list = document.body.querySelector('section[aria-label="Mailbox"]');
+      return (list?.textContent?.match(/Row \d{3}/g) ?? []).map((text) =>
+        Number(text.slice(-3)),
+      );
+    }
+    function loadMoreShown(): boolean {
+      try {
+        findButton("Load more");
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    async function eventFor(mailboxIds: MailSystemMailbox[]) {
+      await mailEvent({
+        kind: "mail",
+        changeKind: "sync",
+        accountId: accountA.accountId,
+        mailboxIds,
+      });
+      await act(async () => vi.advanceTimersByTimeAsync(MAIL_EVENT_DEBOUNCE_MS));
+      await settle();
+    }
+    async function mountWith(
+      cache: ReturnType<typeof fakeCache>,
+      onToast?: (title: string, options?: ToastOptions) => void,
+    ) {
+      const client = makeClient({
+        listThreads: cache.listThreads,
+        listMailboxThreads: cache.listMailboxThreads,
+        readThread: cache.readAny,
+        readMailboxThread: cache.readAny,
+        updateThread: cache.updateThread,
+      });
+      await act(async () =>
+        root.render(
+          <MailSurface client={client} onOpenSettings={() => {}} onToast={onToast} />,
+        ),
+      );
+      await settle();
+      await enterSingleAccount();
+      return client;
+    }
+    async function press() {
+      await click(findButton("Load more"));
+      await settle();
+      await act(async () => vi.advanceTimersByTimeAsync(0));
+      await settle();
+    }
+    async function sortUnreadFirst() {
+      await act(async () => {
+        findButton("Sort: Date").dispatchEvent(
+          new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }),
+        );
+      });
+      await settle();
+      await click(findMenuItem("Unread first"));
+      await settle();
+    }
+    const range = (a: number, b: number) =>
+      Array.from({ length: b - a + 1 }, (_value, index) => a + index);
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    });
+
+    it("A: a row archived elsewhere off page one does not come back below the fresh window (Inbox)", async () => {
+      const cache = fakeCache(range(1, 6).map((n) => fakeRow(n, ["inbox", "all"])), 3);
+      await mountWith(cache);
+      expect(listed()).toEqual([1, 2, 3]);
+      // Row 1 archived on the phone: the server's Inbox is 2 3 4 | 5 6.
+      cache.find("r-001").boxes.delete("inbox");
+      await eventFor(["inbox", "all"]);
+      expect(listed()).toEqual([2, 3, 4]);
+      await press();
+      expect(listed()).toEqual([2, 3, 4, 5, 6]);
+    });
+
+    it("A2: no ghost survives later refreshes (Inbox)", async () => {
+      const cache = fakeCache(range(1, 8).map((n) => fakeRow(n, ["inbox", "all"])), 3);
+      await mountWith(cache);
+      cache.find("r-001").boxes.delete("inbox");
+      for (let index = 0; index < 4; index += 1) await eventFor(["inbox", "all"]);
+      expect(listed()).not.toContain(1);
+    });
+
+    it("A3: a letter read on the phone leaves the Unread view", async () => {
+      const cache = fakeCache(
+        range(1, 6).map((n) => fakeRow(n, ["inbox", "all"], { unread: true })),
+        3,
+      );
+      await mountWith(cache);
+      await goTo("Unread");
+      await settle();
+      expect(listed()).toEqual([1, 2, 3]);
+      cache.find("r-002").unread = false;
+      await eventFor(["inbox", "all"]);
+      expect(listed()).toEqual([1, 3, 4]);
+    });
+
+    it("A (none held): a fresh window with no row the list holds stands alone", async () => {
+      const cache = fakeCache(range(1, 9).map((n) => fakeRow(n, ["inbox", "all"])), 3);
+      await mountWith(cache);
+      expect(listed()).toEqual([1, 2, 3]);
+      for (const n of [1, 2, 3]) cache.find(`r-${pad(n)}`).boxes.delete("inbox");
+      await eventFor(["inbox", "all"]);
+      expect(listed()).toEqual([4, 5, 6]);
+    });
+
+    it("B: the heal of a stale Sent cursor does not bring a deleted row back", async () => {
+      const onToast = vi.fn();
+      const cache = fakeCache(range(1, 6).map((n) => fakeRow(n, ["sent", "all"])), 3);
+      await mountWith(cache, onToast);
+      await goTo("Sent");
+      await settle();
+      expect(listed()).toEqual([1, 2, 3]);
+      // Row 1 deleted elsewhere; history moves; no event reaches this tab.
+      cache.find("r-001").boxes.delete("sent");
+      cache.state.history += 1;
+      await press();
+      expect(listed()).toEqual([2, 3, 4, 5, 6]);
+      expect(onToast).not.toHaveBeenCalled();
+    });
+
+    it("C: every press after a refresh adds rows (Starred, 50-row pages)", async () => {
+      const cache = fakeCache(range(1, 250).map((n) => fakeRow(n, ["starred", "all"])));
+      await mountWith(cache);
+      await goTo("Starred");
+      await settle();
+      await press();
+      await press();
+      await press();
+      expect(listed().length).toBe(200);
+      // An old letter starred on the phone joins Starred at its date, between
+      // rows 60 and 61. History moves and Starred is named.
+      cache.state.rows.push(
+        fakeRow(999, ["starred", "all"], { at: 1_700_000_000_000 - 60_500 }),
+      );
+      cache.state.history += 1;
+      await eventFor(["starred"]);
+      const added: number[] = [];
+      while (loadMoreShown()) {
+        const before = listed().length;
+        await press();
+        added.push(listed().length - before);
+      }
+      expect(added.length).toBeGreaterThan(0);
+      expect(added.every((count) => count > 0)).toBe(true);
+      expect(new Set(listed()).size).toBe(listed().length);
+    });
+
+    it("D: a press after a held letter's patch adds rows (Sent, unread-first)", async () => {
+      const cache = fakeCache(
+        range(1, 200).map((n) => fakeRow(n, ["sent", "all"], { unread: n === 1 })),
+      );
+      await mountWith(cache);
+      await goTo("Sent");
+      await settle();
+      await sortUnreadFirst();
+      await press();
+      await press();
+      expect(listed().length).toBe(150);
+      cache.state.history += 1;
+      await eventFor(["sent"]);
+      // Row 1 is unread: opening it reads it, holds it and patches its row.
+      await click(findButton("Row 001"));
+      await settle();
+      await act(async () => vi.advanceTimersByTimeAsync(0));
+      await settle();
+      expect(cache.updateThread).toHaveBeenCalled();
+      const before = listed().length;
+      await press();
+      expect(listed().length).toBeGreaterThan(before);
+    });
+
+    it("E: a deep letter marked unread again stays in the Unread view when the hold releases", async () => {
+      const cache = fakeCache(
+        range(1, 6).map((n) => fakeRow(n, ["inbox", "all"], { unread: true })),
+        3,
+      );
+      await mountWith(cache);
+      await goTo("Unread");
+      await settle();
+      await press();
+      expect(listed()).toEqual([1, 2, 3, 4, 5, 6]);
+      await click(findButton("Row 005"));
+      await settle();
+      await act(async () => vi.advanceTimersByTimeAsync(0));
+      await settle();
+      expect(cache.find("r-005").unread).toBe(false);
+      // The owner marks it unread again, then closes the letter.
+      const reader = document.body.querySelector('section[aria-label="Message reader"]');
+      const markUnread = [...(reader?.querySelectorAll("button") ?? [])].find(
+        (button) => button.textContent?.trim() === "Mark unread",
+      ) as HTMLButtonElement;
+      await click(markUnread);
+      await settle();
+      expect(cache.find("r-005").unread).toBe(true);
+      await click(findButton("Back to Inbox"));
+      await settle();
+      await act(async () => vi.advanceTimersByTimeAsync(0));
+      await settle();
+      expect(listed()).toContain(5);
+    });
+
+    it("F: under unread-first a deep letter read and released stays in the list (Inbox)", async () => {
+      const T = 1_700_000_000_000;
+      // Unread 1..4 at 100 90 80 70, read 5..8 at 95 60 40 30.
+      const spec: [number, number, boolean][] = [
+        [1, 100, true],
+        [2, 90, true],
+        [3, 80, true],
+        [4, 70, true],
+        [5, 95, false],
+        [6, 60, false],
+        [7, 40, false],
+        [8, 30, false],
+      ];
+      const cache = fakeCache(
+        spec.map(([n, at, unread]) =>
+          fakeRow(n, ["inbox", "all"], { at: T + at * 1_000, unread }),
+        ),
+        3,
+      );
+      await mountWith(cache);
+      await sortUnreadFirst();
+      expect(listed()).toEqual([1, 2, 3]);
+      await press();
+      expect(listed()).toEqual([1, 2, 3, 4, 5, 6]);
+      await click(findButton("Row 004"));
+      await settle();
+      await act(async () => vi.advanceTimersByTimeAsync(0));
+      await settle();
+      expect(cache.find("r-004").unread).toBe(false);
+      await click(findButton("Back to Inbox"));
+      await settle();
+      await act(async () => vi.advanceTimersByTimeAsync(0));
+      await settle();
+      if (loadMoreShown()) await press();
+      expect(listed()).toContain(4);
+    });
+
+    it("G: an Inbox Load more after a full resync heals (new generation)", async () => {
+      const onToast = vi.fn();
+      const cache = fakeCache(range(1, 12).map((n) => fakeRow(n, ["inbox", "all"])), 3);
+      await mountWith(cache, onToast);
+      await press();
+      // A letter arrives: the refresh keeps the old Inbox cursor.
+      cache.state.rows.push(fakeRow(0, ["inbox", "all"], { at: 1_800_000_000_000 }));
+      await eventFor(["inbox", "all"]);
+      expect(listed()).toEqual([0, 1, 2, 3, 4, 5, 6]);
+      cache.state.generation += 1;
+      await press();
+      expect(onToast).not.toHaveBeenCalled();
+      expect(listed()).toEqual(range(0, 8));
+      await press();
+      expect(listed()).toEqual(range(0, 11));
+    });
+
+    it("H: a sync that keeps moving costs each press at most three reads", async () => {
+      const onToast = vi.fn();
+      const cache = fakeCache(range(1, 9).map((n) => fakeRow(n, ["sent", "all"])), 3);
+      await mountWith(cache, onToast);
+      await goTo("Sent");
+      await settle();
+      cache.state.bumpAfterRead = true;
+      const perPress: number[] = [];
+      for (let index = 0; index < 3; index += 1) {
+        const before = cache.reads.length;
+        await press();
+        perPress.push(cache.reads.length - before);
+      }
+      const settled = cache.reads.length;
+      await act(async () => vi.advanceTimersByTimeAsync(60_000));
+      expect(Math.max(...perPress)).toBeLessThanOrEqual(3);
+      expect(cache.reads.length).toBe(settled);
+    });
+
+    it("I: a sync inside the walk says so once, keeps nothing twice, and the next press heals", async () => {
+      const onToast = vi.fn();
+      const cache = fakeCache(range(1, 250).map((n) => fakeRow(n, ["sent", "all"])));
+      await mountWith(cache, onToast);
+      await goTo("Sent");
+      await settle();
+      await press();
+      await press();
+      await press();
+      expect(listed().length).toBe(200);
+      cache.state.history += 1;
+      await eventFor(["sent"]);
+      const answer = cache.listMailboxThreads.getMockImplementation()!;
+      let reads = 0;
+      cache.listMailboxThreads.mockImplementation((input: Record<string, unknown>) => {
+        reads += 1;
+        const out = answer(input);
+        if (reads === 1) cache.state.history += 1;
+        return out;
+      });
+      await press();
+      // The walk's own cursor went stale under it: one toast (accepted), and
+      // nothing on screen twice.
+      expect(onToast).toHaveBeenCalledTimes(1);
+      expect(new Set(listed()).size).toBe(listed().length);
+      cache.listMailboxThreads.mockImplementation(answer);
+      await press();
+      expect(onToast).toHaveBeenCalledTimes(1);
+      expect(listed()).toEqual(range(1, 250));
+    });
+
+    for (const [latency, period] of [
+      [150, 1_000],
+      [60, 1_000],
+      [60, 3_000],
+    ] as const) {
+      it(`J: every press is served with events every ${period} ms and ${latency} ms reads (50-row pages)`, async () => {
+        const cache = fakeCache(range(1, 400).map((n) => fakeRow(n, ["sent", "all"])));
+        await mountWith(cache);
+        await goTo("Sent");
+        await settle();
+        for (let index = 0; index < 3; index += 1) await press();
+        expect(listed().length).toBe(200);
+        cache.state.history += 1;
+        await eventFor(["sent"]);
+        cache.state.latency = latency;
+        let presses = 0;
+        let served = 0;
+        let waiting: number | null = null;
+        for (let t = 0; t < 20_000; t += 50) {
+          if (t % period === 0) {
+            await mailEvent({
+              kind: "mail",
+              changeKind: "sync",
+              accountId: accountA.accountId,
+              mailboxIds: ["sent"],
+            });
+          }
+          if (t % 2_000 === 100) {
+            if (waiting !== null && listed().length > waiting) served += 1;
+            waiting = null;
+            let button: HTMLButtonElement | null = null;
+            try {
+              button = findButton("Load more");
+            } catch {
+              // at the end
+            }
+            if (button && listed().length < 400) {
+              presses += 1;
+              waiting = listed().length;
+              await act(async () => button!.click());
+            }
+          }
+          await act(async () => vi.advanceTimersByTimeAsync(50));
+        }
+        if (waiting !== null && listed().length > waiting) served += 1;
+        expect(presses).toBeGreaterThan(0);
+        expect(served).toBe(presses);
+        expect(new Set(listed()).size).toBe(listed().length);
+      });
+    }
+
+    it("K: a walk over repeated cursors ends and stays bounded", async () => {
+      // Twelve rows, so the list is not loaded to the end after two presses
+      // and the refresh leaves it a cursor to walk from.
+      const cache = fakeCache(range(1, 12).map((n) => fakeRow(n, ["sent", "all"])), 3);
+      await mountWith(cache);
+      await goTo("Sent");
+      await settle();
+      await press();
+      await press();
+      cache.state.history += 1;
+      await eventFor(["sent"]);
+      const answer = cache.listMailboxThreads.getMockImplementation()!;
+      let loops = 0;
+      cache.listMailboxThreads.mockImplementation(async (input: Record<string, unknown>) => {
+        if (typeof input.cursor !== "string") return answer(input);
+        loops += 1;
+        return {
+          ...mailboxThreadPage("sent", [toItem(cache.find("r-004"))]),
+          nextCursor: loops % 2 === 0 ? "loop-a" : "loop-b",
+        };
+      });
+      await press();
+      expect(loops).toBeLessThanOrEqual(3);
+    });
+
+    it("K (cap): a walk over pages of known rows stops at the list's depth plus one", async () => {
+      const cache = fakeCache(range(1, 12).map((n) => fakeRow(n, ["sent", "all"])), 3);
+      await mountWith(cache);
+      await goTo("Sent");
+      await settle();
+      await press();
+      await press();
+      expect(listed()).toEqual(range(1, 9));
+      cache.state.history += 1;
+      await eventFor(["sent"]);
+      const answer = cache.listMailboxThreads.getMockImplementation()!;
+      let walked = 0;
+      cache.listMailboxThreads.mockImplementation(async (input: Record<string, unknown>) => {
+        if (typeof input.cursor !== "string") return answer(input);
+        walked += 1;
+        // Every page brings a row the list holds, under a cursor never seen.
+        return {
+          ...mailboxThreadPage("sent", [toItem(cache.find("r-004"))]),
+          nextCursor: walked < 40 ? `walk-${walked}` : null,
+        };
+      });
+      await press();
+      // Nine rows are one 50-row page deep: two reads, not forty.
+      expect(walked).toBe(2);
+    });
+
+    it("L: when fewer pages remain than the list is deep, the walk ends at the end", async () => {
+      const cache = fakeCache(range(1, 9).map((n) => fakeRow(n, ["sent", "all"])), 3);
+      await mountWith(cache);
+      await goTo("Sent");
+      await settle();
+      await press();
+      await press();
+      for (const n of [6, 7, 8, 9]) cache.find(`r-${pad(n)}`).boxes.delete("sent");
+      cache.state.history += 1;
+      await eventFor(["sent"]);
+      if (loadMoreShown()) await press();
+      expect(loadMoreShown()).toBe(false);
+      expect(new Set(listed()).size).toBe(listed().length);
+    });
+
+    it("M: a heal while an event refresh is out lands both, each row once", async () => {
+      const onToast = vi.fn();
+      const cache = fakeCache(range(1, 250).map((n) => fakeRow(n, ["sent", "all"])));
+      await mountWith(cache, onToast);
+      await goTo("Sent");
+      await settle();
+      await press();
+      await press();
+      expect(listed().length).toBe(150);
+      cache.state.latency = 100;
+      // A new letter sent; history moves; the event's refresh goes out ...
+      cache.state.rows.push(fakeRow(0, ["sent", "all"], { at: 1_800_000_000_000 }));
+      cache.state.history += 1;
+      await mailEvent({
+        kind: "mail",
+        changeKind: "sync",
+        accountId: accountA.accountId,
+        mailboxIds: ["sent"],
+      });
+      await act(async () => vi.advanceTimersByTimeAsync(MAIL_EVENT_DEBOUNCE_MS + 10));
+      // ... and the owner presses Load more on the stale cursor while it is out.
+      await act(async () => findButton("Load more").click());
+      await act(async () => vi.advanceTimersByTimeAsync(3_000));
+      await settle();
+      await act(async () => vi.advanceTimersByTimeAsync(3_000));
+      await settle();
+      const shown = listed();
+      expect(new Set(shown).size).toBe(shown.length);
+      expect(shown[0]).toBe(0);
+      expect(shown.length).toBe(200);
+    });
+
+    it("M (seen): a row that moved between the heal's reads is on screen once", async () => {
+      const cache = fakeCache(range(1, 12).map((n) => fakeRow(n, ["sent", "all"])), 3);
+      await mountWith(cache);
+      await goTo("Sent");
+      await settle();
+      await press();
+      expect(listed()).toEqual(range(1, 6));
+      // A letter lands at the head, history moves, and no event arrives.
+      const moved = fakeRow(0, ["sent", "all"], { at: 1_800_000_000_000 });
+      cache.state.rows.push(moved);
+      cache.state.history += 1;
+      const answer = cache.listMailboxThreads.getMockImplementation()!;
+      cache.listMailboxThreads.mockImplementation(async (input: Record<string, unknown>) => {
+        const out = await answer(input);
+        // After the heal's page one, the new letter's date moves down among
+        // rows the walk is about to read.
+        if (typeof input.cursor !== "string") moved.at = 1_700_000_000_000 - 4_500;
+        return out;
+      });
+      await press();
+      expect(listed().filter((n) => n === 0)).toHaveLength(1);
+      expect(new Set(listed()).size).toBe(listed().length);
+    });
+
+    it("N: a Sent list loaded to the end keeps no Load more after a refresh", async () => {
+      const cache = fakeCache(range(1, 200).map((n) => fakeRow(n, ["sent", "all"])));
+      await mountWith(cache);
+      await goTo("Sent");
+      await settle();
+      for (let index = 0; index < 3; index += 1) await press();
+      expect(listed().length).toBe(200);
+      expect(loadMoreShown()).toBe(false);
+      cache.state.history += 1;
+      await eventFor(["sent"]);
+      expect(loadMoreShown()).toBe(false);
+    });
+
+    it("O: a Load more heal keeps the held open letter where it stood (Sent, unread-first)", async () => {
+      const cache = fakeCache(
+        range(1, 9).map((n) => fakeRow(n, ["sent", "all"], { unread: n === 2 })),
+        3,
+      );
+      await mountWith(cache);
+      await goTo("Sent");
+      await settle();
+      await sortUnreadFirst();
+      expect(listed()).toEqual([2, 1, 3]);
+      await click(findButton("Row 002"));
+      await settle();
+      await act(async () => vi.advanceTimersByTimeAsync(0));
+      await settle();
+      expect(cache.find("r-002").unread).toBe(false);
+      // The read's own sync moves history; no event reaches this tab yet.
+      cache.state.history += 1;
+      await press();
+      expect(listed().indexOf(2)).toBe(0);
+    });
+
+    it("E (owed): a release that had to wait still lets the read letter go when it runs", async () => {
+      const cache = fakeCache(
+        range(1, 9).map((n) => fakeRow(n, ["inbox", "all"], { unread: true })),
+        3,
+      );
+      await mountWith(cache);
+      await goTo("Unread");
+      await settle();
+      await press();
+      expect(listed()).toEqual(range(1, 6));
+      await click(findButton("Row 005"));
+      await settle();
+      await act(async () => vi.advanceTimersByTimeAsync(0));
+      await settle();
+      expect(cache.find("r-005").unread).toBe(false);
+
+      // A slow Load more is out when the letter is closed, so the release's
+      // read waits; an event's read waits behind it too, owing no release of
+      // its own.
+      cache.state.latency = 1_000;
+      await act(async () => findButton("Load more").click());
+      await click(findButton("Back to Inbox"));
+      await mailEvent({
+        kind: "mail",
+        changeKind: "sync",
+        accountId: accountA.accountId,
+        mailboxIds: ["inbox"],
+      });
+      await act(async () => vi.advanceTimersByTimeAsync(MAIL_EVENT_DEBOUNCE_MS));
+      for (let step = 0; step < 4; step += 1) {
+        await act(async () => vi.advanceTimersByTimeAsync(1_000));
+        await settle();
+      }
+      expect(listed()).not.toContain(5);
+      expect(listed()).toContain(9);
+    });
+  });
+
   it("refreshes page one once a burst of mail events for the list on screen settles", async () => {
     vi.useFakeTimers();
     vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");

@@ -1936,11 +1936,6 @@ export function MailSurface({
     readonly released: string | null;
   } | null>(null);
   const unifiedRefreshPendingRef = useRef<ReadonlySet<string> | null | undefined>(undefined);
-  /** Pages whose cursor starts inside rows they already hold (a mailbox
-   *  cursor re-taken from a fresh page one): the next Load more walks past
-   *  them. Keyed by the committed page, so any other commit (a fresh load, a
-   *  Load more that reached new rows) is not one. */
-  const repagedPagesRef = useRef(new WeakSet<MailThreadListPage>());
   const [refreshPendingTick, setRefreshPendingTick] = useState(0);
   const noteRefreshPending = useCallback(() => {
     setRefreshPendingTick((tick) => tick + 1);
@@ -1986,7 +1981,13 @@ export function MailSurface({
       ) {
         return;
       }
-      if (mutationLockRef.current || threadStateRef.current.kind !== "ready") {
+      // A list read already out (a Load more, its walk, another refresh) would
+      // lose its answer to this read's epoch, so this one waits for it.
+      if (
+        mutationLockRef.current ||
+        threadStateRef.current.kind !== "ready" ||
+        listReadsOutRef.current > 0
+      ) {
         markPending();
         return;
       }
@@ -2030,18 +2031,26 @@ export function MailSurface({
         // fresh page wins everywhere except that row: it keeps its local item
         // and position until the hold releases on selection change or reader
         // close.
+        // A released letter leaves the kept rows only under the Unread view,
+        // and only when the list's own row says it is read: one marked
+        // unread again belongs there. Under unread-first it moves rather
+        // than leaves, so it stays where it was loaded.
         const folded = pageWithLoadedDepth(page, current.page, {
           keepCursor: mailboxId === "inbox",
           drop:
-            released !== null && (view === "unread" || sort === "unread")
+            released !== null &&
+            view === "unread" &&
+            current.page.items.some(
+              (item) =>
+                item.threadId === released && item.accountId === accountId && !item.unread,
+            )
               ? unifiedThreadKey({ accountId, threadId: released })
               : null,
         });
-        const next = pageWithHeldThread(folded.page, current.page, {
+        const next = pageWithHeldThread(folded, current.page, {
           accountId: selectedThreadAccountIdRef.current,
           threadId: singleHoldRef.current ? selectedThreadIdRef.current : null,
         });
-        if (folded.repage) repagedPagesRef.current.add(next);
         commitThreadState({ kind: "ready", page: next });
       } catch {
         // The visible list stays usable. Explicit Sync and Try again own errors.
@@ -5628,7 +5637,6 @@ export function MailSurface({
       try {
         // The rows the new ones go below, and the page they come from.
         let rows = basePage;
-        let walking = repagedPagesRef.current.has(basePage);
         let from = cursor;
         let next: MailThreadListPage;
         try {
@@ -5638,45 +5646,51 @@ export function MailSurface({
           // advance does it, and a new generation does it everywhere) heals
           // the way a merged stream does: page one is read again, the rows
           // below it stay, and the walk goes on from its cursor past them.
+          // An open letter a hold keeps in place stays where it stood.
           if ("scope" in basePage || !isSyncHold(error) || !stillHere()) throw error;
           const pageOne = await read(null);
           if (!stillHere()) return;
-          const folded = pageWithLoadedDepth(pageOne, basePage, { keepCursor: false, drop: null });
-          rows = folded.page;
+          rows = pageWithHeldThread(
+            pageWithLoadedDepth(pageOne, basePage, { keepCursor: false, drop: null }),
+            basePage,
+            {
+              accountId: selectedThreadAccountIdRef.current,
+              threadId: singleHoldRef.current ? selectedThreadIdRef.current : null,
+            },
+          );
           if (pageOne.nextCursor === null) {
             next = { ...pageOne, items: [] };
-            walking = false;
           } else {
             from = pageOne.nextCursor;
             next = await read(from);
-            walking = folded.repage;
           }
         }
-        if (walking) {
-          // The cursor starts inside rows this list already holds. A page
-          // that brings nothing new is walked past, no more of them than the
-          // list is deep plus one, and a cursor already read ends the walk
-          // rather than leading back over the same pages.
-          const held = new Set(rows.items.map((item) => item.threadId));
-          const cap = Math.ceil(rows.items.length / 50) + 1;
-          const asked = new Set([from]);
-          const gathered = [...next.items];
-          while (
-            asked.size < cap &&
-            next.nextCursor !== null &&
-            gathered.every((item) => held.has(item.threadId)) &&
-            stillHere()
-          ) {
-            if (asked.has(next.nextCursor)) {
-              next = { ...next, nextCursor: null };
-              break;
-            }
-            asked.add(next.nextCursor);
-            next = await read(next.nextCursor);
-            gathered.push(...next.items);
+        // Every press walks: after a refresh or a heal the cursor can start
+        // inside rows this list already holds, and a mark saying so did not
+        // survive every commit that replaced the page. A page that brings
+        // nothing new is walked past, no more of them than the list is deep
+        // plus one, and a cursor already read ends the walk rather than
+        // leading back over the same pages. An ordinary page ends it at once
+        // with its first new row.
+        const held = new Set(rows.items.map((item) => item.threadId));
+        const cap = Math.ceil(rows.items.length / 50) + 1;
+        const asked = new Set([from]);
+        const gathered = [...next.items];
+        while (
+          asked.size < cap &&
+          next.nextCursor !== null &&
+          gathered.every((item) => held.has(item.threadId)) &&
+          stillHere()
+        ) {
+          if (asked.has(next.nextCursor)) {
+            next = { ...next, nextCursor: null };
+            break;
           }
-          next = { ...next, items: gathered };
+          asked.add(next.nextCursor);
+          next = await read(next.nextCursor);
+          gathered.push(...next.items);
         }
+        next = { ...next, items: gathered };
         if (!stillHere()) return;
         const current = threadStateRef.current;
         if (
@@ -7150,45 +7164,48 @@ function isComposerSubmission(
  * had brought in. A fresh page with no cursor is the whole list and stands
  * alone, and so does one that leaves nothing below it.
  *
- * The anchor is the window's LAST row, not the last row it lists anywhere: a
- * deep thread answered moves to the head, and anchoring on it would drop
- * every row between.
+ * The anchor is the last row of the window that the list also holds, found
+ * from the window's end, not the last row it lists anywhere: a deep thread
+ * answered moves to the head, and anchoring on it would drop every row
+ * between. A window with no row the list holds stands alone, or rows that
+ * left the list elsewhere would stay below it for good.
  *
  * The cursor: an Inbox cursor names the active generation and outlives an
  * incremental sync, so the one that loads on from the kept rows stays. A
  * cursor into any other mailbox carries the history id its snapshot was read
  * at, and the service calls it stale after the next advance, so the fresh
- * page's cursor is taken instead and `repage` says the next Load more starts
- * inside rows the list already holds and has to walk past them.
+ * page's cursor is taken instead and the next Load more walks past the rows
+ * the list already holds. A list loaded to the end keeps its missing cursor:
+ * it holds every row, and a cursor would bring back a Load more with nothing
+ * behind it.
  *
- * `drop` is a thread the list shows only because a hold kept it: released
- * under the Unread view or unread-first sort, it leaves the kept rows too.
+ * `drop` is a thread the list shows only because a hold kept it, released
+ * and read under the Unread view: it leaves the kept rows too.
  */
 function pageWithLoadedDepth(
   fresh: MailThreadListPage,
   current: MailThreadListPage,
   options: { readonly keepCursor: boolean; readonly drop: string | null },
-): { readonly page: MailThreadListPage; readonly repage: boolean } {
-  if (fresh.nextCursor === null) return { page: fresh, repage: false };
+): MailThreadListPage {
+  if (fresh.nextCursor === null) return fresh;
   const listed = new Set(fresh.items.map(unifiedThreadKey));
-  const last = fresh.items.at(-1);
-  const anchor =
-    last === undefined
-      ? -1
-      : current.items.findIndex(
-          (item) => unifiedThreadKey(item) === unifiedThreadKey(last),
-        );
+  let anchor = -1;
+  for (let at = fresh.items.length - 1; at >= 0 && anchor === -1; at -= 1) {
+    const key = unifiedThreadKey(fresh.items[at]!);
+    anchor = current.items.findIndex((item) => unifiedThreadKey(item) === key);
+  }
+  if (anchor === -1) return fresh;
   const below = current.items
     .slice(anchor + 1)
     .filter(
       (item) =>
         !listed.has(unifiedThreadKey(item)) && unifiedThreadKey(item) !== options.drop,
     );
-  if (below.length === 0) return { page: fresh, repage: false };
+  if (below.length === 0) return fresh;
   const items = [...fresh.items, ...below];
-  return options.keepCursor
-    ? { page: { ...fresh, items, nextCursor: current.nextCursor }, repage: false }
-    : { page: { ...fresh, items }, repage: true };
+  return options.keepCursor || current.nextCursor === null
+    ? { ...fresh, items, nextCursor: current.nextCursor }
+    : { ...fresh, items };
 }
 
 /**

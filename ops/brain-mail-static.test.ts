@@ -237,6 +237,7 @@ describe("brain-mail systemd contracts", () => {
       "service/accounts.js",
       "service/admission.js",
       "service/background-sync.js",
+      "service/change-feed-ring.js",
       "service/content-blob-store.js",
       "service/content-cache.js",
       "service/content-coordinator.js",

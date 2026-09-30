@@ -232,9 +232,35 @@ try {
   assert.equal(afterRequests.ino, before.ino, "service replaced the inherited socket");
   assert.equal(afterRequests.mode & 0o777, 0o660, "service changed socket mode");
 
+  /*
+    IT STOPS WHILE BRAIN IS CONNECTED. Brain's change-feed loop keeps one long
+    poll held on a keep-alive socket whenever it runs, so this stop is the one
+    every deploy makes. An active request is one `server.close()` waits on, and
+    before the feed learned to close first the process sat on it until its
+    shutdown deadline and left with exit 1. The held read is answered empty
+    with its own cursor, on a connection the service then closes.
+  */
+  const handshake = await requestJson(activeSocketPath, "GET", "/v1/changes?wait=0");
+  assert.equal(handshake.status, 200);
+  const cursor = handshake.body.cursor;
+  const held = holdLongPoll(activeSocketPath, cursor);
+  // Awaited below; a service killed on the way out must fail on the stop's
+  // own message, not on this socket's hang-up.
+  held.catch(() => undefined);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+
   service.kill("SIGTERM");
-  const result = await withTimeout(exit, 8_000, "mail service did not stop");
+  const result = await withTimeout(
+    exit,
+    8_000,
+    "mail service did not stop while a long poll was held",
+  );
   assert.deepEqual(result, { code: 0, signal: null });
+  assert.deepEqual(await held, {
+    status: 200,
+    connection: "close",
+    body: { apiVersion: 1, cursor, changes: [] },
+  });
   const logs = output();
   /*
     Not silence — one line, and the one this script asked for. The service records
@@ -481,6 +507,38 @@ async function pollJson(socketPath, method, requestPath) {
     }
   }
   throw lastError ?? new Error("mail service never became ready");
+}
+
+/** A read held the way Brain's loop holds it: the default keep-alive agent,
+ *  no `Connection: close` of its own, and no timeout short of the wait. */
+function holdLongPoll(socketPath, cursor) {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(
+      {
+        socketPath,
+        method: "GET",
+        path: `/v1/changes?cursor=${cursor}&wait=25000`,
+        headers: { Host: "brain-mail", Accept: "application/json" },
+      },
+      (response) => {
+        const chunks = [];
+        response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        response.once("end", () => {
+          try {
+            resolve({
+              status: response.statusCode ?? 0,
+              connection: response.headers.connection,
+              body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
+            });
+          } catch (error) {
+            reject(error);
+          }
+        });
+      },
+    );
+    request.once("error", reject);
+    request.end();
+  });
 }
 
 function requestJson(socketPath, method, requestPath, value) {

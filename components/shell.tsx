@@ -93,6 +93,11 @@ import {
   TASKS_CHANGED_EVENT,
 } from "@/lib/editor-events";
 import {
+  dispatchMailChange,
+  parseBrainMailEvent,
+  type BrainMailEvent,
+} from "@/lib/mail/mail-events";
+import {
   mapMarkdownOffset,
   removeStandalonePageRefOccurrenceWithRestore,
   restoreStandalonePageRefAtOffset,
@@ -1420,6 +1425,9 @@ export function Shell({
         if (hasOpened) {
           void reconcile();
           void noticeRedeploy();
+          // Mail events are not in the replay journal, so whatever the gap
+          // held is gone: Mail reads what it shows again, once.
+          dispatchMailChange({ kind: "mail", changeKind: "reset" });
         }
         hasOpened = true;
       };
@@ -1432,6 +1440,19 @@ export function Shell({
         () => void reconcile({ skipInflightLoad: true }),
       );
       source.addEventListener("reconcile", () => void reconcile());
+      // The mail service's changes, through Brain's change-feed loop. The
+      // shell only passes them on: the Mail surface and the reader decide
+      // what each one means for what they show, and nothing here touches the
+      // page tree.
+      source.addEventListener("mail", (event) => {
+        let change: BrainMailEvent | null = null;
+        try {
+          change = parseBrainMailEvent(JSON.parse((event as MessageEvent<string>).data));
+        } catch {
+          return;
+        }
+        if (change !== null) dispatchMailChange(change);
+      });
       source.onerror = () => {
         // CONNECTING means the browser is already retrying on its own.
         if (disposed || source.readyState !== EventSource.CLOSED) return;

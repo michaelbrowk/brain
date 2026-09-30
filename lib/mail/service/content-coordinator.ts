@@ -745,6 +745,7 @@ export class MailContentCoordinator
   private readonly retryPolicy: MailContentRetryPolicyPort;
   private readonly onBackgroundWorkAvailable: (() => void) | null;
   private readonly onEvent: ((event: MailContentCoordinatorEvent) => void) | null;
+  private readonly onContentReady: ((accountId: string, messageId: string) => void) | null;
   private readonly clock: () => number;
   private readonly capacityReclaimer: MailContentCapacityReclaimer;
   private readonly remoteImageFetcher: RemoteImageFetcherPort;
@@ -785,6 +786,9 @@ export class MailContentCoordinator
     readonly draftSources?: MailContentDraftSourcePort;
     readonly onBackgroundWorkAvailable?: () => void;
     readonly onEvent?: (event: MailContentCoordinatorEvent) => void;
+    /** Each ready commit, for the change feed: a reader waiting on this
+     *  message fetches once instead of polling for it. */
+    readonly onContentReady?: (accountId: string, messageId: string) => void;
     readonly clock?: () => number;
   }) {
     if (
@@ -822,6 +826,7 @@ export class MailContentCoordinator
     this.draftSources = options.draftSources ?? null;
     this.onBackgroundWorkAvailable = options.onBackgroundWorkAvailable ?? null;
     this.onEvent = options.onEvent ?? null;
+    this.onContentReady = options.onContentReady ?? null;
     this.remoteImageFetcher =
       options.remoteImageFetcher ?? new PinnedRemoteImageFetcher();
     this.capacityReclaimer = new GlobalMailContentCapacityReclaimer({
@@ -1560,10 +1565,13 @@ export class MailContentCoordinator
           // A prefetch does not wake it: two hundred bodies would be two
           // hundred passes over every account for nothing, since the
           // prefetch claims its own next body, and the scheduler's own
-          // interval already covers what a drain leaves behind.
+          // interval already covers what a drain leaves behind. The change
+          // feed hears of every ready body, the prefetch's too: a reader
+          // waiting on a letter the prefetch lands fetches it at once.
           const background = input.lane.background;
           this.startRemoteImageDrain(input.accountId, input.messageId, background);
           if (!background) this.signalBackgroundWork();
+          this.signalContentReady(input.accountId, input.messageId);
           return complete();
         } catch (error) {
           if (input.signal.aborted || this.closed) {
@@ -1898,6 +1906,16 @@ export class MailContentCoordinator
       this.onEvent(event);
     } catch {
       // A failing observer is the observer's problem.
+    }
+  }
+
+  /** Nor the commit it reports: the body is ready whatever the listener did. */
+  private signalContentReady(accountId: string, messageId: string): void {
+    if (this.onContentReady === null || this.closed) return;
+    try {
+      this.onContentReady(accountId, messageId);
+    } catch {
+      // The reader's own polling is the fallback for a lost hint.
     }
   }
 

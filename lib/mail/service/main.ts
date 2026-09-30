@@ -14,6 +14,7 @@ import {
 } from "./accounts";
 import { MailAccountError } from "./account-types";
 import { MailBackgroundSyncScheduler } from "./background-sync";
+import { MailChangeFeed } from "./change-feed-ring";
 import { MailContentCoordinator } from "./content-coordinator";
 import {
   createProductionMailContentSourceFactory,
@@ -72,6 +73,9 @@ async function main(): Promise<void> {
   });
   const store = new SqliteMailAccountStore(runtime);
   await store.initialize();
+  // What Brain long-polls to hear that mail changed. Memory only: a restart
+  // starts a new ring, and Brain's old cursor reads as a reset against it.
+  const changes = new MailChangeFeed();
   const dns = new CompleteSetMailDnsResolver();
   // One bounded read-only IMAP session factory serves metadata sync and raw
   // message fetches alike, so both paths share DNS and binding validation.
@@ -94,8 +98,9 @@ async function main(): Promise<void> {
       environment: process.env,
       imapSessions,
     }),
+    onChange: (change) => changes.append(change),
   });
-  const senderScreen = await openSenderScreen(runtime.stateDirectory, messages);
+  const senderScreen = await openSenderScreen(runtime.stateDirectory, messages, changes);
   const outbox = new SqliteMailSendStore({
     cacheRoot: path.join(runtime.stateDirectory, "cache"),
     onSent: (sent) => senderScreen?.screen.recordSentRecipients(sent),
@@ -142,6 +147,8 @@ async function main(): Promise<void> {
     },
     onBackgroundWorkAvailable: () => kickBackgroundSync(),
     onEvent: writeServiceLog,
+    onContentReady: (accountId, messageId) =>
+      changes.append({ accountId, mailboxIds: [], kind: "content_ready", messageId }),
   });
   const sendAccounts = {
     async readSendAccount(accountId: string) {
@@ -280,6 +287,7 @@ async function main(): Promise<void> {
     content,
     syncPause,
     ...(senderScreen ? { senders: senderScreen.screen } : {}),
+    changes,
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -320,6 +328,10 @@ async function main(): Promise<void> {
   const stop = () => {
     if (stopping) return;
     stopping = true;
+    // First, before anything waits on the server: Brain's held long poll is
+    // an active keep-alive request, and server.close() would sit on it until
+    // the deadline below killed the process with exit 1 on every deploy.
+    changes.close();
     writeServiceLog({ event: "mail_service_stopping" });
     const deadline = setTimeout(() => {
       writeServiceLog({
@@ -446,6 +458,7 @@ async function finishShutdown(options: {
 async function openSenderScreen(
   stateDirectory: string,
   messages: MultiAccountMailMessageService,
+  changes: MailChangeFeed,
 ): Promise<{ readonly store: SqliteMailSenderStore; readonly screen: MailSenderScreen } | null> {
   const store = new SqliteMailSenderStore({ stateDirectory });
   try {
@@ -459,7 +472,12 @@ async function openSenderScreen(
   }
   return Object.freeze({
     store,
-    screen: new MailSenderScreen({ store, mail: messages, onEvent: writeServiceLog }),
+    screen: new MailSenderScreen({
+      store,
+      mail: messages,
+      onEvent: writeServiceLog,
+      onChange: (change) => changes.append(change),
+    }),
   });
 }
 

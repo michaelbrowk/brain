@@ -21,6 +21,7 @@ import type {
   MailThreadListItem,
 } from "./mail-surface-client";
 import type { MailAddress, MailMessageDto } from "@/lib/mail/message-types";
+import { MAIL_CHANGED_EVENT, parseBrainMailEvent } from "@/lib/mail/mail-events";
 import { Segmented } from "./settings/shared";
 import {
   senderDomain,
@@ -723,6 +724,24 @@ function MailMessageContentView({
     const input = { accountId: message.accountId, messageId: message.messageId };
     let disposed = false;
     let deadline: number | null = null;
+    // The change feed says when this body is ready (`content_ready`), and the
+    // wait between polls ends there with one fetch. The polls and the deadline
+    // stay underneath for a feed that is down or an event that went missing.
+    let readyAnnounced = false;
+    let wakePoll: (() => void) | null = null;
+    const onMailChanged = (event: Event) => {
+      const change = parseBrainMailEvent((event as CustomEvent<unknown>).detail);
+      if (
+        change?.changeKind !== "content_ready" ||
+        change.accountId !== input.accountId ||
+        !change.messageIds?.includes(input.messageId)
+      ) {
+        return;
+      }
+      readyAnnounced = true;
+      wakePoll?.();
+    };
+    window.addEventListener(MAIL_CHANGED_EVENT, onMailChanged);
     const load = async () => {
       try {
         await mailContentFetchGate.run(
@@ -749,9 +768,15 @@ function MailMessageContentView({
                 }
                 const canPoll = await waitForContentPoll(
                   controller.signal,
-                  pollDelayMs(pollAttempt),
+                  readyAnnounced ? 0 : pollDelayMs(pollAttempt),
+                  (wake) => {
+                    wakePoll = wake;
+                  },
                 );
+                wakePoll = null;
                 if (!canPoll) return;
+                const announced = readyAnnounced;
+                readyAnnounced = false;
                 // "fetching" means the service still has work in hand.
                 // "not_requested" means the entry is gone — a dropped cache
                 // row never becomes ready on its own, and polling it just
@@ -760,10 +785,12 @@ function MailMessageContentView({
                 // of transient polls is the sign it has been spent. In both
                 // cases ask again, a bounded number of times: a request is
                 // what enqueues the work, and on an entry still retrying the
-                // service answers "fetching" harmlessly.
+                // service answers "fetching" harmlessly. A body the feed
+                // announced is read, never asked for again.
                 const spent =
-                  content.state === "not_requested" ||
-                  transientPolls >= CONTENT_TRANSIENT_POLLS_BEFORE_REQUEST;
+                  !announced &&
+                  (content.state === "not_requested" ||
+                    transientPolls >= CONTENT_TRANSIENT_POLLS_BEFORE_REQUEST);
                 if (spent && contentRequests.current < CONTENT_MAX_REQUESTS) {
                   contentRequests.current += 1;
                   transientPolls = 0;
@@ -791,6 +818,7 @@ function MailMessageContentView({
     void load();
     return () => {
       disposed = true;
+      window.removeEventListener(MAIL_CHANGED_EVENT, onMailChanged);
       if (deadline !== null) window.clearTimeout(deadline);
       controller.abort();
     };
@@ -1258,10 +1286,14 @@ export function remoteImagePollDelayMs(attempt: number): number {
  * Resolves true after `delayMs` of visible-tab time, false on abort. A hidden
  * tab parks the wait until the page is visible again, so a background tab
  * never polls. Also drives the send-operation watcher in mail-surface.
+ * `onWake` is handed a function that ends the wait at once, which is how an
+ * event the caller was waiting for cuts the delay short; a hidden tab still
+ * waits to be visible.
  */
 export function waitForContentPoll(
   signal: AbortSignal,
   delayMs: number,
+  onWake?: (wake: () => void) => void,
 ): Promise<boolean> {
   return new Promise((resolve) => {
     let timeout: number | null = null;
@@ -1288,6 +1320,14 @@ export function waitForContentPoll(
     signal.addEventListener("abort", onAbort, { once: true });
     document.addEventListener("visibilitychange", schedule);
     schedule();
+    onWake?.(() => {
+      if (settled) return;
+      if (document.visibilityState === "visible") {
+        finish(true);
+        return;
+      }
+      delayMs = 0;
+    });
   });
 }
 

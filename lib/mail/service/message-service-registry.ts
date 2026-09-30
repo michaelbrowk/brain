@@ -29,6 +29,7 @@ import {
   selectWorstMailSyncError,
   SqliteMailMessageCache,
 } from "./message-cache";
+import type { MailServiceChange } from "./change-feed-ring";
 import {
   AccountMailMessageService,
   type MailBackgroundSyncStep,
@@ -63,6 +64,7 @@ export class MultiAccountMailMessageService implements MailMessageService {
   private readonly stateDirectory: string;
   private readonly store: MultiMailAccountStore;
   private readonly providerFactory: MailProviderFactory;
+  private readonly onChange: ((change: MailServiceChange) => void) | undefined;
   private readonly entries = new Map<string, RegistryEntry>();
   private readonly invalidatedAccounts = new Set<string>();
   private resolutionTail: Promise<void> = Promise.resolve();
@@ -71,6 +73,8 @@ export class MultiAccountMailMessageService implements MailMessageService {
     readonly stateDirectory: string;
     readonly store: MultiMailAccountStore;
     readonly providerFactory: MailProviderFactory;
+    /** Every account's committed changes, for the change feed. */
+    readonly onChange?: (change: MailServiceChange) => void;
   }) {
     if (!path.isAbsolute(options.stateDirectory) || path.resolve(options.stateDirectory) !== options.stateDirectory) {
       throw new MailProviderSyncError("mail_provider_unavailable");
@@ -78,6 +82,7 @@ export class MultiAccountMailMessageService implements MailMessageService {
     this.stateDirectory = options.stateDirectory;
     this.store = options.store;
     this.providerFactory = options.providerFactory;
+    this.onChange = options.onChange;
   }
 
   async readBackgroundSyncHealth(): Promise<MailBackgroundSyncHealth> {
@@ -475,6 +480,7 @@ export class MultiAccountMailMessageService implements MailMessageService {
               ? "gmail_reauth_required"
               : "mail_provider_reauth_required",
           hydrateHiddenMailboxes: account.providerKind === "gmail",
+          onChange: this.onChange,
         }),
         destroyProvider,
         lifecycle: new AbortController(),

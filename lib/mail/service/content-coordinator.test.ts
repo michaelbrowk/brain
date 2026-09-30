@@ -1345,6 +1345,85 @@ describe("MailContentCoordinator", () => {
     expect(onBackgroundWorkAvailable).toHaveBeenCalledTimes(3);
   });
 
+  it("says which message became ready on each ready commit, and only then", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    const runner = new FakeMailContentWorkRunner([
+      (input) => publish(input, { text: Buffer.from("ready body") }),
+    ]);
+    const onContentReady = vi.fn(() => {
+      throw new Error("observer unavailable");
+    });
+    const coordinator = fixture.coordinator(
+      runner,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { onContentReady },
+    );
+
+    await expect(
+      coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID }),
+    ).resolves.toMatchObject({ state: "fetching" });
+    expect(onContentReady).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(onContentReady).toHaveBeenCalledWith(ACCOUNT_ID, MESSAGE_ID),
+    );
+    // A throwing observer leaves the body ready, and a read of a body that
+    // is already ready is not a second commit.
+    await expect(
+      coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID }),
+    ).resolves.toMatchObject({ state: "ready" });
+    expect(onContentReady).toHaveBeenCalledTimes(1);
+  });
+
+  it("announces each body the prefetch lands once, and nothing for a run it gave up", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    seedInbox(fixture.caches[0]!, ["p1", "p2", "p3"]);
+    const gated = gatedRunner(10);
+    const onContentReady = vi.fn();
+    const coordinator = fixture.coordinator(
+      gated.runner,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { onContentReady },
+    );
+    const id = (name: string) => `message-thread-${name}`;
+    await coordinator.runBackgroundPrefetchStep(ACCOUNT_ID, new AbortController().signal);
+    await vi.waitFor(() => expect(gated.started()).toEqual([id("p3")]));
+
+    // The owner's thread of two displaces the prefetch: aborted, it lands
+    // nothing and announces nothing.
+    for (const name of ["p1", "p2"]) {
+      await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: id(name) });
+    }
+    await vi.waitFor(() => expect(gated.signals.get(id("p3"))?.aborted).toBe(true));
+    await vi.waitFor(() => expect(gated.started()).toContain(id("p2")));
+    expect(onContentReady).not.toHaveBeenCalled();
+
+    // Each body that lands is announced once, the owner's and the prefetch's.
+    gated.release(id("p1"));
+    gated.release(id("p2"));
+    await vi.waitFor(() =>
+      expect(gated.started().filter((value) => value === id("p3"))).toHaveLength(2),
+    );
+    gated.release(id("p3"));
+    await vi.waitFor(() => expect(gated.started()).toContain(MESSAGE_ID));
+    await vi.waitFor(() => expect(onContentReady).toHaveBeenCalledTimes(3));
+
+    // Mail goes off while the prefetch fetches the last one: nothing lands.
+    await coordinator.stopBackgroundPrefetch();
+    await sleep(20);
+    expect(onContentReady.mock.calls.map(([, messageId]) => messageId).sort()).toEqual(
+      [id("p1"), id("p2"), id("p3")],
+    );
+    for (const call of onContentReady.mock.calls) expect(call[0]).toBe(ACCOUNT_ID);
+  });
+
   it("prefetches every cohort body but fetches images unasked only for the newest three", async () => {
     const fixture = await createFixture([ACCOUNT_ID]);
     const recent = seedInbox(fixture.caches[0]!, ["b", "c", "d", "e"]);
@@ -3124,6 +3203,7 @@ async function createFixture(accountIds: readonly string[]): Promise<{
         listDraftSourceMessageIds(accountId: string): Promise<readonly string[]>;
       };
       readonly queue?: MailContentWorkQueuePort;
+      readonly onContentReady?: (accountId: string, messageId: string) => void;
     },
   ): MailContentCoordinator;
 }> {

@@ -1,6 +1,8 @@
+import type { BrainMailEvent } from "@/lib/mail/mail-events";
 import {
   brainEvents,
   latestStoreEventSequence,
+  MAIL_EVENT,
   replayStoreEvents,
   type SequencedStoreEvent,
 } from "@/lib/store/events";
@@ -9,7 +11,10 @@ import { registerActiveSseClose } from "@/lib/store/sse-shutdown";
 export const dynamic = "force-dynamic";
 
 /** Server-Sent Events: streams every store mutation to open clients so an
- *  external write (MCP, another tab) shows up live instead of going stale. */
+ *  external write (MCP, another tab) shows up live instead of going stale.
+ *  Mail changes ride the same stream as `event: mail`, without an `id:` line:
+ *  they are not in the replay journal, so they must not move the cursor a
+ *  reconnecting tab hands back as Last-Event-ID. */
 export async function GET(req: Request) {
   const enc = new TextEncoder();
   const stream = new ReadableStream({
@@ -35,6 +40,9 @@ export async function GET(req: Request) {
       const onChange = (ev: SequencedStoreEvent) =>
         sendEvent(null, ev, ev.sequence);
       brainEvents.on("change", onChange);
+      const onMail = (event: BrainMailEvent) =>
+        send(`event: mail\ndata: ${JSON.stringify(event)}\n\n`);
+      brainEvents.on(MAIL_EVENT, onMail);
 
       const cursorHeader = req.headers.get("last-event-id");
       const cursor = cursorHeader === null ? null : Number(cursorHeader);
@@ -62,6 +70,7 @@ export async function GET(req: Request) {
         unregisterShutdown();
         clearInterval(hb);
         brainEvents.off("change", onChange);
+        brainEvents.off(MAIL_EVENT, onMail);
         req.signal.removeEventListener("abort", close);
         try {
           controller.close();

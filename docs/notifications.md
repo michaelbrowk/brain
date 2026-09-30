@@ -1,9 +1,10 @@
 # Notifications
 
 Brain has one notification centre and one background timer behind it. The timer
-looks for task reminders every thirty seconds and for new mail every minute.
-What it finds becomes a row in the centre, and a push on every device you have
-turned push on for.
+looks for task reminders every thirty seconds and for new mail every minute, and
+new mail is also looked for two seconds after the mail service reports a sync
+that changed an Inbox. What it finds becomes a row in the centre, and a push on
+every device you have turned push on for.
 
 ## What fires
 
@@ -117,9 +118,13 @@ against, every unread thread in the inbox would be new, and the bell would open
 counting mail you have already seen. The first poll writes the mark and stays
 quiet.
 
-The poll asks each account for one page of twenty five threads on every second
-tick, so once a minute. The mail service runs its own sync once a minute, and
-asking twice as often would ask the same question twice for one answer.
+The poll asks each account for one page of twenty five threads. It runs two
+seconds after the last `mail` event that says a sync changed an Inbox, or that
+events were lost (`lib/mail/change-feed.ts`), so a burst of sync passes is one
+poll, and a poll that such an event lands during runs once more when it
+finishes. Every second tick, once a minute, runs it too, as the fallback for a
+change feed that is down or an event that went missing. The marks make the two
+one poll: a letter is reported once, by whichever reaches it first.
 
 **The count grows while the row is unread.** Every account's letters go into
 one count — the row is not about a mailbox — and each poll that finds more adds

@@ -35,6 +35,14 @@ export async function register() {
   const { scheduleReminderScans } = await import("./lib/reminders/scheduler");
   scheduleReminderScans();
 
+  // The mail change feed: one long poll against the mail service whose
+  // answers reach open tabs as `mail` events. Off under NODE_ENV=test; it
+  // sleeps while Mail is switched off and stops with the SSE streams. Not
+  // under BRAIN_REMINDERS: that switch is for the notification scans, and a
+  // list that updates itself is the Mail surface's own business.
+  const { startMailChangeFeed } = await import("./lib/mail/change-feed");
+  startMailChangeFeed();
+
   // The mail service is another process with its own restarts, so it is told
   // the module switch once here as a repair. Off under NODE_ENV=test like its
   // two neighbours above, and deliberately NOT awaited: boot must not wait on

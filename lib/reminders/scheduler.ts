@@ -1,9 +1,11 @@
+import type { BrainMailEvent } from "@/lib/mail/mail-events";
 import {
   taskMissedNotificationId,
   taskReminderNotificationId,
   type BrainNotification,
 } from "@/lib/notifications/model";
 import { appendNotification } from "@/lib/notifications/store";
+import { brainEvents, MAIL_EVENT } from "@/lib/store/events";
 import type { ModuleSwitches } from "@/lib/owner-settings";
 import type { TaskView } from "@/lib/tasks/model";
 import { dueReminders } from "./due";
@@ -36,9 +38,13 @@ const FIRST_SCAN_DELAY_MS = 15_000;
  *  tick: a backlog drains at a hundred a minute and the journal survives it.
  */
 export const MAX_APPENDS_PER_SCAN = 50;
-/** The mail service's own background sync runs once a minute, so polling it
- *  twice that often would ask the same question twice for one answer. */
+/** The minute tick is the fallback now: the scan runs on the change feed's
+ *  events (below), and the tick covers a feed that is down or an event that
+ *  was lost. Polling faster would ask the same question twice for one answer. */
 const MAIL_SCAN_EVERY = 2;
+/** A sync that brought mail, or a reset, asks for a scan this long after the
+ *  last such event, so a burst of passes is one scan and one bell row. */
+export const MAIL_EVENT_SCAN_DELAY_MS = 2_000;
 /** HOW LONG A FAILING SCAN WAITS BEFORE THE NEXT ONE.
  *
  *  The first scan builds the Store, and a notes root this process cannot read
@@ -287,13 +293,22 @@ export async function runReminderScan(
  *  Skips are counted rather than announced: a poll on a slow morning would
  *  otherwise print a line every thirty seconds. One line when the long scan
  *  finally lands, carrying how many ticks it cost.
+ *
+ *  `again` is for a caller that knows something changed after the pass in
+ *  flight began, the mail event below: that pass may have read too early, so
+ *  one more runs when it lands. It is a follow-up, not a skipped tick.
  */
-function oneAtATime(work: () => Promise<unknown>, label: string): () => void {
+function oneAtATime(
+  work: () => Promise<unknown>,
+  label: string,
+): (options?: { readonly again?: boolean }) => void {
   let inFlight: Promise<unknown> | null = null;
   let skipped = 0;
-  return () => {
+  let again = false;
+  const run = (options?: { readonly again?: boolean }) => {
     if (inFlight !== null) {
-      skipped += 1;
+      if (options?.again) again = true;
+      else skipped += 1;
       return;
     }
     inFlight = work().finally(() => {
@@ -304,8 +319,19 @@ function oneAtATime(work: () => Promise<unknown>, label: string): () => void {
         );
         skipped = 0;
       }
+      if (again) {
+        again = false;
+        run();
+      }
     });
   };
+  return run;
+}
+
+/** The change feed's events, as `lib/mail/change-feed.ts` emits them. */
+function subscribeMailEvents(listener: (event: BrainMailEvent) => void): () => void {
+  brainEvents.on(MAIL_EVENT, listener);
+  return () => brainEvents.off(MAIL_EVENT, listener);
 }
 
 export interface ReminderScheduleOptions {
@@ -316,6 +342,8 @@ export interface ReminderScheduleOptions {
    *  socket; nothing in the app passes either. */
   scan?: () => Promise<unknown>;
   mailScan?: () => Promise<unknown>;
+  /** Where the change feed's events come from; the test's own feed. */
+  onMailEvent?: (listener: (event: BrainMailEvent) => void) => () => void;
 }
 
 /** Boot-time scheduler. Returns a disposer. */
@@ -381,6 +409,27 @@ export function scheduleReminderScans(options: ReminderScheduleOptions = {}): ()
     tickMail();
   };
 
+  // THE SCAN ALSO RUNS WHEN MAIL ARRIVES. A sync that changed the Inbox, or
+  // a reset that says changes were lost, asks for one scan two seconds after
+  // the last of them; the watermarks decide what is new exactly as on the
+  // tick, so a letter the tick would have found is found once, sooner.
+  let mailEventTimer: NodeJS.Timeout | null = null;
+  const unsubscribeMail = (options.onMailEvent ?? subscribeMailEvents)((event) => {
+    if (disposed) return;
+    if (
+      event.changeKind !== "reset" &&
+      !(event.changeKind === "sync" && event.mailboxIds.includes("inbox"))
+    ) {
+      return;
+    }
+    if (mailEventTimer !== null) clearTimeout(mailEventTimer);
+    mailEventTimer = setTimeout(() => {
+      mailEventTimer = null;
+      if (!disposed) tickMail({ again: true });
+    }, MAIL_EVENT_SCAN_DELAY_MS);
+    mailEventTimer.unref();
+  });
+
   const first = setTimeout(() => {
     run();
     interval = setInterval(run, intervalMs);
@@ -392,5 +441,7 @@ export function scheduleReminderScans(options: ReminderScheduleOptions = {}): ()
     disposed = true;
     clearTimeout(first);
     if (interval) clearInterval(interval);
+    if (mailEventTimer !== null) clearTimeout(mailEventTimer);
+    unsubscribeMail();
   };
 }

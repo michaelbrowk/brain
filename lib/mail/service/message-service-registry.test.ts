@@ -265,6 +265,36 @@ describe("multi-account message registry", () => {
     await service.close();
   });
 
+  it("hands every account's committed change to the one listener", async () => {
+    const stateDirectory = await mkdtemp(path.join(tmpdir(), "brain-mail-registry-"));
+    roots.push(stateDirectory);
+    const changes: unknown[] = [];
+    const service = new MultiAccountMailMessageService({
+      stateDirectory,
+      store: storeFixture(),
+      providerFactory: {
+        create: vi.fn().mockResolvedValue({
+          provider: providerFixture({
+            listInitialThreads: vi.fn().mockResolvedValue({
+              threads: [cachedThreadFixture("thread-1")],
+              nextPageToken: null,
+            }),
+          }),
+        }),
+      },
+      onChange: (change) => changes.push(change),
+    });
+
+    await service.syncAccount(ACCOUNT_ID, { maxItems: 20 });
+
+    expect(changes).toContainEqual({
+      accountId: ACCOUNT_ID,
+      mailboxIds: ["inbox", "all", "sent", "starred", "spam", "trash"],
+      kind: "sync",
+    });
+    await service.close();
+  });
+
   it("names each syncing account's provider for the scheduler's cadence", async () => {
     const imapAccountId = "account-a22222222222222222222222222222222";
     const parkedAccountId = "account-a33333333333333333333333333333333";

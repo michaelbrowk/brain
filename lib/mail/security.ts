@@ -1708,6 +1708,7 @@ const MAIL_REQUEST_PHASE_FAMILIES: readonly (readonly [RegExp, string])[] =
     [/^\/v1\/attachments\/[^/]+$/, "attachment"],
     [/^\/v1\/remote-images\/[^/]+$/, "remote_image"],
     [/^\/v1\/sync$/, "sync"],
+    [/^\/v1\/changes$/, "changes"],
     [/^\/v1\/drafts$/, "draft_list"],
     [/^\/v1\/drafts\/[^/]+\/send$/, "draft_send"],
     [/^\/v1\/drafts\/[^/]+$/, "draft"],

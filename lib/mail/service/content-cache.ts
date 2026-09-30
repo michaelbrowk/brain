@@ -41,6 +41,19 @@ export const MAIL_CONTENT_FORMAT_VERSION = 9;
  */
 export const MAIL_BODY_OPEN_PIN_MS = 60 * 60_000;
 
+/**
+ * The transient failures a letter can cause by itself, by bringing the parser
+ * worker down or running it out of time. The prefetch gives such a letter up
+ * after its first try: offered again every retry window, one letter that
+ * kills the parser cost twelve parser processes and four downloads a claim,
+ * for good. An open still fetches it, as it would any other.
+ */
+export const MAIL_PARSER_FAILURE_CODES: readonly string[] = Object.freeze([
+  "mail_mime_worker_dropped",
+  "mail_mime_worker_crashed",
+  "mail_mime_worker_timeout",
+]);
+
 const databaseTails = new Map<string, Promise<void>>();
 
 const CONTENT_SCHEMA_SQL = `
@@ -1215,13 +1228,17 @@ export class SqliteMailContentCache {
    * is at its budget: only a letter newer than the body evicted next is
    * worth a fetch.
    *
-   * Both of those hold only while the account has no room for the letter.
-   * One that fits in `roomBytes` is a candidate whatever the budget evicted
-   * before: without that, one large open that pushed the cohort out kept it
-   * out for good, since the marks and the line they draw never came back
-   * down. What fits is known exactly for an evicted body, which the eviction
-   * recorded, and estimated for any other by its thread's size. A letter
-   * that estimate undersells is fetched once, evicted, and then known.
+   * Both of those give way for a letter that fits in `roomBytes` and is newer
+   * than the oldest body the account keeps. The room alone was not enough:
+   * a body brought back into it older than everything kept was the next to
+   * go, so each letter that landed evicted one the room had just refetched.
+   * Newer than the oldest kept, it is not the next to go. What fits is known
+   * exactly for an evicted body, which the eviction recorded, and estimated
+   * for any other by its thread's size. A letter that estimate undersells is
+   * fetched once, evicted, and then known.
+   *
+   * A letter whose last try brought the parser down, or ran it out of time
+   * (`MAIL_PARSER_FAILURE_CODES`), is left for its open.
    */
   async findBackgroundContentCandidate(
     now: number,
@@ -1232,7 +1249,10 @@ export class SqliteMailContentCache {
     const lowerBound = newerThan === null ? -1 : validateTimestamp(newerThan);
     const room = validateReclaimBytes(roomBytes);
     return this.serialized(async () => {
-      const row = this.requireDatabase()
+      const database = this.requireDatabase();
+      const oldestKeptKey =
+        readyBodySizes(database, this.accountId, this.contentFormatVersion)[0]?.key ?? -1;
+      const row = database
         .prepare(
           `SELECT cohort.provider_message_id,
                   COALESCE(cohort.content_evicted_bytes, thread.size_bytes)
@@ -1250,12 +1270,17 @@ export class SqliteMailContentCache {
              LEFT JOIN message_content AS content
                ON content.account_id = cohort.account_id
               AND content.provider_message_id = cohort.provider_message_id
+             LEFT JOIN message_content_user_demand AS opened
+               ON opened.account_id = cohort.account_id
+              AND opened.provider_message_id = cohort.provider_message_id
+              AND opened.source_generation = cohort.source_generation
             WHERE cohort.account_id = ?
               AND cohort.source_generation = sync.active_generation
               AND thread.size_bytes BETWEEN 1 AND ?
               AND message.sent_at > ?
               AND (
-                COALESCE(cohort.content_evicted_bytes, thread.size_bytes) <= ? OR (
+                (COALESCE(cohort.content_evicted_bytes, thread.size_bytes) <= ? AND
+                  MAX(message.sent_at, COALESCE(opened.requested_at, 0)) > ?) OR (
                   cohort.content_evicted_at IS NULL AND
                   message.sent_at > COALESCE((
                     SELECT MAX(MAX(evicted.sent_at, COALESCE(demand.requested_at, 0)))
@@ -1280,6 +1305,7 @@ export class SqliteMailContentCache {
                 content.source_thread_id <> message.thread_id OR
                 content.content_format_version <> ? OR
                 (content.state = 'transient_failure' AND
+                  content.failure_code NOT IN (${MAIL_PARSER_FAILURE_CODES.map(() => "?").join(", ")}) AND
                   content.updated_at + ? <= ?) OR
                 (content.state = 'fetching' AND content.lease_expires_at <= ?)
               )
@@ -1291,7 +1317,9 @@ export class SqliteMailContentCache {
           MAIL_RESOURCE_LIMITS.privacyPrefetchMaxThreadBytes,
           lowerBound,
           room,
+          oldestKeptKey,
           this.contentFormatVersion,
+          ...MAIL_PARSER_FAILURE_CODES,
           MAIL_RESOURCE_LIMITS.remoteImageTransientRetryMs,
           inspectedAt,
           inspectedAt,
@@ -2099,15 +2127,16 @@ export class SqliteMailContentCache {
 
   /**
    * Brings the account's bodies down to `maxBytes`, least recently used first
-   * (`readyBodySizes` says by which key), except that a body whose raw
-   * message is past `privacyPrefetchMaxThreadBytes`, which only an open
-   * fetches, goes before any other: one such open otherwise stayed while the
-   * several letters it displaced waited for it to age out. A letter the
-   * prefetch fetched is never one of those, so none is fetched only to go. A body opened within `MAIL_BODY_OPEN_PIN_MS`, or one a draft
-   * answers or forwards, is never taken, even when that leaves the account
-   * over the budget. An evicted body reads as never fetched: an open fetches
-   * it again, and the cohort records when it went and what it held, which
-   * says when there is room for it again (`findBackgroundContentCandidate`).
+   * (`readyBodySizes` says by which key), except that a body nobody opened
+   * whose raw message is past `privacyPrefetchMaxThreadBytes` goes before any
+   * other. The prefetch never fetches one on purpose, so it is a thread the
+   * provider sized too small. A body the owner opened keeps its place by when
+   * it was opened, however large: giving it up first took its attachments
+   * from under a reader still showing it. A body opened within
+   * `MAIL_BODY_OPEN_PIN_MS`, or one a draft answers or forwards, is never
+   * taken, even when that leaves the account over the budget. An evicted body
+   * reads as never fetched: an open fetches it again, and the cohort records
+   * when it went and what it held (`findBackgroundContentCandidate`).
    * `oldestKeptKey` is the key of the body the budget would give up next, 0
    * when that is a large one, which goes before any letter the prefetch could
    * add, or null when every body left is pinned: a prefetch older than that
@@ -2145,7 +2174,11 @@ export class SqliteMailContentCache {
               SET content_evicted_at = ?, content_evicted_bytes = ?
             WHERE account_id = ? AND provider_message_id = ?`,
         );
-        const large = (body: { readonly rawBytes: number }) =>
+        const large = (body: {
+          readonly openedAt: number | null;
+          readonly rawBytes: number;
+        }) =>
+          body.openedAt === null &&
           body.rawBytes > MAIL_RESOURCE_LIMITS.privacyPrefetchMaxThreadBytes;
         let oldestKeptKey: number | null = null;
         for (const body of [

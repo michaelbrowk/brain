@@ -19,6 +19,7 @@ import { AtomicMailBlobStore } from "./content-blob-store";
 import {
   MAIL_BODY_OPEN_PIN_MS,
   MAIL_CONTENT_FORMAT_VERSION,
+  MAIL_PARSER_FAILURE_CODES,
   SqliteMailContentCache,
   type MailContentLease,
 } from "./content-cache";
@@ -1601,6 +1602,66 @@ describe("background body cohort and byte budget", () => {
     await expect(candidates(null, 2_048)).resolves.toEqual(["message-d", "message-e"]);
   });
 
+  it("weighs an evicted letter by when it was last opened against the oldest body kept", async () => {
+    const fixture = await createFixture({ active: true });
+    activateThreads(
+      fixture,
+      [
+        { threadId: "opened", sentAt: NOW - 5 * HOUR },
+        { threadId: "kept", sentAt: NOW - 3 * HOUR },
+      ],
+      "200",
+    );
+    await fixture.content.refreshBackgroundPrivacyCohort(NOW);
+    const raw = Buffer.from("raw MIME opened two hours ago");
+    await publishBody(fixture, "message-opened", NOW - 5 * HOUR, { raw });
+    await publishBody(fixture, "message-kept", NOW - 3 * HOUR, {
+      raw: Buffer.from("raw MIME a draft answers"),
+    });
+    await fixture.content.recordUserContentDemand("message-opened", NOW - 2 * HOUR);
+    // A draft holds the older of the two, so the budget gives up the letter
+    // opened two hours ago, sent five hours ago.
+    await fixture.content.evictBodiesOverBudget({
+      maxBytes: 0,
+      now: NOW,
+      pinnedMessageIds: ["message-kept"],
+    });
+    // Opened after the kept body was sent, it is not the next to go.
+    await expect(
+      fixture.content.findBackgroundContentCandidate(NOW, null, raw.byteLength),
+    ).resolves.toEqual({ messageId: "message-opened", estimatedBytes: raw.byteLength });
+  });
+
+  it("leaves a letter whose parse brought the worker down for its open", async () => {
+    const fixture = await createFixture({ active: true });
+    const causes = [...MAIL_PARSER_FAILURE_CODES, "mail_content_source_transient"];
+    activateThreads(
+      fixture,
+      causes.map((_, index) => ({
+        threadId: `failed-${index}`,
+        sentAt: NOW - (index + 1) * HOUR,
+      })),
+      "200",
+    );
+    await fixture.content.refreshBackgroundPrivacyCohort(NOW);
+    for (const [index, errorCode] of causes.entries()) {
+      const lease = await claimLease(fixture.content, `message-failed-${index}`, NOW);
+      await fixture.content.markFailure({ lease, kind: "transient", errorCode, now: NOW });
+    }
+    const later = NOW + MAIL_RESOURCE_LIMITS.remoteImageTransientRetryMs;
+    // Past the retry window only the provider's failure is tried again: a
+    // letter that took the parser down would take it down again.
+    await expect(
+      fixture.content.findBackgroundContentCandidate(later),
+    ).resolves.toMatchObject({ messageId: `message-failed-${causes.length - 1}` });
+    await claimLease(fixture.content, `message-failed-${causes.length - 1}`, later);
+    await expect(fixture.content.findBackgroundContentCandidate(later)).resolves.toBeNull();
+    // An open fetches any of them.
+    await expect(
+      fixture.content.claim("message-failed-0", later),
+    ).resolves.toMatchObject({ kind: "claimed" });
+  });
+
   it("clears an eviction mark when a new generation arrives", async () => {
     const fixture = await createFixture({ active: true });
     await fixture.content.refreshBackgroundPrivacyCohort(1_000);
@@ -1868,7 +1929,7 @@ describe("background body cohort and byte budget", () => {
     await expect(fixture.content.collectGarbage()).resolves.toHaveLength(4);
   });
 
-  it("gives up a body only an open fetches before any other, but not a prefetched one", async () => {
+  it("gives up first a body past 4 MiB that nobody opened, but not one heavy with a file", async () => {
     const fixture = await createFixture({ active: true });
     const large = MAIL_RESOURCE_LIMITS.privacyPrefetchMaxThreadBytes;
     const ids = ["new", "big", "heavy", "old", "older"];
@@ -1877,8 +1938,9 @@ describe("background body cohort and byte budget", () => {
       ids.map((id, index) => ({ threadId: id, sentAt: NOW - (index + 1) * HOUR })),
       "200",
     );
-    // big's raw message is past the prefetch's size, so only an open fetched
-    // it; heavy's is not, though what it holds on disk is, with its file.
+    // big's raw message is past the prefetch's size, and nobody opened it:
+    // a thread the provider sized too small. heavy's raw message is not,
+    // though what it holds on disk is, with its file.
     for (const [index, id] of ids.entries()) {
       await publishWhole(
         fixture,
@@ -1917,6 +1979,46 @@ describe("background body cohort and byte budget", () => {
     expect(await Promise.all(ids.map(state))).toEqual([
       "ready",
       "not_requested",
+      "ready",
+      "ready",
+      "not_requested",
+    ]);
+  });
+
+  it("gives up in plain least recently used order a large body the owner opened, and one of exactly 4 MiB", async () => {
+    const fixture = await createFixture({ active: true });
+    const large = MAIL_RESOURCE_LIMITS.privacyPrefetchMaxThreadBytes;
+    const ids = ["edge", "opened", "old", "older"];
+    activateThreads(
+      fixture,
+      ids.map((id, index) => ({ threadId: id, sentAt: NOW - (index + 2) * HOUR })),
+      "200",
+    );
+    // edge's raw message is 4 MiB exactly, the most the prefetch fetches;
+    // opened's is past it, and the owner opened it ninety minutes ago.
+    for (const [index, id] of ids.entries()) {
+      const size = id === "edge" ? large : id === "opened" ? large + 1 : 100;
+      await publishWhole(fixture, `message-${id}`, NOW - 6 * HOUR, Buffer.alloc(size, index + 1), null);
+    }
+    await fixture.content.recordUserContentDemand("message-opened", NOW - 90 * 60_000);
+    const total = 2 * large + 201;
+    await expect(fixture.content.readBodyCacheBytes()).resolves.toBe(total);
+    // Neither goes first: the oldest does, and older is next.
+    await expect(
+      fixture.content.evictBodiesOverBudget({
+        maxBytes: total - 100,
+        now: NOW,
+        pinnedMessageIds: [],
+      }),
+    ).resolves.toEqual({
+      evictedMessages: 1,
+      remainingBytes: total - 100,
+      oldestKeptKey: NOW - 4 * HOUR,
+    });
+    const state = async (id: string) =>
+      (await fixture.content.inspect(`message-${id}`)).kind;
+    expect(await Promise.all(ids.map(state))).toEqual([
+      "ready",
       "ready",
       "ready",
       "not_requested",

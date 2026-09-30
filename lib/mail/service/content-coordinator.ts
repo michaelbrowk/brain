@@ -20,6 +20,7 @@ import {
   type MailBlobReadSnapshot,
 } from "./content-blob-store";
 import {
+  MAIL_PARSER_FAILURE_CODES,
   MailContentCacheError,
   type MailContentCapacityReclaimer,
   type CachedMailContent,
@@ -148,6 +149,8 @@ export interface MailContentWorkQueuePort {
   promote(accountId: string, providerMessageId: string): void;
   /** Background work this account has queued, waiting or running. */
   backgroundCount(accountId: string): number;
+  /** All of this account's work queued, waiting or running, whoever it is for. */
+  workCount(accountId: string): number;
   /** Aborts and drops all background work and refuses more until resumed. */
   abortAndDrainBackground(): Promise<void>;
   resumeBackground(): void;
@@ -385,6 +388,15 @@ export class InMemoryMailContentWorkQueue implements MailContentWorkQueuePort {
     let total = 0;
     for (const entry of this.entries.values()) {
       if (entry.background && entry.task.accountId === accountId) total += 1;
+    }
+    return total;
+  }
+
+  workCount(accountIdInput: string): number {
+    const accountId = contentAccountId(accountIdInput);
+    let total = 0;
+    for (const entry of this.entries.values()) {
+      if (entry.task.accountId === accountId) total += 1;
     }
     return total;
   }
@@ -1154,10 +1166,10 @@ export class MailContentCoordinator
         if (policy === null) {
           policy = await this.readClaimPolicy(entry, accountId);
           // A body still on its way is not in the byte count yet, so the room
-          // holds only while none is: a second fill beside it would fetch a
-          // body back into room the first is about to take, then evict it.
-          roomBytes =
-            this.queue.backgroundCount(accountId) === 0 ? policy.roomBytes : 0;
+          // holds only while none is, the owner's or the prefetch's: a fill
+          // beside one would fetch a body back into room it is about to
+          // take, then evict it.
+          roomBytes = this.queue.workCount(accountId) === 0 ? policy.roomBytes : 0;
         }
         if (!policy.claim) break;
         const candidate = await entry.cache.findBackgroundContentCandidate(
@@ -1579,6 +1591,14 @@ export class MailContentCoordinator
             throw markError;
           }
           if (failure.kind === "permanent") return complete();
+          // A letter that brought the parser down may do so every time: the
+          // prefetch tries it once and leaves it for an open.
+          if (
+            input.lane.background &&
+            MAIL_PARSER_FAILURE_CODES.includes(failure.errorCode)
+          ) {
+            return complete();
+          }
           const attempt = input.nextAttempt();
           const delay = this.retryPolicy.nextDelayMs({
             accountId: input.accountId,

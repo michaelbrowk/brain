@@ -1,5 +1,5 @@
 import { brainEvents, emitMail, type SequencedStoreEvent } from "@/lib/store/events";
-import { registerActiveSseClose } from "@/lib/store/sse-shutdown";
+import { registerShutdownWorker } from "@/lib/store/sse-shutdown";
 
 import type { BrainMailEvent } from "./mail-events";
 import type { MailSystemMailbox } from "./message-types";
@@ -226,8 +226,8 @@ const feedGlobal = globalThis as typeof globalThis & {
 /** Boot-time start. Off under NODE_ENV=test like its neighbours in
  *  `instrumentation.ts`, and once per process: Next can evaluate this module
  *  in more than one layer, and two loops would each be refused as busy by
- *  the service half the time. Returns a disposer; shutdown calls it through
- *  the SSE registry. */
+ *  the service half the time. Returns a disposer; shutdown calls it as a
+ *  worker beside the event streams, outside their count. */
 export function startMailChangeFeed(
   options: {
     readonly env?: { readonly NODE_ENV?: string };
@@ -247,6 +247,6 @@ export function startMailChangeFeed(
     unregister();
   };
   loop.start();
-  unregister = registerActiveSseClose(stop);
+  unregister = registerShutdownWorker(stop);
   return stop;
 }

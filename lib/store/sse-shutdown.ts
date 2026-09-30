@@ -6,25 +6,20 @@ export interface SseShutdownResult {
 }
 
 /** Tracks only long-lived Brain event streams. Closing them lets Next.js drain
- * ordinary in-flight requests instead of waiting forever in server.close(). */
+ * ordinary in-flight requests instead of waiting forever in server.close().
+ * Background workers that hold their own connections stop at the same moment
+ * but stay out of the stream count, which is what the shutdown line reports. */
 export class SseShutdownRegistry {
   private readonly callbacks = new Set<SseCloseCallback>();
+  private readonly workers = new Set<SseCloseCallback>();
   private shuttingDown = false;
 
   register(close: SseCloseCallback): () => void {
-    if (this.shuttingDown) {
-      this.closeSafely(close);
-      return () => {};
-    }
+    return this.add(this.callbacks, close);
+  }
 
-    this.callbacks.add(close);
-    let registered = true;
-
-    return () => {
-      if (!registered) return;
-      registered = false;
-      this.callbacks.delete(close);
-    };
+  registerWorker(stop: SseCloseCallback): () => void {
+    return this.add(this.workers, stop);
   }
 
   beginShutdown(): SseShutdownResult {
@@ -33,9 +28,14 @@ export class SseShutdownRegistry {
 
     const callbacks = [...this.callbacks];
     this.callbacks.clear();
+    const workers = [...this.workers];
+    this.workers.clear();
 
     for (const close of callbacks) {
       this.closeSafely(close);
+    }
+    for (const stop of workers) {
+      this.closeSafely(stop);
     }
 
     return { started: true, closed: callbacks.length };
@@ -47,6 +47,22 @@ export class SseShutdownRegistry {
 
   isShuttingDown(): boolean {
     return this.shuttingDown;
+  }
+
+  private add(set: Set<SseCloseCallback>, close: SseCloseCallback): () => void {
+    if (this.shuttingDown) {
+      this.closeSafely(close);
+      return () => {};
+    }
+
+    set.add(close);
+    let registered = true;
+
+    return () => {
+      if (!registered) return;
+      registered = false;
+      set.delete(close);
+    };
   }
 
   private closeSafely(close: SseCloseCallback): void {
@@ -131,4 +147,12 @@ export function registerActiveSseClose(close: SseCloseCallback): () => void {
   // draining, so close it synchronously instead of briefly reopening SSE.
   if (startupShutdownState()?.requested) beginSseShutdown();
   return state.registry.register(close);
+}
+
+/** A process-wide worker, such as the mail change-feed loop, that must stop at
+ * shutdown so its held connection does not keep the server alive. It is not
+ * an event stream and is not counted as one. */
+export function registerShutdownWorker(stop: SseCloseCallback): () => void {
+  if (startupShutdownState()?.requested) beginSseShutdown();
+  return state.registry.registerWorker(stop);
 }

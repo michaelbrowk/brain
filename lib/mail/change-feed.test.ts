@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const shutdown = vi.hoisted(() => ({
+  registerActiveSseClose: vi.fn((_close: () => void) => () => {}),
+  registerShutdownWorker: vi.fn((_stop: () => void) => () => {}),
+}));
+vi.mock("@/lib/store/sse-shutdown", () => shutdown);
+
 import {
   MAIL_CHANGE_RETRY_MAX_MS,
   MailChangeFeedLoop,
@@ -225,5 +231,23 @@ describe("Brain's mail change-feed loop", () => {
     again();
     stop();
     expect(world.reads[0]!.signal.aborted).toBe(true);
+  });
+
+  it("stops at shutdown as a worker, never counted among the event streams", async () => {
+    // The shutdown line's stream count is what the standalone smoke waits
+    // on before it releases its last request. A loop counted there held the
+    // server open past its exit deadline.
+    shutdown.registerActiveSseClose.mockClear();
+    shutdown.registerShutdownWorker.mockClear();
+    const world = harness();
+    const stop = startMailChangeFeed({ env: { NODE_ENV: "production" }, port: world.port });
+    await flush();
+
+    expect(shutdown.registerActiveSseClose).not.toHaveBeenCalled();
+    expect(shutdown.registerShutdownWorker).toHaveBeenCalledTimes(1);
+    const shutdownStop = shutdown.registerShutdownWorker.mock.calls[0]![0];
+    shutdownStop();
+    expect(world.reads[0]!.signal.aborted).toBe(true);
+    stop();
   });
 });

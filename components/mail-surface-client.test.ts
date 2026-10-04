@@ -468,6 +468,33 @@ describe("defaultMailSurfaceClient system mailboxes", () => {
       }),
     );
   });
+
+  it("sends a thread mutation with keepalive when the page is unloading", async () => {
+    // What a section's Done still owes the provider leaves with the page the
+    // way a parked draft delete does: allowed to outlive the tab. An ordinary
+    // mutation asks for nothing of the kind.
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(() => Promise.resolve(response({ apiVersion: 1, thread })));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await defaultMailSurfaceClient.updateThread(
+      { accountId: ACCOUNT_ID, threadId: THREAD_ID, archive: true },
+      undefined,
+      { keepalive: true },
+    );
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      `/api/mail/threads/${THREAD_ID}`,
+      expect.objectContaining({ method: "PATCH", keepalive: true }),
+    );
+
+    await defaultMailSurfaceClient.updateThread({
+      accountId: ACCOUNT_ID,
+      threadId: THREAD_ID,
+      archive: true,
+    });
+    expect(fetchMock.mock.calls.at(-1)?.[1]?.keepalive).toBeUndefined();
+  });
 });
 
 const DRAFT_ID = "draft-11111111-1111-4111-8111-111111111111";

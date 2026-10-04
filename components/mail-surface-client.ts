@@ -323,6 +323,7 @@ export interface MailSurfaceClient {
   updateThread(
     input: MailThreadMutationInput & { readonly threadId: string },
     signal?: AbortSignal,
+    options?: { readonly keepalive?: boolean },
   ): Promise<void>;
   send(input: MailSendInput, signal?: AbortSignal): Promise<MailSendResult>;
   createDraft(
@@ -547,7 +548,7 @@ export const defaultMailSurfaceClient: MailSurfaceClient = {
     readSyncResult(payload);
   },
 
-  async updateThread(input, signal) {
+  async updateThread(input, signal, options) {
     const { threadId, ...mutation } = input;
     const payload = await requestJsonWithin(
       `/api/mail/threads/${encodeURIComponent(threadId)}`,
@@ -559,6 +560,9 @@ export const defaultMailSurfaceClient: MailSurfaceClient = {
         },
         body: JSON.stringify(mutation),
         signal,
+        // What a section's Done has not sent yet goes out at pagehide like a
+        // parked draft delete: allowed to outlive the tab.
+        keepalive: options?.keepalive,
       },
       MAIL_MUTATION_TIMEOUT_MS,
     );

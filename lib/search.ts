@@ -608,13 +608,13 @@ function parseRipgrepMatch(line: string): RipgrepMatch | null {
  *  three such lines were the whole answer for that page: the body line was
  *  never read, the word went unmatched, and the page fell out of the
  *  intersection. "Урок 15 сентября" lost a note that holds all three words
- *  whenever the note had been created at a quarter past.
+ *  whenever the note's id and both of its dates happened to hold a 15.
  *
- *  ripgrep cannot be told where frontmatter ends, so it is asked for three
- *  lines more than the frontmatter can cost, one for every key above, and the
- *  reading below keeps the first three of the body. Dropped lines are neither
- *  stored nor counted against `MAX_MATCH_LINES`, so a broad word still
- *  answers a hundred pages before the run is stopped. */
+ *  ripgrep cannot be told where frontmatter ends, so it is asked for a line
+ *  for every key above and three more, and the reading below keeps the first
+ *  three of the body. Dropped lines are neither stored nor counted against
+ *  `MAX_MATCH_LINES`, so a broad word still answers a hundred pages before
+ *  the run is stopped. */
 function bodyLinesOnly(): (line: string) => boolean {
   const kept = new Map<string, number>();
   return (line) => {

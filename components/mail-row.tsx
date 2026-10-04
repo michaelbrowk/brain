@@ -201,8 +201,10 @@ export function MailRow({
                 gives way entirely. The decision keeps 128 of a row that is
                 320 to 430 wide, and what was left of the domain was a stub of
                 three or four letters that named nobody. The row is the name
-                and its two buttons there, and the domain stays one long press
-                away in the row menu and in the open letter. */}
+                and its two buttons there. The whole address is in the open
+                letter, under the sender's name. The row menu names the
+                domain too, but only where a decision may take a whole domain,
+                which is never one of the big providers or the owner's own. */}
             {waitingOn && (
               <span className="text-caption min-w-0 shrink-[4] truncate text-ink-3 max-md:hidden">
                 {senderDomain(waitingOn.address)}

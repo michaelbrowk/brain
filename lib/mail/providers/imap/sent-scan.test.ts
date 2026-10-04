@@ -410,7 +410,8 @@ function serverFixture(options: {
         delimiter: "/",
         parent: [],
         parentPath: "",
-        flags: new Set<string>(),
+        // A stated attribute is among the flags, as a server lists it.
+        flags: new Set<string>(entry.specialUse === undefined ? [] : [entry.specialUse]),
         ...(entry.specialUse === undefined ? {} : { specialUse: entry.specialUse }),
         listed: true,
         subscribed: true,

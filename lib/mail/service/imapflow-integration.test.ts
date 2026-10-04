@@ -14,7 +14,10 @@ import { ImapFlow, type ImapFlowOptions } from "imapflow";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { MailDnsResolverPort, ValidatedMailDialTarget } from "../ports";
-import { ImapMailSyncAdapter } from "../providers/imap/sync-adapter";
+import {
+  ImapMailSyncAdapter,
+  selectImapMailboxPath,
+} from "../providers/imap/sync-adapter";
 import type { MultiMailAccountStore } from "./account-store";
 import type { StoredImapMailAccount } from "./account-types";
 import { MailImapIdleSupervisor } from "./imap-idle";
@@ -147,21 +150,24 @@ describe("IMAP IDLE against a real ImapFlow session", () => {
 
 describe("the Sent-folder scan against a real ImapFlow session", () => {
   it("examines the Sent mailbox and fetches envelopes only, and nothing that writes", async () => {
-    const commands: string[] = [];
-    const server = createTlsServer(testTls, (socket) => {
-      serveSentImap(socket, commands);
+    const person = imapAddress("Person", "person", "example.test");
+    const { adapter, commands } = await sentScanAdapter({
+      capability: "IMAP4rev1 SPECIAL-USE",
+      folders: [{ flags: "\\HasNoChildren \\Sent", path: "Outgoing" }],
+      exists: 2,
+      uidNext: 13,
+      fetch: () =>
+        `* 1 FETCH (UID 11 ENVELOPE ${imapEnvelope({
+          from: person,
+          to: imapAddress("Lena", "lena", "example.org"),
+          cc: imapAddress("Boss", "boss", "example.org"),
+          bcc: imapAddress("Hidden", "hidden", "example.org"),
+        })})\r\n` +
+        `* 2 FETCH (UID 12 ENVELOPE ${imapEnvelope({
+          from: imapAddress("Person", "alias", "example.test"),
+          to: `${imapAddress("Team", "team", "example.org")} ${imapAddress("Lena", "LENA", "Example.org")}`,
+        })})\r\n`,
     });
-    const port = await listen(server);
-    const account = imapAccountFor(port);
-    const adapter = new ImapMailSyncAdapter(
-      account,
-      new ImapFlowReadSessionFactory({
-        dns: { resolve: async () => [targetFor(port, "implicit")] },
-        store: storeFor(account),
-        createClient: (options: ImapFlowOptions) =>
-          new ImapFlow({ ...options, tls: { ...options.tls, ca: testTls.cert } }),
-      }),
-    );
 
     const result = await adapter.scanSentEnvelopes(
       { cursor: null },
@@ -193,17 +199,151 @@ describe("the Sent-folder scan against a real ImapFlow session", () => {
   });
 });
 
-function serveSentImap(socket: TLSSocket, commands: string[]): void {
+/*
+  ImapFlow's LIST hands back a `specialUse` it guessed from the folder's leaf
+  name when no folder carries the flag. These run its real `list()` against a
+  server with and without SPECIAL-USE, because a hand-written fixture cannot
+  say what ImapFlow puts in an entry.
+*/
+describe("mailbox roles against a real ImapFlow LIST", () => {
+  it("names no role from a folder ImapFlow guessed by its leaf name, on a server without SPECIAL-USE", async () => {
+    const { client } = await connectedImapFlow({
+      capability: "IMAP4rev1",
+      folders: [
+        { flags: "\\HasNoChildren", path: "Projects/Acme/Archive" },
+        { flags: "\\HasNoChildren", path: "Projects/Acme/Sent" },
+        { flags: "\\HasNoChildren", path: "Projects/Acme/Trash" },
+        { flags: "\\HasNoChildren", path: "Projects/Acme/Junk" },
+        { flags: "\\HasNoChildren", path: "Sent Mail" },
+      ],
+    });
+    const listed = await client.list();
+    client.close();
+
+    // What ImapFlow itself says about them: a role for each, from the name.
+    expect(
+      listed
+        .filter((entry) => entry.path.startsWith("Projects/"))
+        .map((entry) => entry.specialUse),
+    ).toEqual(expect.arrayContaining(["\\Archive", "\\Sent", "\\Trash", "\\Junk"]));
+    for (const role of ["archive", "sent", "trash", "junk"] as const) {
+      expect(selectImapMailboxPath(role, listed)).toBeNull();
+    }
+  });
+
+  it("takes each role from the attribute a SPECIAL-USE server states, wherever the folder sits", async () => {
+    const { client } = await connectedImapFlow({
+      capability: "IMAP4rev1 SPECIAL-USE",
+      folders: [
+        { flags: "\\HasNoChildren \\Archive", path: "Stuff/Old" },
+        { flags: "\\HasNoChildren \\Sent", path: "Outgoing" },
+        { flags: "\\HasNoChildren \\Trash", path: "Stuff/Bin" },
+        { flags: "\\HasNoChildren \\Junk", path: "Stuff/Nonsense" },
+        // Names a guess would have picked first.
+        { flags: "\\HasNoChildren", path: "Projects/Acme/Archive" },
+        { flags: "\\HasNoChildren", path: "Projects/Acme/Sent" },
+      ],
+    });
+    const listed = await client.list();
+    client.close();
+
+    expect(selectImapMailboxPath("archive", listed)).toBe("Stuff/Old");
+    expect(selectImapMailboxPath("sent", listed)).toBe("Outgoing");
+    expect(selectImapMailboxPath("trash", listed)).toBe("Stuff/Bin");
+    expect(selectImapMailboxPath("junk", listed)).toBe("Stuff/Nonsense");
+  });
+
+  it("still finds a role by the name a mail client gives it at the root, without SPECIAL-USE", async () => {
+    const { client } = await connectedImapFlow({
+      capability: "IMAP4rev1",
+      folders: [
+        { flags: "\\HasNoChildren", path: "Archive" },
+        { flags: "\\HasNoChildren", path: "Sent" },
+        { flags: "\\HasNoChildren", path: "Trash" },
+        { flags: "\\HasNoChildren", path: "Spam" },
+        { flags: "\\HasNoChildren", path: "Projects/Acme/Sent" },
+      ],
+    });
+    const listed = await client.list();
+    client.close();
+
+    expect(selectImapMailboxPath("archive", listed)).toBe("Archive");
+    expect(selectImapMailboxPath("sent", listed)).toBe("Sent");
+    expect(selectImapMailboxPath("trash", listed)).toBe("Trash");
+    expect(selectImapMailboxPath("junk", listed)).toBe("Spam");
+  });
+
+  it("does not read a Sent folder three levels down, two that answer to the name, or another user's", async () => {
+    for (const { capability, folders } of [
+      {
+        capability: "IMAP4rev1",
+        folders: [
+          { flags: "\\HasNoChildren", path: "Sent Mail" },
+          { flags: "\\HasNoChildren", path: "Projects/Clients/Sent" },
+        ],
+      },
+      {
+        capability: "IMAP4rev1",
+        folders: [
+          { flags: "\\HasNoChildren", path: "Sent Items" },
+          { flags: "\\HasNoChildren", path: "Sent" },
+        ],
+      },
+      {
+        capability: "IMAP4rev1 SPECIAL-USE",
+        folders: [{ flags: "\\HasNoChildren", path: "Shared/boss/Gesendete Elemente" }],
+      },
+    ]) {
+      const { adapter, commands } = await sentScanAdapter({ capability, folders });
+
+      await expect(
+        adapter.scanSentEnvelopes({ cursor: null }, new AbortController().signal),
+      ).resolves.toEqual({ status: "unavailable", reason: "no_sent_mailbox" });
+      expect(commandNames(commands)).not.toContain("EXAMINE");
+    }
+  });
+});
+
+interface FakeImapFolder {
+  readonly flags: string;
+  readonly path: string;
+}
+
+interface FakeImapOptions {
+  readonly capability: string;
+  readonly folders: readonly FakeImapFolder[];
+  readonly exists?: number;
+  readonly uidNext?: number;
+  readonly uidValidity?: number;
+  /** The untagged lines a FETCH or UID FETCH answers with. */
+  readonly fetch?: (line: string) => string;
+}
+
+const imapAddress = (name: string, local: string, domain: string) =>
+  `("${name}" NIL "${local}" "${domain}")`;
+
+/** An ENVELOPE: date, subject, from, sender, reply-to, to, cc, bcc, in-reply-to, message-id. */
+function imapEnvelope(fields: {
+  readonly from: string;
+  readonly sender?: string;
+  readonly to: string;
+  readonly cc?: string;
+  readonly bcc?: string;
+}): string {
+  const from = `(${fields.from})`;
+  const sender = fields.sender === undefined ? from : `(${fields.sender})`;
+  return `("Mon, 01 Jan 2024 10:00:00 +0000" "Subject" ${from} ${sender} ${from} (${fields.to}) ${
+    fields.cc === undefined ? "NIL" : `(${fields.cc})`
+  } ${fields.bcc === undefined ? "NIL" : `(${fields.bcc})`} NIL "<id@example.test>")`;
+}
+
+function serveSentImap(socket: TLSSocket, commands: string[], options: FakeImapOptions): void {
   socket.once("error", () => undefined);
   socket.write("* OK fake IMAP ready\r\n");
-  const person = '("Person" NIL "person" "example.test")';
-  const envelope = (from: string, to: string, cc: string, bcc: string, id: string) =>
-    `("Mon, 01 Jan 2024 10:00:00 +0000" "Subject" (${from}) (${from}) (${from}) ${to} ${cc} ${bcc} NIL "<${id}@example.test>")`;
   attachLineReader(socket, commands, (tag, command) => {
+    const line = commands.at(-1) ?? "";
     if (command === "CAPABILITY") {
-      socket.write(
-        `* CAPABILITY IMAP4rev1 SPECIAL-USE\r\n${tag} OK CAPABILITY completed\r\n`,
-      );
+      socket.write(`* CAPABILITY ${options.capability}\r\n${tag} OK CAPABILITY completed\r\n`);
       return;
     }
     if (command === "LOGIN") {
@@ -211,13 +351,18 @@ function serveSentImap(socket: TLSSocket, commands: string[]): void {
       return;
     }
     if (command === "LIST" || command === "LSUB") {
-      const line = commands.at(-1) ?? "";
-      const entries = line.includes("*")
-        ? `* ${command} (\\HasNoChildren) "/" INBOX\r\n` +
-          `* ${command} (\\HasNoChildren \\Sent) "/" Outgoing\r\n`
-        : line.includes("Outgoing")
-          ? `* ${command} (\\HasNoChildren \\Sent) "/" Outgoing\r\n`
+      let entries: string;
+      if (line.includes("*")) {
+        entries = `* ${command} (\\HasNoChildren) "/" INBOX\r\n`;
+        for (const folder of options.folders) {
+          entries += `* ${command} (${folder.flags}) "/" "${folder.path}"\r\n`;
+        }
+      } else {
+        const hit = options.folders.find((folder) => line.includes(folder.path));
+        entries = hit
+          ? `* ${command} (${hit.flags}) "/" "${hit.path}"\r\n`
           : `* ${command} (\\Noselect) "/" ""\r\n`;
+      }
       socket.write(`${entries}${tag} OK ${command} completed\r\n`);
       return;
     }
@@ -225,35 +370,59 @@ function serveSentImap(socket: TLSSocket, commands: string[]): void {
       socket.write(
         "* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)\r\n" +
           "* OK [PERMANENTFLAGS ()] No permanent flags permitted\r\n" +
-          "* 2 EXISTS\r\n" +
-          "* OK [UIDVALIDITY 77] UIDs valid\r\n" +
-          "* OK [UIDNEXT 13] Predicted next UID\r\n" +
+          `* ${options.exists ?? 0} EXISTS\r\n` +
+          `* OK [UIDVALIDITY ${options.uidValidity ?? 77}] UIDs valid\r\n` +
+          `* OK [UIDNEXT ${options.uidNext ?? 1}] Predicted next UID\r\n` +
           `${tag} OK [READ-ONLY] EXAMINE completed\r\n`,
       );
       return;
     }
-    if (command === "FETCH") {
-      socket.write(
-        `* 1 FETCH (UID 11 ENVELOPE ${envelope(
-          person,
-          '(("Lena" NIL "lena" "example.org"))',
-          '(("Boss" NIL "boss" "example.org"))',
-          '(("Hidden" NIL "hidden" "example.org"))',
-          "sent-11",
-        )})\r\n` +
-          `* 2 FETCH (UID 12 ENVELOPE ${envelope(
-            '("Person" NIL "alias" "example.test")',
-            '(("Team" NIL "team" "example.org") ("Lena" NIL "LENA" "Example.org"))',
-            "NIL",
-            "NIL",
-            "sent-12",
-          )})\r\n` +
-          `${tag} OK FETCH completed\r\n`,
-      );
+    if (command === "FETCH" || (command === "UID" && / UID FETCH /i.test(line))) {
+      socket.write(`${options.fetch?.(line) ?? ""}${tag} OK FETCH completed\r\n`);
       return;
     }
     socket.write(`${tag} BAD unsupported test command\r\n`);
   });
+}
+
+/** An ImapMailSyncAdapter over real ImapFlow sessions to a fake server. */
+async function sentScanAdapter(options: FakeImapOptions) {
+  const commands: string[] = [];
+  const server = createTlsServer(testTls, (socket) => {
+    serveSentImap(socket, commands, options);
+  });
+  const port = await listen(server);
+  const account = imapAccountFor(port);
+  const adapter = new ImapMailSyncAdapter(
+    account,
+    new ImapFlowReadSessionFactory({
+      dns: { resolve: async () => [targetFor(port, "implicit")] },
+      store: storeFor(account),
+      createClient: (clientOptions: ImapFlowOptions) =>
+        new ImapFlow({ ...clientOptions, tls: { ...clientOptions.tls, ca: testTls.cert } }),
+    }),
+  );
+  return { adapter, commands };
+}
+
+/** A bare ImapFlow client, logged in to the same fake server. */
+async function connectedImapFlow(options: FakeImapOptions) {
+  const commands: string[] = [];
+  const server = createTlsServer(testTls, (socket) => {
+    serveSentImap(socket, commands, options);
+  });
+  const port = await listen(server);
+  const client = new ImapFlow({
+    host: "127.0.0.1",
+    port,
+    secure: true,
+    auth: { user: "person@example.test", pass: "test-only-password" },
+    tls: { ca: testTls.cert, servername: "localhost" },
+    logger: false,
+  });
+  client.on("error", () => undefined);
+  await client.connect();
+  return { client, commands };
 }
 
 function serveIdleImap(socket: TLSSocket, commands: string[]): void {

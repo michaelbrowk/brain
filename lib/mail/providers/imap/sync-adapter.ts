@@ -1995,7 +1995,12 @@ function mapImapProviderError(error: unknown): MailProviderSyncError {
  * Which server folder plays a role — outside Gmail there is no INBOX label to
  * drop, so archive, trash and junk are ordinary mailboxes that first have to be
  * found. A server states the answer through SPECIAL-USE (RFC 6154) or the older
- * XLIST attribute, and ImapFlow surfaces both as `specialUse`. A server that
+ * XLIST attribute, which arrives among the entry's own `flags`. ImapFlow's
+ * `specialUse` beside them is not that statement and is never read here: where
+ * no folder carries the flag it is a guess from the folder's leaf name, some
+ * ninety localized names at any depth, the first that matches, and it once
+ * made `Projects/Acme/Archive` the destination of the owner's archive and
+ * would have had another user's shared `Sent` read as his own. A server that
  * states nothing is matched against a short list of well-known names, at the
  * account root or directly under the Inbox and only when exactly one folder
  * answers, and a server that matches neither has no mailbox for that role:
@@ -2023,8 +2028,11 @@ export interface ImapMailboxDescriptor {
   /** Leaf name as listed. Derived from `path` and `delimiter` when absent. */
   readonly name?: string;
   readonly delimiter?: string;
-  /** One SPECIAL-USE or XLIST attribute, e.g. `\Archive`. */
-  readonly specialUse?: string;
+  /**
+   * The attributes the server listed for the mailbox: `\Noselect` and its
+   * kind, and a SPECIAL-USE or XLIST attribute such as `\Archive` when the
+   * server states one.
+   */
   readonly flags?: Iterable<string>;
 }
 
@@ -2139,9 +2147,7 @@ export function selectImapMailboxPath(
   const candidates = mailboxes.filter(isSelectableMailbox);
   for (const tier of ROLE_TIERS[role]) {
     if (tier.kind === "special_use") {
-      const match = candidates.find(
-        (entry) => normalizedAttribute(entry.specialUse) === tier.attribute.toLowerCase(),
-      );
+      const match = candidates.find((entry) => statesAttribute(entry, tier.attribute));
       if (match) return match.path;
       continue;
     }
@@ -2213,7 +2219,7 @@ export function archiveCreatePath(mailboxes: readonly ImapMailboxDescriptor[]): 
   const anchors = mailboxes.filter(
     (entry) =>
       isSelectableMailbox(entry) &&
-      (NAMESPACE_ANCHOR_ATTRIBUTES.includes(normalizedAttribute(entry.specialUse) ?? "") ||
+      (NAMESPACE_ANCHOR_ATTRIBUTES.some((attribute) => statesAttribute(entry, attribute)) ||
         (isRoleMountPoint(entry) &&
           NAMESPACE_ANCHOR_NAMES.includes(leafName(entry).toLowerCase()))),
   );
@@ -2323,8 +2329,18 @@ function isSelectableMailbox(entry: ImapMailboxDescriptor): boolean {
   );
 }
 
-function normalizedAttribute(value: string | undefined): string | null {
-  return typeof value === "string" && value.length > 0 ? value.toLowerCase() : null;
+/**
+ * Whether the server itself listed this attribute for the mailbox. Only the
+ * entry's flags are read: they are what LIST or XLIST answered, in whatever
+ * letter case the server wrote them.
+ */
+function statesAttribute(entry: ImapMailboxDescriptor, attribute: string): boolean {
+  if (entry.flags === undefined) return false;
+  const wanted = attribute.toLowerCase();
+  for (const flag of entry.flags) {
+    if (typeof flag === "string" && flag.toLowerCase() === wanted) return true;
+  }
+  return false;
 }
 
 function leafName(entry: ImapMailboxDescriptor): string {

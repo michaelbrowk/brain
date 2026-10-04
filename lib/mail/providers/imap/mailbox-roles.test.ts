@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  archiveCreatePath,
   isInboxPath,
   isSupportedMailboxList,
   MAX_LISTED_MAILBOXES,
@@ -11,7 +12,7 @@ describe("IMAP mailbox role discovery", () => {
   it("prefers the stated SPECIAL-USE attribute over any name", () => {
     const mailboxes = [
       { path: "Archive", name: "Archive", delimiter: "/" },
-      { path: "Stuff/Old", name: "Old", delimiter: "/", specialUse: "\\Archive" },
+      { path: "Stuff/Old", name: "Old", delimiter: "/", flags: new Set(["\\Archive"]) },
     ];
 
     expect(selectImapMailboxPath("archive", mailboxes)).toBe("Stuff/Old");
@@ -19,8 +20,8 @@ describe("IMAP mailbox role discovery", () => {
 
   it("reads XLIST-style attributes for trash and junk", () => {
     const mailboxes = [
-      { path: "INBOX.Bin", name: "Bin", delimiter: ".", specialUse: "\\Trash" },
-      { path: "INBOX.Nonsense", name: "Nonsense", delimiter: ".", specialUse: "\\Junk" },
+      { path: "INBOX.Bin", name: "Bin", delimiter: ".", flags: new Set(["\\Trash"]) },
+      { path: "INBOX.Nonsense", name: "Nonsense", delimiter: ".", flags: new Set(["\\Junk"]) },
     ];
 
     expect(selectImapMailboxPath("trash", mailboxes)).toBe("INBOX.Bin");
@@ -111,14 +112,14 @@ describe("IMAP mailbox role discovery", () => {
     expect(
       selectImapMailboxPath("archive", [
         { path: "Архив", name: "Архив", delimiter: "|" },
-        { path: "Saved", name: "Saved", delimiter: "|", specialUse: "\\Archive" },
+        { path: "Saved", name: "Saved", delimiter: "|", flags: new Set(["\\Archive"]) },
       ]),
     ).toBe("Saved");
   });
 
   it("ranks a named Archive above an all-mail view", () => {
     const mailboxes = [
-      { path: "All Mail", name: "All Mail", delimiter: "/", specialUse: "\\All" },
+      { path: "All Mail", name: "All Mail", delimiter: "/", flags: new Set(["\\All"]) },
       { path: "Archive", name: "Archive", delimiter: "/" },
     ];
 
@@ -127,7 +128,7 @@ describe("IMAP mailbox role discovery", () => {
 
   it("accepts an all-mail view when the server offers no archive at all", () => {
     const mailboxes = [
-      { path: "[Gmail]/All Mail", name: "All Mail", delimiter: "/", specialUse: "\\All" },
+      { path: "[Gmail]/All Mail", name: "All Mail", delimiter: "/", flags: new Set(["\\All"]) },
     ];
 
     expect(selectImapMailboxPath("archive", mailboxes)).toBe("[Gmail]/All Mail");
@@ -147,7 +148,7 @@ describe("IMAP mailbox role discovery", () => {
   it("never treats the Inbox itself as a destination", () => {
     expect(
       selectImapMailboxPath("archive", [
-        { path: "INBOX", name: "INBOX", specialUse: "\\Archive" },
+        { path: "INBOX", name: "INBOX", flags: new Set(["\\Archive"]) },
       ]),
     ).toBeNull();
     expect(isInboxPath("inbox")).toBe(true);
@@ -181,9 +182,102 @@ describe("IMAP mailbox role discovery", () => {
     expect(
       selectImapMailboxPath("sent", [
         { path: "Sent", name: "Sent", delimiter: "/" },
-        { path: "Outgoing", name: "Outgoing", delimiter: "/", specialUse: "\\Sent" },
+        { path: "Outgoing", name: "Outgoing", delimiter: "/", flags: new Set(["\\Sent"]) },
       ]),
     ).toBe("Outgoing");
+  });
+
+  /*
+    ImapFlow's LIST answers each entry with a `specialUse` of its own, and
+    where no folder carries the flag it guesses one from the leaf name: some
+    ninety localized names, at any depth, the first that matches. That guess
+    used to be read as the server's word, so a `Projects/Acme/Archive` became
+    the archive and a `Projects/Clients/Sent` was read as the owner's sent
+    mail. Only an attribute in the entry's own flags is the server's.
+  */
+  it("takes a role from the server's own attribute and never from a specialUse somebody guessed", () => {
+    const guessed = [
+      {
+        path: "Projects/Acme/Archive",
+        name: "Archive",
+        delimiter: "/",
+        flags: new Set(["\\HasNoChildren"]),
+        specialUse: "\\Archive",
+        specialUseSource: "name",
+      },
+      {
+        path: "Projects/Acme/Sent",
+        name: "Sent",
+        delimiter: "/",
+        flags: new Set(["\\HasNoChildren"]),
+        specialUse: "\\Sent",
+        specialUseSource: "name",
+      },
+      {
+        path: "Projects/Acme/Trash",
+        name: "Trash",
+        delimiter: "/",
+        flags: new Set(["\\HasNoChildren"]),
+        specialUse: "\\Trash",
+        specialUseSource: "name",
+      },
+      {
+        path: "Shared/boss/Junk",
+        name: "Junk",
+        delimiter: "/",
+        flags: new Set<string>(),
+        specialUse: "\\Junk",
+        specialUseSource: "name",
+      },
+    ];
+
+    for (const role of ["archive", "sent", "trash", "junk"] as const) {
+      expect(selectImapMailboxPath(role, guessed)).toBeNull();
+    }
+    // The same names where a mail client puts them still answer, by name.
+    expect(
+      selectImapMailboxPath("trash", [
+        ...guessed,
+        { path: "Trash", name: "Trash", delimiter: "/", flags: new Set<string>() },
+      ]),
+    ).toBe("Trash");
+  });
+
+  it("reads the stated attribute whatever its letter case, among the folder's other flags", () => {
+    expect(
+      selectImapMailboxPath("sent", [
+        {
+          path: "Outgoing",
+          name: "Outgoing",
+          delimiter: "/",
+          flags: new Set(["\\HasNoChildren", "\\SENT"]),
+        },
+      ]),
+    ).toBe("Outgoing");
+  });
+
+  it("anchors a created Archive on stated attributes only", () => {
+    // A guessed \Trash three levels down says nothing about where this
+    // server keeps its role folders; a stated one under the Inbox does.
+    expect(
+      archiveCreatePath([
+        {
+          path: "INBOX.Bin",
+          delimiter: ".",
+          flags: new Set(["\\Trash"]),
+        },
+      ]),
+    ).toBe("INBOX.Archive");
+    expect(
+      archiveCreatePath([
+        {
+          path: "INBOX.Bin",
+          delimiter: ".",
+          flags: new Set<string>(),
+          specialUse: "\\Trash",
+        } as { path: string },
+      ]),
+    ).toBe("Archive");
   });
 
   it("finds the Sent mailbox under the name a localized server gives it", () => {

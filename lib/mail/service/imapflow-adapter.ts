@@ -104,7 +104,9 @@ export interface ImapReadClient {
  * The commands a session may issue once the caller takes a writable mailbox
  * lock. ImapFlow issues `UID STORE` for flags and `UID MOVE` (RFC 6851) for a
  * relocation. Mailbox roles are discovered through LIST, which carries the
- * SPECIAL-USE and XLIST attributes as `specialUse`.
+ * SPECIAL-USE and XLIST attributes among each entry's `flags`. The entry's
+ * `specialUse` is ImapFlow's own reading, a guess from the folder's name
+ * where no flag is listed, and no caller may take a role from it.
  */
 export interface ImapMutationCommands {
   /**

@@ -1030,33 +1030,18 @@ for (const scheme of ["light", "dark"] as const) {
   });
 }
 
-// What the pill does over a run that takes minutes, in two frames.
+// The pill over a big section, at the press.
 //
-// Forty threads under Done is forty sequential requests, and the pill is the
-// only thing on screen that knows they are happening. It carries no window
-// while they go out, so the icon slot holds its glyph and nothing else — a
-// ring is a promise of a deadline and there is no deadline yet. When the last
-// request lands the same sentence is said again with the plain ten seconds,
-// and the ring appearing is the finish line. These are the two frames that
-// say whether a pill with no ring reads as standing rather than as stuck.
+// Forty threads under Done used to be a pill with no ring for as long as its
+// forty requests took, and these frames judged whether that read as standing
+// or as stuck. It read as stuck. The requests wait behind the window now, so
+// the frame is the one a reader meets: the ring around the icon from the
+// press, a second of its nine already drained, and the Undo beside it.
 for (const scheme of ["light", "dark"] as const) {
-  test(`capture the Done pill over a long run — ${scheme}`, async ({ page }) => {
-    test.setTimeout(180_000);
+  test(`capture the Done pill over a big section — ${scheme}`, async ({ page }) => {
+    test.setTimeout(120_000);
     await page.setViewportSize({ width: 1440, height: 900 });
     await installUnifiedRoutes(page, SEEN_PILE_THREADS);
-    // Slow every mutation to what one really costs on a custom-domain account:
-    // its own connect, authenticate and logout, with no pool behind it.
-    let patched = 0;
-    await page.route(/\/api\/mail\/threads\/(thread-[us]\d+)(?:\?.*)?$/, async (route) => {
-      if (route.request().method() !== "PATCH") return route.fallback();
-      const threadId = /threads\/(thread-[us]\d+)/.exec(route.request().url())?.[1];
-      const target = SEEN_PILE_THREADS.find(
-        (candidate) => candidate.threadId === threadId,
-      );
-      await new Promise((resolve) => setTimeout(resolve, 400));
-      patched += 1;
-      return fulfill(route, { apiVersion: 1, thread: target });
-    });
     await login(page);
     await setScheme(page, scheme);
 
@@ -1068,20 +1053,13 @@ for (const scheme of ["light", "dark"] as const) {
       .click();
 
     const report = page.locator('[aria-live="polite"] .brain-toast');
-    const ring = report.locator("[data-toast-ring]");
     await expect(report).toContainText("Seen cleared");
-    // Off the pill, so the frame is the pill at rest rather than under a hover.
+    await expect(report.locator("[data-toast-ring]")).toHaveCount(1);
+    // Off the pill, so the frame is the pill at rest rather than under a hover,
+    // and its ring is draining rather than held.
     await page.mouse.move(1_100, 200);
-
-    // Mid-run: eighty per cent of the work still queued and no ring drawn.
-    await expect.poll(() => patched, { timeout: 60_000 }).toBeGreaterThan(6);
-    await expect(ring).toHaveCount(0);
-    await shootPill(page, `unified-done-running-${scheme}`);
-
-    // Settled: the ring is there and a second of it has drained.
-    await expect(ring).toHaveCount(1, { timeout: 60_000 });
     await page.waitForTimeout(1_200);
-    await shootPill(page, `unified-done-settled-${scheme}`);
+    await shootPill(page, `unified-done-window-${scheme}`);
   });
 }
 

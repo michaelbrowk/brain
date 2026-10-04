@@ -1352,9 +1352,11 @@ test("@mobile pathological HTML height stays inside a bounded reader", async ({
   await assertNoHorizontalOverflow(page);
 });
 
-test("Mail unified inbox sections two accounts, and Done clears People with an undo", async ({
+test("Mail unified inbox sections two accounts, and Done clears People behind an Undo that sends nothing", async ({
   page,
 }) => {
+  // Two real nine-second windows are waited out below.
+  test.setTimeout(60_000);
   await login(page);
   const secondAccount = {
     ...account,
@@ -1441,12 +1443,44 @@ test("Mail unified inbox sections two accounts, and Done clears People with an u
   await expect(list.getByText(account.emailAddress)).toBeVisible();
   await expect(list.getByText(secondAccount.emailAddress)).toBeVisible();
 
-  // Done takes the whole section out of the inbox: archive first, then the
-  // read flag that archiving does not set on its own.
+  // Done takes the whole section out of the column at the press, and the way
+  // back is in the same breath: the pill with its Undo, and the ring already
+  // counting the nine seconds every other Undo in Brain has.
   await page
     .getByRole("button", { name: "Done — archive all 2 in People" })
     .click();
-  await expect.poll(() => patched.length).toBe(4);
+  await expect(list.locator('section[aria-label="People"]')).toHaveCount(0);
+  const pill = page.locator('[aria-live="polite"] .brain-toast');
+  await expect(pill).toContainText("People cleared");
+  await expect(pill).toContainText("2 threads out of your inbox");
+  const ring = pill.locator("[data-toast-ring]");
+  await expect(ring).toHaveCount(1);
+  expect(
+    await ring
+      .locator("circle")
+      .nth(1)
+      .evaluate((node) => getComputedStyle(node).animationDuration),
+  ).toBe("9s");
+
+  // Undo inside the window: the rows are back where they stood, and nothing
+  // was sent, then or once the window would have closed.
+  await pill.getByRole("button", { name: "Undo" }).click();
+  await expect(list.getByText("Unified from A", { exact: true })).toBeVisible();
+  await expect(list.getByText("Unified from B", { exact: true })).toBeVisible();
+  await expect(pill).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Done — archive all 2 in People" }),
+  ).toBeVisible();
+  await page.waitForTimeout(10_000);
+  expect(patched).toEqual([]);
+
+  // Pressed again and left alone, the archives go out once the window is
+  // spent: archive first, then the read flag archiving does not set.
+  await page
+    .getByRole("button", { name: "Done — archive all 2 in People" })
+    .click();
+  await expect(pill).toContainText("People cleared");
+  await expect.poll(() => patched.length, { timeout: 15_000 }).toBe(4);
   for (const [url, accountId] of [
     ["/api/mail/threads/unified-a", account.accountId],
     ["/api/mail/threads/unified-b", secondAccount.accountId],
@@ -1455,22 +1489,7 @@ test("Mail unified inbox sections two accounts, and Done clears People with an u
     expect(patched).toContainEqual({ url, body: { accountId, read: true } });
   }
   await expect(list.locator('section[aria-label="People"]')).toHaveCount(0);
-
-  // And the way back is in the same breath: Undo un-archives exactly what
-  // moved and restores the unread flags Done set.
-  const undo = page.getByRole("button", { name: "Undo" });
-  await expect(undo).toBeVisible();
-  await undo.click();
-  await expect.poll(() => patched.length).toBe(8);
-  for (const [url, accountId] of [
-    ["/api/mail/threads/unified-a", account.accountId],
-    ["/api/mail/threads/unified-b", secondAccount.accountId],
-  ] as const) {
-    expect(patched).toContainEqual({ url, body: { accountId, archive: false } });
-    expect(patched).toContainEqual({ url, body: { accountId, read: false } });
-  }
-  await expect(list.getByText("Unified from A", { exact: true })).toBeVisible();
-  await expect(list.getByText("Unified from B", { exact: true })).toBeVisible();
+  await expect(pill).toHaveCount(0);
 });
 
 /**
@@ -1478,7 +1497,7 @@ test("Mail unified inbox sections two accounts, and Done clears People with an u
  * Done makes. Three things were wrong at the same coordinates: the refusal was
  * placed by hand 60px over a pill measured as one line, this PR's own mixed
  * account made that pill's subtitle wrap to two, and both sat on top of the
- * mobile tab bar's middle slots for the whole ten seconds of the undo.
+ * mobile tab bar's middle slots for the whole of the undo's window.
  */
 test("@release @mobile the undo and the refusal stack clear of the tab bar at 390", async ({
   page,
@@ -1513,19 +1532,22 @@ test("@release @mobile the undo and the refusal stack clear of the tab bar at 39
       lastMessageAt: 1_700_000_000_500 - i,
     })),
   ];
-  // A second section, so the press that raises the refusal is a real one.
-  const notification = {
+  // A first letter from a stranger, waiting under New senders. Done no longer
+  // refuses anything (a second Done takes the pill instead), so the refusal
+  // this test stacks over the undo is a real one from the next row down: an
+  // Accept the service does not take.
+  const stranger = { name: "Lena Okafor", address: "lena@okafor.example" } as const;
+  const waiting = {
     ...thread,
-    threadId: "stack-note",
-    subject: "Release 2026.8.4 is live",
-    category: "notification",
-    lastMessageAt: 1_700_000_000_100,
+    threadId: "stack-new",
+    subject: "Flat in Lisbon",
+    participants: [stranger],
+    category: "people",
+    newSender: true,
+    newSenderFrom: stranger,
+    lastMessageAt: 1_700_000_002_000,
   } as const;
   let patched = 0;
-  let releaseArchive: () => void = () => {};
-  const archiveGate = new Promise<void>((resolve) => {
-    releaseArchive = resolve;
-  });
   const fulfill = (route: Route, body: unknown) =>
     route.fulfill({
       status: 200,
@@ -1537,13 +1559,10 @@ test("@release @mobile the undo and the refusal stack clear of the tab bar at 39
   );
   await page.route(/\/api\/mail\/threads\/stack-[a-z0-9]+(?:\?.*)?$/, async (route) => {
     const threadId = new URL(route.request().url()).pathname.split("/").at(-1);
-    const target = [...people, notification].find(
+    const target = [...people, waiting].find(
       (candidate) => candidate.threadId === threadId,
     );
     if (route.request().method() === "PATCH") {
-      // The loop stays live while both pills are measured — a second Done
-      // inside a run is exactly the refusal this test needs.
-      await archiveGate;
       patched += 1;
       return fulfill(route, {
         apiVersion: 1,
@@ -1558,12 +1577,19 @@ test("@release @mobile the undo and the refusal stack clear of the tab bar at 39
       apiVersion: 1,
       items:
         url.searchParams.get("accountId") === account.accountId
-          ? [...people.filter((t) => t.accountId === account.accountId), notification]
+          ? [waiting, ...people.filter((t) => t.accountId === account.accountId)]
           : people.filter((t) => t.accountId === held.accountId),
       nextCursor: null,
       sync: { status: "idle", lastSuccessfulAt: 1_700_000_000_000 },
     });
   });
+  await page.route("**/api/mail/senders/decisions", (route) =>
+    route.fulfill({
+      status: 500,
+      contentType: "application/json; charset=utf-8",
+      body: JSON.stringify({ apiVersion: 1, error: { code: "mail_unavailable" } }),
+    }),
+  );
   await page.route("**/api/mail/sync", (route) =>
     fulfill(route, {
       apiVersion: 1,
@@ -1586,16 +1612,16 @@ test("@release @mobile the undo and the refusal stack clear of the tab bar at 39
   await expect(report).toContainText(
     "11 threads out of your inbox, 3 can’t leave",
   );
+  await expect(report.locator("[data-toast-ring]")).toHaveCount(1);
 
-  // A second Done while the loop holds the lock: the refusal answers at once,
-  // on its own pill, and the undo keeps standing under it.
-  await page
-    .getByRole("button", { name: "Done — archive all 1 in Notifications" })
-    .click();
+  // An Accept the service refuses, inside Done's window: the refusal answers
+  // at once, on its own pill, and the undo keeps standing under it.
+  await page.getByRole("button", { name: "Accept Lena Okafor" }).click();
   const refusal = page.locator('[aria-live="assertive"] .brain-toast');
-  await expect(refusal).toContainText("Finish the current mail action first");
+  await expect(refusal).toContainText("Couldn’t accept Lena Okafor. Try again.");
   // both springs settled — a pill measured mid-slide is measured in flight
   await page.waitForTimeout(700);
+  expect(patched).toBe(0);
 
   const geometry = await page.evaluate(() => {
     const box = (selector: string) => {
@@ -1675,36 +1701,37 @@ test("@release @mobile the undo and the refusal stack clear of the tab bar at 39
   expect(geometry.undoPressable).toBe(true);
   await assertNoHorizontalOverflow(page);
 
-  // The eleven leave, the three that cannot stay in the column — and with
-  // nothing left for Done to move, the section stops drawing it.
-  releaseArchive();
-  await expect.poll(() => patched).toBe(22);
+  // The eleven left at the press, the three that cannot stay in the column —
+  // and with nothing left for Done to move, the section stops drawing it.
   await expect(list.getByText("Held thread 0", { exact: true })).toBeVisible();
   await expect(list.getByText("Gmail thread 0", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /in People$/ })).toHaveCount(0);
+  // The window closes, and only then do the eleven go out, two requests each.
+  await expect.poll(() => patched, { timeout: 25_000 }).toBe(22);
+  await expect(list.getByText("Held thread 0", { exact: true })).toBeVisible();
+  await expect(list.getByText("Gmail thread 0", { exact: true })).toHaveCount(0);
 });
 
 /**
- * The pill's lifetime is the RUN's, and the ring counts only the window that
- * follows it.
+ * The owner's report, with a screenshot: "Newsletters cleared · 15 threads
+ * out of your inbox · Undo" stood for half a minute with no ring, and every
+ * other mail action answered "Finish the current mail action first" until it
+ * went. The run sent from the press, under the mail lock, and the pill had no
+ * window until the last request landed.
  *
- * Forty threads under Done is the press this fixes. The window used to be
- * predicted from the count — ten seconds plus six a thread — so this press
- * armed 250 seconds, the ring crawled a pixel a second, and a countdown that
- * does not visibly count reads as a pill that has hung. Nothing is predicted
- * now: no window and no ring while the loop is sending, then the plain ten
- * seconds measured from the last request. The drain is read off the ring
- * itself, because that number is the whole claim — under the old arithmetic
- * it would read 250s.
+ * The ring starts at the press now and drains the nine seconds every other
+ * Undo in Brain has, read off the ring itself. Nothing is sent inside that
+ * window. When it closes the archives go out in the background, and another
+ * letter is opened, read and archived while they do, with no refusal.
  */
-test("@release the undo pill stands through a long Done and counts only from the end", async ({
+test("@release Done counts its window from the press, and its archives go out behind another mail action", async ({
   page,
 }) => {
   test.setTimeout(90_000);
   await login(page);
-  // Read mail: forty threads in Seen, one archive apiece. Enough that the old
-  // arithmetic would have armed minutes.
-  const seen = Array.from({ length: 40 }, (_value, index) => ({
+  // Read mail: sixteen threads in Seen, one archive apiece, and one unread
+  // letter in People to act on while they go.
+  const seen = Array.from({ length: 16 }, (_value, index) => ({
     ...thread,
     threadId: `seen-${index}`,
     subject: `Seen thread ${index}`,
@@ -1712,7 +1739,17 @@ test("@release the undo pill stands through a long Done and counts only from the
     unread: false,
     lastMessageAt: 1_700_000_000_000 - index,
   }));
+  const person = {
+    ...thread,
+    threadId: "seen-person",
+    subject: "Still in People",
+    category: "people",
+    unread: true,
+    lastMessageAt: 1_700_000_001_000,
+  } as const;
+  const all = [...seen, person];
   let patched = 0;
+  const personPatches: unknown[] = [];
   const fulfill = (route: Route, body: unknown) =>
     route.fulfill({
       status: 200,
@@ -1722,22 +1759,26 @@ test("@release the undo pill stands through a long Done and counts only from the
   await page.route("**/api/mail/accounts/capabilities", (route) =>
     fulfill(route, { apiVersion: 3, accounts: [account, secondAccount] }),
   );
-  await page.route(/\/api\/mail\/threads\/seen-\d+(?:\?.*)?$/, async (route) => {
+  await page.route(/\/api\/mail\/threads\/seen-[a-z0-9]+(?:\?.*)?$/, async (route) => {
     const threadId = new URL(route.request().url()).pathname.split("/").at(-1);
-    const target = seen.find((candidate) => candidate.threadId === threadId);
-    if (route.request().method() === "PATCH") {
-      // A real mutation is a round trip, and on a custom-domain account its
-      // own connect and authenticate. Forty of them in sequence is the run.
-      await new Promise((resolve) => setTimeout(resolve, 120));
-      patched += 1;
-      return fulfill(route, { apiVersion: 1, thread: target });
+    const target = all.find((candidate) => candidate.threadId === threadId);
+    if (route.request().method() !== "PATCH") {
+      return fulfill(route, { apiVersion: 1, thread: target, messages: [] });
     }
-    return fulfill(route, { apiVersion: 1, thread: target, messages: [] });
+    if (threadId === person.threadId) {
+      personPatches.push(route.request().postDataJSON());
+      return fulfill(route, { apiVersion: 1, thread: { ...target, unread: false } });
+    }
+    // A real mutation is a round trip, and on a custom-domain account its
+    // own connect and authenticate. Sixteen of them in sequence is the run.
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    patched += 1;
+    return fulfill(route, { apiVersion: 1, thread: target });
   });
   await page.route(/\/api\/mail\/threads\?.*$/, (route) =>
     fulfill(route, {
       apiVersion: 1,
-      items: forAccount(route, seen),
+      items: forAccount(route, all),
       nextCursor: null,
       sync: { status: "idle", lastSuccessfulAt: 1_700_000_000_000 },
     }),
@@ -1754,64 +1795,62 @@ test("@release the undo pill stands through a long Done and counts only from the
 
   const list = page.locator('[aria-label="All inboxes threads"]');
   await expect(list.locator('section[aria-label="Seen"]')).toBeVisible();
-  await page.getByRole("button", { name: "Done — archive all 40 in Seen" }).click();
+  await page.getByRole("button", { name: "Done — archive all 16 in Seen" }).click();
 
   const report = page.locator('[aria-live="polite"] .brain-toast');
+  const refusal = page.locator('[aria-live="assertive"] .brain-toast');
   const ring = report.locator("[data-toast-ring]");
-  const undo = report.getByRole("button", { name: "Undo" });
+  await expect(list.locator('section[aria-label="Seen"]')).toHaveCount(0);
   await expect(report).toContainText("Seen cleared");
-  await expect(report).toContainText("40 threads out of your inbox");
-  // The press names no deadline, so the icon slot holds its glyph and nothing
-  // else. A ring here would be counting down a window that does not exist.
-  await expect(ring).toHaveCount(0);
-
-  // Mid-run: the loop is still going out and the pill has not moved. Under the
-  // old arithmetic a ring would be crawling through 250 seconds here.
-  await expect.poll(() => patched, { timeout: 30_000 }).toBeGreaterThan(4);
-  expect(patched).toBeLessThan(40);
-  await expect(ring).toHaveCount(0);
-  await expect(undo).toBeVisible();
-
-  // The last request lands. Only now is there a deadline: the ring appears and
-  // drains the plain ten seconds, and the pill goes when they are spent.
-  await expect.poll(() => patched, { timeout: 30_000 }).toBe(40);
+  await expect(report).toContainText("16 threads out of your inbox");
+  // The ring is there with the pill, around the icon on its left, and the
+  // Undo is the plain pill on its right.
   await expect(ring).toHaveCount(1);
-  await expect(report).toContainText("40 threads out of your inbox");
+  await expect(report.getByRole("button", { name: "Undo" })).toBeVisible();
   const drain = await ring
     .locator("circle")
     .nth(1)
     .evaluate((node) => getComputedStyle(node).animationDuration);
-  expect(drain).toBe("10s");
+  expect(drain).toBe("9s");
 
-  // Undo, on the same slow account: forty un-archives is another five
-  // seconds of requests. The rows come back at once, and a pill says the
-  // way back is still going out — no window, no ring, no button — under the
-  // id the press-time pill wore. It used to be silence until the report.
-  await undo.click();
-  await page.waitForTimeout(600);
-  await expect(report).toContainText("Putting back…");
-  await expect(report).toContainText("40 threads on the way back");
-  await expect(ring).toHaveCount(0);
-  await expect(report.getByRole("button")).toHaveCount(0);
-  expect(patched).toBeLessThan(80);
+  // Well inside the window: nothing has been sent.
+  await page.waitForTimeout(4_000);
+  expect(patched).toBe(0);
+  await expect(report).toContainText("Seen cleared");
 
-  // The last request lands and the report takes the pill, with the plain
-  // message window, and goes on its own.
-  await expect.poll(() => patched, { timeout: 30_000 }).toBe(80);
-  await expect(report).toContainText("Back in your inbox");
-  await expect(report).toContainText("40 threads restored");
-  await expect(report).toHaveCount(0, { timeout: 10_000 });
+  // The window closes: the pill goes, and the archives start going out.
+  await expect.poll(() => patched, { timeout: 15_000 }).toBeGreaterThan(0);
+  await expect(report).toHaveCount(0);
+
+  // Mid-run, another letter is opened, which reads it, and archived. Both
+  // go through at once, and nothing is refused.
+  await list.getByText("Still in People", { exact: true }).click();
+  await expect
+    .poll(() => personPatches)
+    .toContainEqual({ accountId: account.accountId, read: true });
+  await page.getByRole("button", { name: "Archive", exact: true }).click();
+  await expect
+    .poll(() => personPatches)
+    .toContainEqual({ accountId: account.accountId, archive: true });
+  await expect(list.getByText("Still in People", { exact: true })).toHaveCount(0);
+  expect(patched).toBeLessThan(16);
+  await expect(refusal).toHaveCount(0);
+
+  // The run goes on to its end, and the section stays gone.
+  await expect.poll(() => patched, { timeout: 30_000 }).toBe(16);
+  await expect(list.locator('section[aria-label="Seen"]')).toHaveCount(0);
+  await expect(refusal).toHaveCount(0);
 });
 
 /**
- * The review's reproduction: a PATCH the server never answers. The loop sat
- * on it for good — the lock with it, so every other mail action was refused,
- * and Undo took the pill down and then waited on the same loop forever. Now
- * the client's clock ends the request, the account is closed for the run and
- * named, and an Undo pressed meanwhile holds the pill (button out of reach)
- * until the run settles, then reverses exactly what left.
+ * A PATCH the server never answers. It used to hold the mail lock for good,
+ * and the Undo that waited on the same loop with it. The run holds no lock
+ * now, so what is left to prove is that the rows it hid do not stay hidden
+ * behind a request that will never land: the client's clock ends it, the
+ * account is closed for the run and named, and what stayed is back in the
+ * column with one report. Another Done pressed meanwhile is not refused.
  */
-test("@release a mutation nobody answers cannot hold the lock, or Undo, for good", async ({
+test("@release a mutation nobody answers ends at the client's clock, and its rows come back with the reason", async ({
   page,
 }) => {
   test.setTimeout(MAIL_MUTATION_TIMEOUT_MS + 60_000);
@@ -1876,50 +1915,35 @@ test("@release a mutation nobody answers cannot hold the lock, or Undo, for good
   const refusal = page.locator('[aria-live="assertive"] .brain-toast');
   await expect(report).toContainText("Seen cleared");
   await expect(report).toContainText("3 threads out of your inbox");
-  // The first archive landed, the second is hanging.
-  await expect.poll(() => patched.length).toBe(2);
+  await expect(list.locator('section[aria-label="Seen"]')).toHaveCount(0);
+  // The window closes. The first archive lands, the second is hanging.
+  await expect.poll(() => patched.length, { timeout: 15_000 }).toBe(2);
   expect(patched.map((entry) => entry.threadId)).toEqual(["hung-0", "hung-1"]);
+  await expect(report).toHaveCount(0);
 
-  // The lock is held while the request is open, and says so at once.
+  // Another Done over the hanging request is not refused: it takes the pill
+  // with a window of its own, and its Undo gives the row back with nothing
+  // sent for it.
   await page.getByRole("button", { name: "Done — archive all 1 in People" }).click();
-  await expect(refusal).toContainText("Finish the current mail action first");
-
-  // Undo, over the hanging request: taken, and not spent. The pill stands
-  // with its button out of reach; a second press and ⌘Z get nothing.
+  await expect(refusal).toHaveCount(0);
+  await expect(report).toContainText("People cleared");
+  await expect(list.getByText("Still in People", { exact: true })).toHaveCount(0);
   await report.getByRole("button", { name: "Undo" }).click();
-  const undoing = report.getByRole("button", { name: "Undoing…" });
-  await expect(undoing).toBeVisible();
-  await expect(undoing).toBeDisabled();
-  await expect(report).toContainText("Seen cleared");
-  await page.keyboard.press("Meta+z");
-  await page.waitForTimeout(500);
+  await expect(list.getByText("Still in People", { exact: true })).toBeVisible();
   expect(patched.length).toBe(2);
 
-  // The clock ends the request. The run settles, the way back runs: one
-  // un-archive, for the one thread that left, and the report counts it.
-  await expect
-    .poll(
-      () =>
-        patched
-          .filter((entry) => entry.body.archive === false)
-          .map((entry) => entry.threadId),
-      { timeout: MAIL_MUTATION_TIMEOUT_MS + 10_000 },
-    )
-    .toEqual(["hung-0"]);
-  await expect(report).toContainText("Back in your inbox");
-  await expect(report).toContainText("1 thread restored");
-  await expect(report.getByRole("button", { name: "Undoing…" })).toHaveCount(0);
-  // Every row is back on the column.
-  await expect(list.locator('section[aria-label="Seen"]')).toContainText("3 threads");
-
-  // And the lock went with the run: the Done that was refused now goes.
-  await page.getByRole("button", { name: "Done — archive all 1 in People" }).click();
-  await expect
-    .poll(() => patched.filter((entry) => entry.threadId === "hung-person").map((entry) => entry.body))
-    .toEqual([
-      { accountId: account.accountId, archive: true },
-      { accountId: account.accountId, read: true },
-    ]);
+  // The clock ends the request. The account is closed for the run, so the
+  // third thread is never sent, and the two that stayed are back in the
+  // column with one report that names the reason and offers no Undo.
+  await expect(report).toContainText("Seen partly cleared", {
+    timeout: MAIL_MUTATION_TIMEOUT_MS + 10_000,
+  });
+  await expect(report).toContainText(
+    "1 archived, 2 stayed put, that account stopped answering",
+  );
+  await expect(report.getByRole("button")).toHaveCount(0);
+  await expect(list.locator('section[aria-label="Seen"]')).toContainText("2 threads");
+  expect(patched.map((entry) => entry.threadId)).toEqual(["hung-0", "hung-1"]);
 });
 
 // ── The compose sheet ───────────────────────────────────────────────────────

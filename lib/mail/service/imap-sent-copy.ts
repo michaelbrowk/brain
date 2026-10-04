@@ -6,6 +6,7 @@ import type {
   MailEndpoint,
   ValidatedMailDialTarget,
 } from "../ports";
+import { selectImapMailboxPath } from "../providers/imap/sync-adapter";
 import { createVerificationOptions } from "./imapflow-adapter";
 import type {
   MailSentCopyAppendRequest,
@@ -28,7 +29,12 @@ interface SentCopyImapClient {
   close(): void;
   on(event: "error", listener: (error: unknown) => void): this;
   list(): Promise<
-    readonly { readonly path: string; readonly specialUse?: string }[]
+    readonly {
+      readonly path: string;
+      readonly name?: string;
+      readonly delimiter?: string;
+      readonly flags?: Iterable<string>;
+    }[]
   >;
   mailboxOpen(
     path: string,
@@ -209,17 +215,23 @@ export class ImapFlowSentCopyAdapter implements MailSentCopyPort {
     if (!Array.isArray(mailboxes) || mailboxes.length > MAX_SENT_MAILBOXES) {
       throw new SentCopyUnavailableError("sent_mailbox_list_invalid");
     }
-    const specialUse = mailboxes.find(
-      (entry) => entry.specialUse === "\\Sent",
-    );
-    const named = mailboxes.find(
-      (entry) => typeof entry.path === "string" && entry.path === "Sent",
-    );
-    const chosen = specialUse ?? named;
-    if (!chosen || typeof chosen.path !== "string" || chosen.path.length === 0) {
+    // The reading the Sent scan uses: the `\Sent` attribute the server itself
+    // lists, then a name a mail client gives the folder, at the root or
+    // directly under the Inbox and only when exactly one folder answers.
+    // ImapFlow's `specialUse` is not read. Where no folder carries the flag
+    // it is a guess from the leaf name at any depth, and it once sent the
+    // owner's copy into a project folder called Sent. A folder literally
+    // named Sent at the root stays the last resort it has always been, for a
+    // server on which two folders answer to a Sent name.
+    const path =
+      selectImapMailboxPath("sent", mailboxes) ??
+      mailboxes.find(
+        (entry) => typeof entry.path === "string" && entry.path === "Sent",
+      )?.path;
+    if (typeof path !== "string" || path.length === 0) {
       throw new SentCopyUnavailableError("sent_mailbox_missing");
     }
-    return chosen.path;
+    return path;
   }
 
   private async withClient<T>(

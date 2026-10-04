@@ -9,8 +9,14 @@ const ACCOUNT = `account-a${"8".repeat(32)}`;
 interface FakeClientScript {
   readonly authenticated?: boolean | string;
   readonly secureConnection?: boolean;
+  /** LIST entries as ImapFlow hands them over. */
   readonly mailboxes?: readonly {
     readonly path: string;
+    readonly name?: string;
+    readonly delimiter?: string;
+    /** What the server itself listed for the folder. */
+    readonly flags?: Set<string>;
+    /** ImapFlow's own reading: the flag, or a guess from the folder's name. */
     readonly specialUse?: string;
   }[];
   readonly searchUids?: readonly number[];
@@ -73,8 +79,15 @@ function createAdapter(script: FakeClientScript) {
           events.push("list");
           return (
             script.mailboxes ?? [
-              { path: "INBOX" },
-              { path: "Sent Items", specialUse: "\\Sent" },
+              { path: "INBOX", delimiter: "/", flags: new Set<string>() },
+              // A folder under a name no list knows, which the server marks.
+              {
+                path: "Sent Items",
+                name: "Outgoing letters",
+                delimiter: "/",
+                flags: new Set(["\\Sent"]),
+                specialUse: "\\Sent",
+              },
             ]
           );
         },
@@ -199,5 +212,86 @@ describe("ImapFlow Sent copy adapter", () => {
       { deadlineAt: Date.now() + 10_000, beforeLiteral: async () => undefined },
     );
     expect(result.outcome).toEqual({ kind: "stored_without_uid" });
+  });
+});
+
+/*
+  Where the copy of a sent letter is appended. ImapFlow marks a folder
+  `specialUse: "\\Sent"` from its leaf name when no folder carries the flag,
+  at any depth, the first that matches, and that guess used to be read as the
+  server's word: the owner's sent mail could be written into a project folder
+  called Sent, or into a colleague's shared one. The folder is now found the
+  way the Sent scan finds it, and a folder literally named Sent at the root
+  stays the last resort it always was.
+*/
+describe("where the Sent copy goes", () => {
+  const entry = (path: string, stated: string[] = [], guessed?: string) => ({
+    path,
+    name: path.split("/").at(-1)!,
+    delimiter: "/",
+    flags: new Set(["\\HasNoChildren", ...stated]),
+    ...(stated.length > 0 || guessed !== undefined
+      ? { specialUse: stated[0] ?? guessed }
+      : {}),
+  });
+  const appendedTo = async (mailboxes: FakeClientScript["mailboxes"]) => {
+    const { adapter, events } = createAdapter({
+      mailboxes,
+      appendResult: { destination: "x" },
+    });
+    const outcome = await adapter
+      .append(
+        {
+          accountId: ACCOUNT,
+          operationId: "send-00000000-0000-4000-8000-000000000803",
+          messageId: "<brain.copy.6@test.local>",
+          raw: Buffer.from("From: me@test.local\r\n\r\nCopy\r\n", "utf8"),
+          deadlineAt: Date.now() + 10_000,
+          signal,
+        },
+        { deadlineAt: Date.now() + 10_000, beforeLiteral: async () => undefined },
+      )
+      .then(
+        () => "appended",
+        (error: { errorCode?: string }) => error.errorCode ?? "failed",
+      );
+    return {
+      outcome,
+      path: events.find((event) => event.startsWith("append:"))?.slice("append:".length) ?? null,
+    };
+  };
+
+  it("goes to the owner's own Sent Items, not to a project folder ImapFlow guessed", async () => {
+    await expect(
+      appendedTo([entry("Sent Items"), entry("Projects/Clients/Sent", [], "\\Sent")]),
+    ).resolves.toEqual({ outcome: "appended", path: "Sent Items" });
+  });
+
+  it("is not appended at all when the only candidate is a colleague's shared folder", async () => {
+    await expect(
+      appendedTo([entry("Shared/boss/Gesendete Elemente", [], "\\Sent")]),
+    ).resolves.toEqual({ outcome: "sent_mailbox_missing", path: null });
+  });
+
+  it("goes to the folder named Sent at the root when two folders answer to a Sent name", async () => {
+    await expect(
+      appendedTo([entry("Sent Items", [], "\\Sent"), entry("Sent")]),
+    ).resolves.toEqual({ outcome: "appended", path: "Sent" });
+  });
+
+  it("goes to the folder the server itself marks, before any name", async () => {
+    await expect(
+      appendedTo([entry("Outgoing", ["\\Sent"]), entry("Sent")]),
+    ).resolves.toEqual({ outcome: "appended", path: "Outgoing" });
+  });
+
+  it("goes to a localized Sent folder at the root, and under the Inbox", async () => {
+    await expect(appendedTo([entry("Gesendete Elemente")])).resolves.toEqual({
+      outcome: "appended",
+      path: "Gesendete Elemente",
+    });
+    await expect(
+      appendedTo([{ path: "INBOX.Отправленные", name: "Отправленные", delimiter: ".", flags: new Set<string>() }]),
+    ).resolves.toEqual({ outcome: "appended", path: "INBOX.Отправленные" });
   });
 });

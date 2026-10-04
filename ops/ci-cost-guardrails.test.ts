@@ -24,8 +24,31 @@ const criticalFlows = readFileSync(
 );
 
 describe("CI cost guardrails", () => {
-  it("cancels superseded runs and keeps hosted CI on main only", () => {
-    expect(workflow).toContain("cancel-in-progress: true\n");
+  it("cancels a superseded pull request run and never a run on main", () => {
+    // The build and both smokes run only on a push to main. Cancelling there
+    // meant a second merge stopped the first one's run before it reached
+    // them, so a merged change could go unbuilt, and one did: the standalone
+    // smoke broke on main and was first seen at a release gate. A pull
+    // request's superseded run is still worth nothing and is still stopped.
+    expect(workflow).toContain(
+      "  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}\n",
+    );
+    expect(workflow.match(/cancel-in-progress:/g)).toHaveLength(1);
+    // And never displaced while it waits: a group keeps one run and one
+    // pending, so a commit on main is a group of its own.
+    expect(workflow).toContain(
+      "  group: ci-${{ github.workflow }}-${{ github.ref }}-" +
+        "${{ github.ref == 'refs/heads/main' && github.sha || 'latest' }}\n",
+    );
+    // The release gate reads that run, so the checklist has to ask for it.
+    expect(
+      readFileSync(path.join(process.cwd(), "docs", "release-checklist.md"), "utf8"),
+    ).toContain(
+      "The newest `CI` run for a push to `main` is green: completed, not cancelled",
+    );
+  });
+
+  it("keeps hosted CI on main only and every expensive step push-only", () => {
     expect(workflow).toContain("push:\n    branches: [main]\n");
     // PRs may run the cheap gate, but every expensive step must stay
     // push-only so a pull request never packages or boots a browser.

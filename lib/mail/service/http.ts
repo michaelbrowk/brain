@@ -7,6 +7,7 @@ import {
 } from "node:http";
 
 import type {
+  MailSendTransportKind,
   MailServiceHealth,
   MailSystemAdmissionPort,
   MailSystemUsage,
@@ -128,6 +129,9 @@ interface MailServiceHttpOptions {
   readonly syncPause?: MailSyncPausePort;
   readonly senders?: MailSenderScreenService;
   readonly changes?: MailChangeFeed;
+  /** The SMTP runtime's byte transport, for health to name. Absent for a
+   *  service that composed none. */
+  readonly sendTransport?: MailSendTransportKind;
 }
 
 /**
@@ -295,6 +299,7 @@ export function createMailServiceHttpServer(
   const syncPause = options.syncPause;
   const senders = options.senders;
   const changes = options.changes;
+  const sendTransport = options.sendTransport;
   const build = validateBuildIdentity(options.build);
   const server = createServer(
     {
@@ -320,6 +325,7 @@ export function createMailServiceHttpServer(
         syncPause,
         senders,
         changes,
+        sendTransport,
       );
     },
   );
@@ -376,6 +382,7 @@ async function handleRequest(
   syncPause: MailSyncPausePort | undefined,
   senders: MailSenderScreenService | undefined,
   changes: MailChangeFeed | undefined,
+  sendTransport: MailSendTransportKind | undefined,
 ): Promise<void> {
   const requestStartedAt = Date.now();
   const deadlineAt =
@@ -522,6 +529,7 @@ async function handleRequest(
           syncHealth,
           requestStartedAt,
           syncPause?.isPaused() ?? false,
+          sendTransport,
         ),
       );
       return;
@@ -1300,6 +1308,7 @@ function createHealth(
   } | null = null,
   now = Date.now(),
   paused = false,
+  sendTransport?: MailSendTransportKind,
 ): MailServiceHealth {
   const activeAccounts = Math.max(accountCount, usage.accounts);
   const cacheSchemaVersion = messagesConfigured ? 1 : null;
@@ -1358,6 +1367,10 @@ function createHealth(
       lastSuccessfulAt === null ? null : Math.max(0, now - lastSuccessfulAt),
     cachePressure: "normal",
     lastErrorCode,
+    // What the flags composed, whether or not an account can send yet: Brain
+    // sizes a custom-domain account's attachments by it (the relay's tunnel
+    // carries 2 MiB of finished message, a direct session the whole cap).
+    ...(sendTransport === undefined ? {} : { sendTransport }),
   });
 }
 

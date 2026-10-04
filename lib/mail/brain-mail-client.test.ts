@@ -284,6 +284,46 @@ describe("Brain Mail Unix-socket client", () => {
     });
   });
 
+  it("reads which transport SMTP leaves by from the service's health, and nothing else of it", async () => {
+    const health = {
+      apiVersion: 1,
+      build: { commit: "dev", builtAt: "dev" },
+      status: "ok",
+      sendReadiness: "ready",
+    };
+    let answer: unknown = health;
+    const requests: string[] = [];
+    const { socketPath } = await startServer((request, response) => {
+      requests.push(`${request.method} ${request.url}`);
+      writeJson(response, 200, answer);
+    });
+    const client = createBrainMailClient({ socketPath });
+
+    for (const sendTransport of ["direct", "authenticated_byte_relay"] as const) {
+      answer = { ...health, sendTransport };
+      await expect(client.readSendTransport()).resolves.toBe(sendTransport);
+    }
+    expect(requests).toEqual(["GET /v1/health", "GET /v1/health"]);
+    // A receive-only service, an older one, and a later one that says more.
+    for (const older of [
+      health,
+      { ...health, sendTransport: "carrier pigeon" },
+      { ...health, sendTransport: "direct", apiVersion: 2 },
+    ]) {
+      answer = older;
+      await expect(client.readSendTransport()).resolves.toBeNull();
+    }
+    answer = { ...health, sendTransport: "direct", somethingLater: true };
+    await expect(client.readSendTransport()).resolves.toBe("direct");
+    // Not a health answer at all.
+    for (const broken of [[], "direct", null]) {
+      answer = broken;
+      await expect(client.readSendTransport()).rejects.toMatchObject({
+        code: "mail_service_invalid_response",
+      });
+    }
+  });
+
   it("rejects malformed or inflated provider capabilities", async () => {
     const account = accountV2Fixture();
     for (const capabilities of [

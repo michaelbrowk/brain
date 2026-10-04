@@ -123,7 +123,10 @@ import {
   fakeMessage,
   fakeThread,
 } from "./mail-client-fake";
-import { BrainMailClientError } from "@/lib/mail/brain-mail-client";
+import {
+  BrainMailClientError,
+  type BrainMailClient,
+} from "@/lib/mail/brain-mail-client";
 import {
   MAX_ATTACHMENT_BYTES,
   NotFoundError,
@@ -6825,14 +6828,19 @@ describe("outgoing attachments", () => {
     expect(fake.calls.some((call) => call.method === "sendMessage")).toBe(false);
   });
 
-  /** An IMAP account's SMTP session leaves through the Cloudflare relay,
-   *  whose tunnel carries 2 MiB of finished message against what a Gmail
-   *  account's provider API takes. The budget the files are read against is
-   *  the account's, so the difference is a refusal naming the account and
-   *  both figures rather than a relay failure after the message has been
-   *  built and written into the outbox. */
-  function imapSendingAccount() {
+  /** An IMAP account's SMTP session leaves by whichever transport the mail
+   *  service composed. Through the relay, the tunnel carries 2 MiB of
+   *  finished message against what a direct session or a Gmail account's
+   *  provider API takes. The budget the files are read against follows the
+   *  transport the service reports, so the difference is a refusal naming
+   *  the account and both figures rather than a relay failure after the
+   *  message has been built and written into the outbox. */
+  function imapSendingAccount(
+    readSendTransport: BrainMailClient["readSendTransport"] = async () =>
+      "authenticated_byte_relay",
+  ) {
     return createMailClientFake({
+      readSendTransport,
       listAccountCapabilities: async () => ({
         apiVersion: 3,
         accounts: [
@@ -6882,6 +6890,94 @@ describe("outgoing attachments", () => {
     expect(readAttachment).toHaveBeenCalledWith(NAME, RELAY_CAP);
   });
 
+  const sendOneFile = (id: number) =>
+    callTool(
+      "send_mail",
+      {
+        accountId: FAKE_ACCOUNT_ID,
+        to: ["friend@example.net"],
+        subject: "s",
+        text: "t",
+        idempotencyKey: KEY,
+        attachments: [{ page: "page-one", name: NAME }],
+      },
+      id,
+    );
+
+  it("reads an IMAP account's files against the whole message cap when the service sends directly", async () => {
+    const { readAttachment } = storeHolding(pageHolding(NAME), {
+      [NAME]: { data: new Uint8Array([1, 2, 3]), mimeType: "application/pdf" },
+    });
+    const fake = imapSendingAccount(async () => "direct");
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload } = await toolPayload(await sendOneFile(9621));
+
+    expect(payload).toEqual({
+      operationId: "send-alpha",
+      created: true,
+      status: "queued",
+    });
+    expect(readAttachment).toHaveBeenCalledWith(NAME, TOTAL_CAP);
+  });
+
+  it.each<[string, BrainMailClient["readSendTransport"]]>([
+    ["does not say how it sends", async () => null],
+    [
+      "cannot be asked",
+      async () => {
+        throw new BrainMailClientError(503, "mail_service_unavailable");
+      },
+    ],
+  ])(
+    "keeps an IMAP account on the relay's budget when the service %s",
+    async (_name, readSendTransport) => {
+      const { readAttachment } = storeHolding(pageHolding(NAME), {
+        [NAME]: { data: new Uint8Array([1, 2, 3]), mimeType: "application/pdf" },
+      });
+      const fake = imapSendingAccount(readSendTransport);
+      mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+      const { payload } = await toolPayload(await sendOneFile(9622));
+
+      // The smaller budget is the one that cannot strand a message in the
+      // outbox, and the send itself is not refused for the question.
+      expect(payload).toMatchObject({ operationId: "send-alpha" });
+      expect(readAttachment).toHaveBeenCalledWith(NAME, RELAY_CAP);
+    },
+  );
+
+  it("asks the service how it sends only for an IMAP account's files", async () => {
+    storeHolding(pageHolding(NAME), {
+      [NAME]: { data: new Uint8Array([1, 2, 3]), mimeType: "application/pdf" },
+    });
+    // A Gmail account hands its message to the provider's API.
+    const gmail = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(gmail.client);
+    await toolPayload(await sendOneFile(9623));
+    expect(gmail.calls.some((call) => call.method === "sendMessage")).toBe(true);
+    expect(gmail.calls.some((call) => call.method === "readSendTransport")).toBe(false);
+
+    // A message without files has no budget to choose.
+    const imap = imapSendingAccount(async () => "direct");
+    mocks.createBrainMailClient.mockReturnValue(imap.client);
+    await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "s",
+          text: "t",
+          idempotencyKey: "mcp-key-alpha-0002",
+        },
+        9624,
+      ),
+    );
+    expect(imap.calls.some((call) => call.method === "sendMessage")).toBe(true);
+    expect(imap.calls.some((call) => call.method === "readSendTransport")).toBe(false);
+  });
+
   it("refuses an IMAP account's oversized set before the service sees anything", async () => {
     const readPage = vi.fn().mockResolvedValue(pageHolding(NAME));
     // The store measures: handed the account's budget, it answers `too_large`
@@ -6919,7 +7015,7 @@ describe("outgoing attachments", () => {
     expect(payload).toEqual({
       error: "those attachments are too large for this account",
       reason:
-        "1 MiB is the limit for one message from an IMAP account, whose relay carries 2 MiB of finished message, against 10 MiB from a Gmail account",
+        "1 MiB is the limit for one message from this account, whose SMTP session leaves through a relay that carries 2 MiB of finished message, against 10 MiB from an account that sends directly",
     });
     expect(isError).toBe(true);
     expect(fake.calls.some((call) => call.method === "sendMessage")).toBe(false);

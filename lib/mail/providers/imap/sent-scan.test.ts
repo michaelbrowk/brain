@@ -53,8 +53,13 @@ describe("the IMAP Sent-folder envelope scan", () => {
   it("hands over only a letter that says plainly who wrote it", async () => {
     const me = { name: "Me", address: "Me@Example.test" };
     const server = serverFixture({
-      sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 6) },
+      sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 8) },
       envelopes: {
+        // Two authors again, one of them written so that it is no address:
+        // the letter still names two, whatever this adapter can read of them.
+        7: { from: [me, { address: "not an address" }], sender: undefined },
+        // Two Senders, the first of them the author.
+        8: { from: [me], sender: [me, { address: "assistant@example.test" }] },
         // A delegate sent it as the owner: the Sender is somebody else.
         1: { from: [me], sender: [{ address: "assistant@example.test" }] },
         // Two authors, and no Sender to say which of them sent it.
@@ -73,7 +78,7 @@ describe("the IMAP Sent-folder envelope scan", () => {
 
     const result = scanned(await provider.scanSentEnvelopes({ cursor: null }, signal()));
 
-    expect(result.envelopeCount).toBe(6);
+    expect(result.envelopeCount).toBe(8);
     expect(result.envelopes).toEqual([
       { from: "me@example.test", recipients: ["to4@example.org", "cc4@example.org"] },
       { from: "me@example.test", recipients: ["to5@example.org", "cc5@example.org"] },
@@ -435,6 +440,15 @@ describe("the IMAP Sent-folder envelope scan", () => {
     // A cursor that stands exactly at the end is not a regression.
     const settled = scanned(await provider.scanSentEnvelopes({ cursor: result.cursor }, signal()));
     expect(settled).toMatchObject({ envelopeCount: 0, restart: null });
+    // One that stands on the folder's next UID is: no letter has that UID
+    // yet, so the cursor read it in a folder that is not this one, and the
+    // letter that takes the UID next would never be read.
+    const boundary = scanned(await provider.scanSentEnvelopes({ cursor: "s1_500_4_0_0_0" }, signal()));
+    expect(boundary).toMatchObject({
+      envelopeCount: 3,
+      restart: "uidnext_regressed",
+      cursor: "s1_500_3_0_0_0",
+    });
   });
 
   it("steps over a FETCH response that carries no envelope", async () => {

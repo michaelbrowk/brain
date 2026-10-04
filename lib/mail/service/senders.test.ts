@@ -2466,6 +2466,28 @@ describe("the Sent-folder scan", () => {
     expect(world.store.readSentScanCursor(ACCOUNT_A)).toBeNull();
   });
 
+  it("writes nothing from a scan the owner switched the screen off and on again under", async () => {
+    const world = await readyWorld();
+    world.mail.scanSentEnvelopes.mockImplementationOnce(async () => {
+      // Off wipes what the screen had learned, and on begins it anew: the
+      // answer on its way belongs to the screen that was switched off.
+      await world.screen.setEnabled(false);
+      world.clock.now += 1_000;
+      await world.screen.setEnabled(true);
+      return sentScanned({
+        cursor: "s1_77_12_0_0_0",
+        envelopes: [{ from: "me@a.test", recipients: ["late@known.test"] }],
+        envelopeCount: 1,
+      });
+    });
+
+    await sentScan(world, ACCOUNT_A);
+
+    expect(world.store.readState().enabled).toBe(true);
+    expect(world.store.isKnown("late@known.test")).toBe(false);
+    expect(world.store.readSentScanCursor(ACCOUNT_A)).toBeNull();
+  });
+
   it("asks no provider while the screen is off, and picks up where it stopped when it is on again", async () => {
     const world = await readyWorld();
     world.mail.scanSentEnvelopes.mockResolvedValue(sentScanned({ cursor: "s1_77_12_0_0_0" }));

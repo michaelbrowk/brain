@@ -2601,6 +2601,40 @@ describe("MailContentCoordinator", () => {
     });
   }, 30_000);
 
+  it.each(["mail_mime_worker_crashed", "mail_mime_worker_timeout"])(
+    "tries an owner's letter whose parse ended in %s once for an open, and tells the reader it cannot be shown",
+    async (errorCode) => {
+      const fixture = await createFixture([ACCOUNT_ID]);
+      let runs = 0;
+      const runner: MailContentWorkRunnerPort = {
+        async run() {
+          runs += 1;
+          throw new MailContentWorkError("transient", errorCode);
+        },
+      };
+      // A retry policy that would take the queue's four attempts at once.
+      const coordinator = fixture.coordinator(runner, { nextDelayMs: () => 1 });
+      const input = { accountId: ACCOUNT_ID, messageId: MESSAGE_ID };
+
+      await coordinator.requestContent(input);
+      await vi.waitFor(async () => {
+        await expect(coordinator.getContent(input)).resolves.toMatchObject({
+          state: "permanent",
+        });
+      });
+      await sleep(300);
+      expect(runs).toBe(1);
+
+      // The row is still a transient failure, so another open claims it.
+      await expect(coordinator.requestContent(input)).resolves.toMatchObject({
+        state: "fetching",
+      });
+      await vi.waitFor(() => expect(runs).toBe(2));
+      await sleep(300);
+      expect(runs).toBe(2);
+    },
+  );
+
   it("still retries an owner's letter whose fetch failed, and says so", async () => {
     const fixture = await createFixture([ACCOUNT_ID]);
     let fetches = 0;

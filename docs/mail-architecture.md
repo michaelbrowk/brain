@@ -75,7 +75,20 @@ succeed. Removing a flag is always sent, as ImapFlow sends it: clearing what
 the server never kept is harmless.
 
 The destination mailbox is discovered, never assumed. `LIST` carries the
-SPECIAL-USE and XLIST attributes as `specialUse`, and the role is resolved in
+SPECIAL-USE and XLIST attributes among each entry's own flags, and only those
+flags are read as the server's word. ImapFlow also hands every entry a
+`specialUse` of its own, and where no folder carries the flag that is a guess
+from the folder's leaf name: some ninety localized names, at any depth, the
+first that matches. Until 0.20.3 the attribute tier read that field, so on a
+server that states no attribute a `Projects/Acme/Archive` was the archive and
+a `Projects/Acme/Trash` the trash; `ImapMailboxDescriptor` no longer has the
+field. For an account whose folder was found that way the role now goes
+through the name tier below: the same folder when it sits at the root or
+directly under the Inbox, alone, under a name the tier knows; a new `Archive`
+at the root when the archive does not; and a refusal for trash or junk that do
+not, which includes a trash or junk folder under a localized name, because
+those two tiers know only the English names where ImapFlow's guess knew some
+forty and thirty. The role is resolved in
 tiers: `\Archive`, then a mailbox named `Archive` or `Archives`, then
 `\All`, then `All Mail`; `\Trash` then `Trash` / `Deleted Items` / `Deleted
 Messages`; `\Junk` then `Junk` / `Spam` / `Junk E-mail`. A name counts only at
@@ -569,13 +582,15 @@ From that does not normalize is never known, decided or gated, and a domain
 decision covers that domain only, not its subdomains.
 
 **The owner.** The owner's own addresses are every account's address plus
-every address the owner has been seen sending from, learned into
-`own_senders`: the From of each cached message Gmail marks as sent (its `SENT`
-label), and the From of each envelope the Sent-folder scan reads on an IMAP
-account (below), whose cache holds the Inbox alone and carries no sent mark.
-Both trust what the provider files as sent, so a letter somebody else wrote
-that sits in the owner's Sent folder teaches its From as an alias; that
-residual is accepted. A
+every address the owner has been seen sending from: the From of each cached
+message Gmail marks as sent (its `SENT` label), learned into `own_senders`.
+Only Gmail teaches aliases. An IMAP account's cache holds its Inbox alone and
+carries no sent mark, and the scan of its Sent folder (below) deliberately
+learns none: a Sent folder also holds letters the owner did not write, an
+alias is the owner for good, and one blocked sender's letter filed there
+would have stopped his block archiving, refused the block a second time and
+taken his whole domain out of reach. So an alias used only from an IMAP
+account stays unknown to the screen. A
 decision about an own address (address scope) or an own domain (domain
 scope) is refused with `mail_sender_own_address`, and a thread whose first
 message is the owner's, by the sent mark or by its From being an own
@@ -688,9 +703,10 @@ From phase stops, so a stranger stays a stranger; its Sent phase goes on
 reading new rows. On Gmail, whose Sent mailbox is cached, that makes the
 people the owner writes to from any client known and teaches new aliases. An
 IMAP account caches its Inbox alone, so the Sent phase finds nothing there,
-and the Sent-folder scan below does the same work at the provider: someone
-the owner writes to from his phone over IMAP is known within a scan window of
-the letter reaching the server's Sent folder. A send that reaches `sent`
+and the Sent-folder scan below reads the recipients at the provider instead:
+someone the owner writes to from his phone over IMAP, from an address already
+his, is known within a scan window of the letter reaching the server's Sent
+folder. A send that reaches `sent`
 through Brain, on
 either transport, makes its To and Cc known (the outbox store's `onSent`,
 which never sees Bcc), whether the owner or an agent sending in the owner's
@@ -702,72 +718,135 @@ service that has it creates the file switched on.
 **The Sent folder on IMAP.** `scanSentEnvelopes` in
 [`sync-adapter.ts`](../lib/mail/providers/imap/sync-adapter.ts) reads an IMAP
 account's Sent mailbox at the provider, and it is the only read the screen
-makes outside the cache. The folder is found the way the archive is: the
-SPECIAL-USE or XLIST `\Sent` attribute first, then a name mail clients give
-it ("Sent", "Sent Items", "Sent Messages" and the word for it in ten more
+makes outside the cache. The folder is found the way the archive is (the
+status section at the top, "The destination mailbox is discovered"): the
+`\Sent` attribute among the flags the server itself listed
+first, never ImapFlow's guess from a name, then a name mail clients give it
+("Sent", "Sent Items", "Sent Messages" and the word for it in ten more
 languages), at the account root or directly under the Inbox, and only when
 exactly one folder answers to a name. It is opened with EXAMINE, never SELECT,
 and the only fetch asks for `UID` and `ENVELOPE`: no body, no header block,
 no flags, and nothing is ever stored, moved or created. (ImapFlow adds the
 server's own message id item, `EMAILID` or `X-GM-MSGID`, to every fetch on a
-server that offers one; nothing reads it.) Out of an envelope the adapter
-hands over the To and Cc addresses and the From address, lowercased and at
-most a hundred a field, and nothing else: no name, no subject, no date, no
-Message-ID. Bcc is part of an IMAP ENVELOPE, so it crosses the wire inside
-the TLS session with the rest, and the adapter never reads that field. To and
-Cc become known (`source` `sent`, as for a send through Brain) and From
-becomes an own alias, under the rules above: a known address is never gated
-again, so a letter of theirs that was waiting leaves New senders on the next
-list read, and the change feed is told when a batch taught something, so an
-open tab reads again; an alias counts as the owner's everywhere.
+server that offers one; nothing reads it.) Bcc is part of an IMAP ENVELOPE,
+so it crosses the wire inside the TLS session with the rest, and the adapter
+never reads that field.
+
+What it learns is recipients, and only of letters the owner wrote. A Sent
+folder also holds letters he did not write: a meeting forward, a delegate's
+send-as, a redirect or a bounce, a shared mailbox, a migration. So the
+adapter hands over each letter by itself, the From address with its To and
+Cc addresses, lowercased, at most a hundred a field, and nothing else (no
+name, no subject, no date, no Message-ID), and only for an envelope that says
+plainly who wrote it: exactly one From, and a Sender that, where the letter
+states one, is that same address. The screen then keeps the To and Cc only of
+the envelopes whose From is already the owner's, an account's address or an
+alias `own_senders` holds, and makes them known (`source` `sent`, as for a
+send through Brain). A known address is never gated again, so a letter of
+theirs that was waiting leaves New senders on the next list read, and the
+change feed is told when a batch taught something, so an open tab reads
+again. No From found there becomes an alias, and the scan writes nothing to
+`own_senders`. The branch that first carried this scan did write aliases and
+never shipped, so there is no row to migrate.
 
 It is bounded on every side. One session a call, one fetch a session, 250
 envelopes a fetch. The first run takes the folder as it stands and walks it
 newest first for at most 5,000 envelopes, which is twenty windows and the
 letters that hold the people an owner writes to now; what is older is not
 read, and whoever was last written to before it waits once in New senders, as
-everyone did before the scan. Later runs fetch only the UIDs above the
-highest one read, and mail that arrives during the first walk is read before
-the walk goes on. The walk goes down by sequence number under a UID ceiling
-rather than by UID range: the UIDs of a folder the owner prunes are sparse,
+everyone did before the scan. Later runs read only what is above the highest
+UID read, lowest first, and mail that arrives during the first walk is read
+before the walk goes on. When what is new spans no more UIDs than a batch it
+is fetched by that range; otherwise the server is asked which UIDs exist
+(`UID SEARCH UID n:*`) and the lowest batch of them is fetched, so a letter a
+hundred thousand UIDs above the cursor, on a server that numbers across the
+whole account, is one session away and not a window for every 250 UIDs
+between. The walk goes down by sequence number under a UID ceiling rather
+than by UID range: the UIDs of a folder the owner prunes are sparse,
 while a sequence range is always as full as it is wide, and because sequence
 numbers only move down when another client expunges, no unread letter is ever
 above the stored end; one already read that slid into the range is known by
-its UID and left out. The position is the adapter's own token
+its UID and left out. A FETCH response that carries no envelope, which is how
+a server reports another client's flag change in the middle of the answer, is
+stepped over. The position is the adapter's own token
 (`s1_<uidvalidity>_<highest uid>_<walk end>_<walk ceiling>_<walk remaining>`),
 kept per account in `sent_scan_progress` and written in the same transaction
-as what the batch taught. A UIDVALIDITY other than the token's starts the
-walk again under the new one, with the cursor replaced.
+as what the batch taught, and only while the screen is still on from the
+moment the scan began: a scan in flight when the owner switches the screen
+off writes nothing. A UIDVALIDITY other than the token's, or a next UID at or
+below a UID the token says was read (a mailbox restored under its old
+UIDVALIDITY), starts the walk again with the cursor replaced. A cursor the
+adapter cannot read, and a row in the store that is not a token, read as no
+cursor.
 
-The scheduler runs it as a step of its own beside the sync (section 8): only
-for an IMAP account, only while that account's last sync came back healthy,
-at most once per fallback interval from one scan's start to the next, and
-never as a continuation, so what a batch leaves waits for the next window.
-The screen runs it only while the switch is on, and keeps the cursor across
-a switch off and on. Pausing Mail stops the scheduler and aborts a scan in
-flight.
+One letter cannot hold it. A batch that was asked for and not read (an
+envelope line past the session's 64 KiB limit, which a Bcc blast reaches
+though the adapter never reads Bcc, a server too slow for the ten-second
+session, a page with more envelopes than were asked for) answers
+`batch_failed`, and the next call at the same cursor asks for half as much,
+and stays that narrow until the range that failed has been gone through. A
+batch of one that cannot be read is that letter: it is passed over, the
+cursor moves, and the answer counts it. Finding one letter in a full batch
+takes about seven failed windows and as many that read. A search that cannot
+be read (thousands of new UIDs on one line) turns into plain UID ranges a
+batch wide. A stop, and a session that failed before it asked for a batch,
+narrow nothing. The narrowing is in memory, so a restart finds the letter
+again the same way.
+
+A quiet folder costs no login. The sync's own session, open anyway, asks the
+Sent folder's `STATUS (UIDNEXT UIDVALIDITY)` after its Inbox work, and LIST
+again when its ten minutes have run out, and the scan that follows opens a
+session only when that answer differs from its cursor or its first walk is
+not over. Otherwise it answers `unchanged` and nothing is opened. The sync
+asks only while the screen has asked for a scan in the last two hours, so an
+account whose screen is off is asked nothing about the folder, and the STATUS
+never fails the sync it rides on: a server that answers NO is not asked again
+for ten minutes. For those ten minutes, and whenever no sync has run since
+the last STATUS was taken, the scan has no STATUS to go by: it opens a
+session, and if that session finds the folder quiet it leaves the folder
+alone for ten minutes.
+
+The scheduler runs it as a step of its own (section 8): only for an IMAP
+account, only while that account's last sync came back healthy, after the
+visit's cache steps so that a scan holding its session to the deadline does
+not keep the bodies, the index and the archiver waiting, at most once per
+fallback interval and never more than once a minute from one scan's start to
+the next, and never as a continuation, so what a batch leaves waits for the
+next window. The screen runs it only while the switch is on, and keeps the
+cursor across a switch off and on. Pausing Mail stops the scheduler and
+aborts a scan in flight.
 
 None of its failures reaches the sync. A server that lists no Sent mailbox
 and one that answers the EXAMINE with NO are answers, remembered in the
-adapter for ten minutes so hearing them again costs no session; a dropped
-connection or a page with more envelopes than were asked for is a failed scan
-that leaves the cursor where the last good batch put it. Each is one
-`mail_sender_sent_scan` line with a `reason` (`no_sent_mailbox`,
-`examine_refused`, or `scan_failed` with the stable `errorCode`), written
-once for as long as the answer stands. A batch that read envelopes writes the
-same event with `messageCount`, the envelopes read, and `recipientCount`, the
-addresses that became known; a UIDVALIDITY change adds the `reason`
-`uidvalidity_changed` to that line.
+adapter for ten minutes so hearing them again costs no session; a connection
+that drops before anything was asked for is a failed scan that leaves the
+cursor where the last good batch put it. Each standing answer is one
+`mail_sender_sent_scan` line, written once for as long as it stands, with a
+`reason`: `no_sent_mailbox`, `examine_refused`, `scan_failed` with the stable
+`errorCode`, `batch_failed`, and `uidvalidity_changed` or `uidnext_regressed`
+when the walk began again, so a server that renumbers the folder on every
+session writes one line and not one a window. A batch that read envelopes
+writes the same event with `messageCount`, the envelopes read, and
+`recipientCount`, the addresses that became known. A letter passed over
+writes it with `skippedCount` and the `reason` `envelope_line_too_long` or
+`envelope_unreadable`, every time one is.
 
-Residuals, all accepted. Two folders that answer to a Sent name on a server
-that states no `\Sent` are not read, as neither would be archived into. A
-client that does not save its sent mail on the server teaches nothing. For
-the twenty windows of a first walk, someone the owner wrote to only from
-another client can still wait until the walk reaches that letter, and a
-person who answers inside the window before a scan waits until the scan and
-the next list read. An envelope too long for the session's 64 KiB line limit,
-a To of roughly a thousand addresses, fails the batch that holds it, and the
-scan of that account stays there with one `scan_failed` line.
+Residuals, all accepted. The recipients of a letter the owner sent from an
+alias nothing has taught yet are not learned, and on an install with no Gmail
+account no alias ever is. An auto-reply the owner's mail client or server
+saved to Sent makes its recipient known, as would any letter in Sent that
+carries one of his addresses as its From. Two folders that answer to a Sent
+name on a server that states no `\Sent` are not read, as neither would be
+archived into, and neither is a Sent folder under a name outside the list on
+such a server. A client that does not save its sent mail on the server
+teaches nothing. For the twenty windows of a first walk, someone the owner
+wrote to only from another client can still wait until the walk reaches that
+letter, and a person who answers inside the window before a scan waits until
+the scan and the next list read. A letter passed over as unreadable teaches
+nothing, and a run of failures that are the network's and not the letter's
+can pass over a letter that was readable. On a server that refuses the
+STATUS, a letter sent from another client is learned up to ten minutes later
+than a window.
 
 **Decisions.** One standing decision per address or domain, global across
 accounts. Making the same decision again answers the one that stands. A
@@ -1068,7 +1147,7 @@ IDLE is a notification hint, not a source of truth. Restart IDLE before 29 minut
 
 The 60-second poll stays on underneath. A server that does not advertise IDLE, a session that will not open, an IDLE that ends without its DONE and a connection that drops all fall back to it with one `mail_imap_idle_fallback` line (`reason`, the stable `errorCode` for a failed open, and `failureCount`, the failures in a row), and the account is asked again only after 1, 2, 4, 8 and 16 minutes, then every 30; a server without IDLE waits the 30 at once. The retry rides on the scheduler's passes rather than on a timer of its own, so a flapping server costs at most one attempt per pass. A session that completes a clean cycle resets the count, and so does one that lived longer than three minutes before it ended: a server that closes IDLE sessions on a schedule of its own then costs a minute of poll each time, not a climb to thirty. Pausing Mail, the module switch and shutdown stop the scheduler, and the scheduler's stop closes every session; an account that stops syncing loses its session on the next pass, and removal or a credential edit closes it first through the account removal guard. `BRAIN_MAIL_IMAP_IDLE=0` turns IDLE off and leaves the poll alone.
 
-INBOX is the only mailbox the sync state machine above covers. One other mailbox is read, and only read: the Sent folder, for the new-senders screen (section 5, "The Sent folder on IMAP"). It has no generation, no lease and no rows in the cache. A scan is one working session that issues LIST when its ten-minute memory of the folder is gone, EXAMINE on the Sent mailbox and one fetch of `UID` and `ENVELOPE` for at most 250 messages, then closes; its whole state is one cursor per account in `senders.sqlite3`, holding the folder's UIDVALIDITY, the highest UID read and where the first walk stands. A UIDVALIDITY other than the cursor's is not a rebuild of anything: the cursor is replaced and the walk starts again. The scheduler starts at most one scan per IMAP account per fallback interval, straight after that account's sync and only when the sync came back healthy, so a scan and a sync of one account never overlap and a host that is refusing the sync is not asked a second question. A failed scan changes nothing a sync reads: the cursor stays, the sync's own backoff is untouched, and the next window asks again.
+INBOX is the only mailbox the sync state machine above covers. One other mailbox is read, and only read: the Sent folder, for the new-senders screen (section 5, "The Sent folder on IMAP"). It has no generation, no lease and no rows in the cache. Two things touch it. The sync's own session, after its INBOX page is complete, asks `STATUS <sent> (UIDNEXT UIDVALIDITY)`, which selects nothing, and LIST again when its ten-minute memory of the folder is gone; that happens only while the screen has asked for a scan in the last two hours, it cannot fail the page it follows, and a server that refuses it is not asked again for ten minutes. And a scan session, which the scheduler may start at most once per fallback interval and never more than once a minute per IMAP account, after the visit's cache steps and only when the sync came back healthy: it opens only when that STATUS differs from the scan's cursor, the first walk is unfinished, or there is no STATUS to go by and the folder has not just been found quiet. A scan session issues LIST if needed, EXAMINE on the Sent mailbox, at most one `UID SEARCH` and one fetch of `UID` and `ENVELOPE` for at most 250 messages, then closes; its whole durable state is one cursor per account in `senders.sqlite3`, holding the folder's UIDVALIDITY, the highest UID read and where the first walk stands. A UIDVALIDITY other than the cursor's, or a UIDNEXT at or below a UID the cursor has read, is not a rebuild of anything: the cursor is replaced and the walk starts again. A scan and a sync of one account never overlap, because one loop runs both, and a host that is refusing the sync is not asked a second question. A failed scan changes nothing a sync reads: the cursor stays, the sync's own backoff is untouched, and the next window asks again, for half the batch when it was the batch that failed.
 
 Two clocks. Everything the scheduler in [`background-sync.ts`](../lib/mail/service/background-sync.ts) and the IDLE supervisor keep in memory (due times, the IDLE floor, the Sent scan's window, the armed timer, IDLE's backoff and a session's age) is on the monotonic clock, so neither a wall clock set back by NTP or a restored VM nor one pushed forward stops or bunches the sync. The provider backoff the message cache keeps (`retry_at` in `background_sync_control`, 30 seconds doubling to 30 minutes after failed syncs) stays on the wall clock, because it is durable and has to hold across a restart, which a monotonic reading cannot. A clock set back therefore holds an account that was already resting for the jump plus what was left of its rest; an account that was not resting is not affected, and a forward jump only ends a rest early.
 
@@ -1297,7 +1376,7 @@ The constants in [`lib/mail/security.ts`](../lib/mail/security.ts) are the sourc
 | Mailboxes per account | 256 |
 | Active IMAP connections | 14 (two per account) |
 | Concurrent IDLE sessions | 7 (one per IMAP account) |
-| Sent-folder scan on IMAP | 1 session per account per fallback interval (60 s), 250 envelopes a session |
+| Sent-folder scan on IMAP | at most 1 session per account per fallback interval and per 60 s, only when the folder has something to read; 250 envelopes a session |
 | Sent-folder first walk | 5,000 newest envelopes per account |
 | Queued submissions | 100 |
 | Cache | 2 GiB / 100,000 messages |
@@ -1322,7 +1401,7 @@ The constants in [`lib/mail/security.ts`](../lib/mail/security.ts) are the sourc
 
 The two IMAP connection rows are written per account in `security.ts`, so they follow the account cap. They are design targets, not enforced limits: `MailSystemAdmissionPort` is not wired to the IMAP sessions, so nothing refuses a connection past them. The one-session-per-account IDLE figure holds because the supervisor keeps one per account by construction, not because a counter checks it. IDLE (section 8) adds exactly one long-lived connection per custom-domain account, held from the end of its first caught-up pass until Mail is paused, the account stops syncing or the connection drops, on top of the short working sessions a pass, a message fetch or a thread mutation opens and closes. A Gmail account holds none. A host that caps concurrent sessions per user sees that one extra; `BRAIN_MAIL_IMAP_IDLE=0` gives it back and leaves the account on the poll.
 
-The Sent-folder scan (sections 5 and 8) adds no connection that stays: it is one more short working session per IMAP account per fallback interval, opened by the scheduler's one loop after that account's sync has closed its own, so the two are never open together and the most the scheduler holds for an account at one moment is still IDLE plus one. Counted over time rather than at a moment, a quiet custom-domain account logs in twice a fallback interval where it logged in once, while the screen is on; a host that limits logins per hour sees that, and switching the screen off in Settings gives it back. The two scan rows are `IMAP_SENT_SCAN_BATCH` and `IMAP_SENT_SCAN_FIRST_RUN_CAP` in [`sync-adapter.ts`](../lib/mail/providers/imap/sync-adapter.ts), beside the adapter's page sizes rather than in `security.ts`, and both are enforced there: a page with more envelopes than were asked for is refused, and the cap counts what the walk asks for, so a first run never fetches more than it.
+The Sent-folder scan (sections 5 and 8) adds no connection that stays, and none at all for a folder nothing has been sent to: the sync's own session asks the folder's STATUS, and a scan opens a short working session of its own only when that says there is something to read. It is opened by the scheduler's one loop after that account's sync has closed its own, so the two are never open together and the most the scheduler holds for an account at one moment is still IDLE plus one. Counted over time, a quiet custom-domain account at the default interval logs in 60 times an hour for its sync and not once for the scan, where the first version of the scan made it 120; at the five-second floor of the interval it is 720 and none, where it was 1,440. A letter sent from another client costs one login, the first walk of a folder one a minute for at most twenty minutes, and a server that refuses the STATUS at most six an hour. A throttling host that answers LOGIN like a wrong password parks an account for reauth, which is why the count matters. The two scan rows are `IMAP_SENT_SCAN_BATCH` and `IMAP_SENT_SCAN_FIRST_RUN_CAP` in [`sync-adapter.ts`](../lib/mail/providers/imap/sync-adapter.ts), beside the adapter's page sizes rather than in `security.ts`, and both are enforced there: a page with more envelopes than were asked for is refused, and the cap counts what the walk asks for, so a first run never fetches more than it.
 
 The two outgoing rows are set by the process contract three rows above them, not by what a provider would accept. `MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes` is the one number: 10 MiB of decoded attachments per message.
 
@@ -1413,7 +1492,7 @@ Allowed structured log fields:
 - operation ID
 - state phase
 - duration bucket
-- account, mailbox, message, thread, attachment, recipient, queued-submission, remote-image, remote-image-attempt, and IMAP IDLE failure counts
+- account, mailbox, message, thread, attachment, recipient, queued-submission, remote-image, remote-image-attempt, IMAP IDLE failure, and Sent-scan skipped-envelope counts
 - raw-MIME, cache, temporary, and WAL byte counts
 - stable error code
 - refusal reason, a stable code naming which site raised the error code
@@ -1427,7 +1506,7 @@ A `phase` is a route family and its verb — `thread_patch`, `message_content_po
 
 The account id in a `mail_request_failed` record is the one the request named, and it is written only when it has the shape of one: `account-a` and thirty-two hex digits. The projection's own guard admits any 128-character identifier, which is wide enough for a token pasted into the query, so the router checks the shape before the record does and a request that names something else is recorded without an account.
 
-The service writes on two streams, and under one name each. `writeMailLogRecord` in [`security.ts`](../lib/mail/security.ts) puts an answered failure on stderr; `writeServiceLog` in [`main.ts`](../lib/mail/service/main.ts) puts the service's own lifecycle and worker events — `mail_service_started` (carrying `"phase": "running"` or `"phase": "paused"`, which is what that start did rather than what the stored flag says, and `"transport": "direct"` or `"authenticated_byte_relay"` when the flags composed an SMTP runtime, with no field for a relay URL or a provider host), `mail_service_stopping`, a worker's stop failure, the remote-image pipeline's `mail_remote_image_drain_started`, `mail_remote_image_settled` and `mail_remote_image_drain_finished`, the new-senders screen's `mail_sender_blocked_archived` and `mail_sender_restore_failed` (a `threadCount` per account each), `mail_sender_screen_failed` and `mail_service_senders_unavailable`, its Sent-folder scan's `mail_sender_sent_scan` (the envelopes a batch read as `messageCount` and the addresses that became known as `recipientCount`, or a `reason` of `no_sent_mailbox`, `examine_refused`, `uidvalidity_changed` or `scan_failed` with a stable `errorCode`, and never an address or a folder name), and IMAP IDLE's `mail_imap_idle_connected` and `mail_imap_idle_fallback` (a `reason`, a stable `errorCode` for a session that never opened, and the `failureCount` in a row) — on stdout. A settled image carries its outcome as the `phase` (`fetched`, `blocked`, `origin_refused`, `budget_exhausted`, `transient`), the fetcher's stable code as `errorCode`, and the bytes a fetched image added to the cache as `cacheBytes`; a transient retry is always one interval away, so the record does not repeat it. A drain starts with the images it means to take as `remoteImageCount` and finishes with the ones it attempted as `remoteImageAttemptCount`, which differ when teardown cut it short or another path settled an image first. No field names an image, a URL or a host. Both go through the same projection. The artifact smoke reads the two apart, which is why the router never imports the stderr writer under the stdout writer's name.
+The service writes on two streams, and under one name each. `writeMailLogRecord` in [`security.ts`](../lib/mail/security.ts) puts an answered failure on stderr; `writeServiceLog` in [`main.ts`](../lib/mail/service/main.ts) puts the service's own lifecycle and worker events — `mail_service_started` (carrying `"phase": "running"` or `"phase": "paused"`, which is what that start did rather than what the stored flag says, and `"transport": "direct"` or `"authenticated_byte_relay"` when the flags composed an SMTP runtime, with no field for a relay URL or a provider host), `mail_service_stopping`, a worker's stop failure, the remote-image pipeline's `mail_remote_image_drain_started`, `mail_remote_image_settled` and `mail_remote_image_drain_finished`, the new-senders screen's `mail_sender_blocked_archived` and `mail_sender_restore_failed` (a `threadCount` per account each), `mail_sender_screen_failed` and `mail_service_senders_unavailable`, its Sent-folder scan's `mail_sender_sent_scan` (the envelopes a batch read as `messageCount`, the addresses that became known as `recipientCount` and the envelopes passed over as `skippedCount`; a `reason` of `no_sent_mailbox`, `examine_refused`, `batch_failed`, `uidvalidity_changed`, `uidnext_regressed`, `envelope_line_too_long`, `envelope_unreadable`, or `scan_failed` with a stable `errorCode`; and never an address, a UID or a folder name), and IMAP IDLE's `mail_imap_idle_connected` and `mail_imap_idle_fallback` (a `reason`, a stable `errorCode` for a session that never opened, and the `failureCount` in a row) — on stdout. A settled image carries its outcome as the `phase` (`fetched`, `blocked`, `origin_refused`, `budget_exhausted`, `transient`), the fetcher's stable code as `errorCode`, and the bytes a fetched image added to the cache as `cacheBytes`; a transient retry is always one interval away, so the record does not repeat it. A drain starts with the images it means to take as `remoteImageCount` and finishes with the ones it attempted as `remoteImageAttemptCount`, which differ when teardown cut it short or another path settled an image first. No field names an image, a URL or a host. Both go through the same projection. The artifact smoke reads the two apart, which is why the router never imports the stderr writer under the stdout writer's name.
 
 Brain's own proxy layer writes two events, because a failure it manufactures is one the service never saw and cannot record. `mail_proxy_request_failed` covers the three cases where the service's answer was never heard — `mail_service_timeout`, `mail_service_unavailable`, and `mail_service_invalid_response` — and `mail_api_action_failed` covers a route handler throwing something that is not a service answer at all. A cancelled request is not logged: the browser dropping a read it no longer needs happens on every thread switch. A code the service coined is not logged twice.
 

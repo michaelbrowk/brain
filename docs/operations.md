@@ -443,7 +443,7 @@ no account ever has two passes in flight. Its variables live in
 
 | Variable | Default | What it sets |
 | --- | ---: | --- |
-| `BRAIN_MAIL_SYNC_INTERVAL_MS` | 60000 | How often every account syncs at the least, and how far apart a custom-domain account's Sent-folder scans start. |
+| `BRAIN_MAIL_SYNC_INTERVAL_MS` | 60000 | How often every account syncs at the least, and how far apart a custom-domain account's Sent-folder scans start, which is never less than a minute. |
 | `BRAIN_MAIL_GMAIL_INTERVAL_MS` | 20000 | A Gmail account's own cadence. |
 | `BRAIN_MAIL_IMAP_IDLE` | 1 | IMAP IDLE on each custom-domain Inbox; `0` turns it off. |
 
@@ -453,8 +453,8 @@ however quiet the mailbox. That cadence is the whole of it: opening messages,
 downloading bodies for the cache, building the search index and the
 new-senders screen bring the loop round far more often, and none of them asks
 the provider. Only a due cadence, IMAP IDLE (below), a provider page that
-said there is more, or the Sent-folder scan's own window (below) does. Both
-values are whole milliseconds between 5000 and
+said there is more, or a Sent folder with something new in it (below) does.
+Both values are whole milliseconds between 5000 and
 3600000, and the Gmail one may not be slower than the fallback. Anything else
 stops the service at startup with `mail_service_start_failed`, because a
 service that guessed would poll a provider at a rate nobody chose. The IDLE
@@ -474,21 +474,42 @@ sessions per user sees the extra connection; set `BRAIN_MAIL_IMAP_IDLE=0` there
 (`docs/mail-architecture.md`, sections 8 and 11).
 
 While "Screen new senders" is on, a custom-domain account also has its Sent
-folder read, so that people written to from another mail client are known:
-one more short login per account per `BRAIN_MAIL_SYNC_INTERVAL_MS`, straight
-after the sync's own, read-only (EXAMINE and envelopes, 250 at most), and
-only while that account's sync is healthy. The first reads walk back through
-the newest 5,000 sent letters, one batch a window; after that a quiet folder
-costs a login and nothing else. The journal shows `mail_sender_sent_scan`
-with `messageCount` and `recipientCount` for each batch that read something,
-and once each, for as long as it stays true, with a `reason`:
-`no_sent_mailbox` (the server lists no folder that is plainly Sent),
-`examine_refused` (it would not open it), `scan_failed` with an `errorCode`,
-or `uidvalidity_changed` when the server renumbered the folder and the walk
-began again. None of them stops or delays a sync. A host that counts logins
-per hour sees twice as many from such an account; switching the screen off
-in Settings › Mail stops the scan (`docs/mail-architecture.md`, section 5,
-"The Sent folder on IMAP").
+folder read, so that people written to from another mail client are known.
+A quiet folder costs no login: the sync's own session asks the folder's
+STATUS on its way, and a session is opened for the folder only when that
+shows something new, at most once per `BRAIN_MAIL_SYNC_INTERVAL_MS` and never
+more than once a minute, read-only (EXAMINE and envelopes, 250 at most), and
+only while that account's sync is healthy. So a quiet account at the default
+interval logs in 60 times an hour, all of them its sync. The first reads walk
+back through the newest 5,000 sent letters, one batch a window, which is at
+most twenty logins. The journal shows `mail_sender_sent_scan` with
+`messageCount` and `recipientCount` for each batch that read something, with
+`skippedCount` and `envelope_line_too_long` or `envelope_unreadable` for a
+letter no session could read and the scan passed over, and once each, for as
+long as it stays true, with a `reason`: `no_sent_mailbox` (the server lists
+no folder it marks as Sent and none plainly named so), `examine_refused` (it
+would not open it), `scan_failed` with an `errorCode`, `batch_failed` (a
+batch could not be read and is being narrowed), or `uidvalidity_changed` and
+`uidnext_regressed` when the server renumbered or restored the folder and the
+walk began again. None of them stops or delays a sync. A server that refuses
+the STATUS costs at most six such logins an hour instead of none. Switching
+the screen off in Settings › Mail stops the scan
+(`docs/mail-architecture.md`, section 5, "The Sent folder on IMAP").
+
+Since 0.20.3 a folder's role (archive, trash, junk, sent) is taken only from
+the attribute the server itself lists, never from a name the IMAP library
+guessed. On a server that states no attributes, three kinds of folder that
+the guess used to find are no longer found: one named for its role three
+levels down, one of two folders that answer to the name, and a trash or spam
+folder under a name outside the short English list the name tier knows
+(`Trash`, `Deleted Items`, `Deleted Messages`; `Junk`, `Spam`, `Junk
+E-mail`), where the library knew some forty and thirty words for them.
+Archiving then creates and uses `Archive` at the root, and the trash or spam
+action answers 409 `mail_provider_mutation_unsupported` with the reason
+`no_mailbox_for_role` in `mail_request_failed`. A folder named for its role
+in that list, at the root or directly under the Inbox, is found as before,
+and so is every folder on a server that states SPECIAL-USE or XLIST
+attributes.
 
 ## Attachment privacy cache cutover
 

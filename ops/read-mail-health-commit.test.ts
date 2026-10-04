@@ -23,6 +23,34 @@ describe("Mail deploy health parser", () => {
     expect(result.stderr).toBe("");
   });
 
+  // A service that sends names its SMTP byte transport in its health. The
+  // puller reads the health of the release it has just started, so a field
+  // the reader was written before must not stop the deploy that brings it.
+  it.each(["direct", "authenticated_byte_relay"])(
+    "accepts the whole health answer of a service whose send transport is %s",
+    (sendTransport) => {
+      const result = parse({
+        apiVersion: 1,
+        build: { commit, builtAt: "2026-10-04T12:00:00.000Z" },
+        status: "ok",
+        localSchemaVersion: 2,
+        cacheSchemaVersion: 1,
+        receiveReadiness: "ready",
+        sendReadiness: "ready",
+        activeAccounts: 1,
+        queuedSubmissions: 0,
+        lastSuccessfulSyncAgeMs: 1_000,
+        cachePressure: "normal",
+        lastErrorCode: null,
+        sendTransport,
+      });
+
+      expect(result.status).toBe(0);
+      expect(result.stdout).toBe(commit);
+      expect(result.stderr).toBe("");
+    },
+  );
+
   it.each([
     ["malformed JSON", "{"],
     ["wrong API version", { apiVersion: 2, build: { commit }, status: "ok" }],

@@ -106,14 +106,20 @@ export function HubMail({
   const reduce = useReducedMotion() ?? false;
   const [state, setState] = useState<MailBlockState>({ kind: "unknown" });
   const alive = useRef(true);
-  // The read that was started last. Events make reads frequent enough to
-  // overlap, and an older answer landing after a newer one would put back the
-  // rows it had replaced, so only the latest read may write.
-  const latestRead = useRef(0);
+  // Events make reads frequent enough to overlap, and an older answer landing
+  // after a newer one would put back the rows it had replaced. So every read
+  // takes a number, and a read may write unless a LATER one has already
+  // landed. Landed, not started: comparing with the read started last threw
+  // an answer away the moment another read began, whether or not that one
+  // ever answered, and a mailbox syncing in batches (an event every half
+  // second, a read that takes longer) left Home on its skeleton for as long
+  // as the sync ran.
+  const startedRead = useRef(0);
+  const landedRead = useRef(0);
 
   const revalidate = useCallback(async () => {
-    const read = (latestRead.current += 1);
-    const stale = () => !alive.current || read !== latestRead.current;
+    const read = (startedRead.current += 1);
+    const stale = () => !alive.current || read < landedRead.current;
     // The last answer this tab had, so walking back to Home draws the block
     // it drew a moment ago instead of a skeleton. Read here and not in the
     // effect body: the server has no session storage, so the first render has
@@ -153,6 +159,7 @@ export function HubMail({
     }
     if (stale()) return;
     if (accounts.length === 0) {
+      landedRead.current = read;
       forgetSnapshot();
       setState({ kind: "absent" });
       return;
@@ -199,6 +206,7 @@ export function HubMail({
       unreachable,
       accounts: accounts.map((account) => account.emailAddress),
     };
+    landedRead.current = read;
     rememberSnapshot(data);
     setState({ kind: "ready", data });
   }, [client]);
@@ -216,7 +224,9 @@ export function HubMail({
     // a read here asks every account, so a burst about any of them is one
     // read. What cannot change an unread Inbox row lets pass: a body that
     // became ready, and a change that names no Inbox. A hidden tab lets
-    // everything pass, because coming back to it reads the block anyway.
+    // everything pass, because coming back to it reads the block anyway, and
+    // that is asked again when the timer comes due: the tab can hide inside
+    // the debounce.
     let due: ReturnType<typeof setTimeout> | null = null;
     const onMailChanged = (event: Event) => {
       const change = parseBrainMailEvent((event as CustomEvent<unknown>).detail);
@@ -230,7 +240,7 @@ export function HubMail({
       if (due !== null) clearTimeout(due);
       due = setTimeout(() => {
         due = null;
-        void revalidate();
+        if (document.visibilityState === "visible") void revalidate();
       }, MAIL_EVENT_DEBOUNCE_MS);
     };
     document.addEventListener("visibilitychange", onVisible);

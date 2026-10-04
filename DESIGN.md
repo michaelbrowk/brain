@@ -622,10 +622,15 @@ from row to row. Outside the row and half lost in the menu's padding that
 passed. As a full inset ring it says "the keyboard is here" about a row the
 keyboard is not on. The menu's content says which of the two moved focus last
 (`data-key-ring`, written by `useMenuKeyRing` in `components/ui/menu-key-ring.ts`):
-`keys` after a key press inside the menu, `pointer` after the next pointer
-move that goes somewhere, since a list scrolling under a resting pointer is
-reported as a move to where it already was. Under `pointer` a focused row draws
-no ring, and the hover tint says where the pointer is. A focused row also keeps
+`keys` after a key press inside the menu (a modifier on its own claims nothing),
+`pointer` after the mouse next goes somewhere. A mouse, because Radix moves
+focus for a mouse and for no other pointer, so a pen or a finger over the menu
+has taken the focus nowhere. And somewhere, because a list scrolling under a
+resting pointer is reported as a move to where it already was. Coming into the
+menu from outside is a move by itself, except the first entry into a menu the
+keyboard opened, which may have opened under a pointer resting there. Under
+`pointer` a focused row draws no ring, and the hover tint says where the
+pointer is. A focused row also keeps
 its own radius (`--r-block`): the global ring's `border-radius: inherit` took
 it from the row's parent, which has none, and the row under the keys stood
 square among rounded ones. The Tasks list menu is the same menu with other

@@ -87,13 +87,12 @@ describe("TasksListMenu", () => {
       );
     });
     expect(menu.dataset.keyRing).toBe("keys");
-    for (const clientX of [40, 41]) {
-      await act(async () => {
-        rows()[1].dispatchEvent(
-          new MouseEvent("pointermove", { bubbles: true, clientX, clientY: 80 }),
-        );
-      });
-    }
+    // A mouse coming in from the trigger that opened the menu.
+    await act(async () => {
+      const entry = new MouseEvent("pointerover", { bubbles: true, clientX: 40, clientY: 80 });
+      Object.defineProperty(entry, "pointerType", { value: "mouse" });
+      rows()[1].dispatchEvent(entry);
+    });
     expect(menu.dataset.keyRing).toBe("pointer");
   });
 });

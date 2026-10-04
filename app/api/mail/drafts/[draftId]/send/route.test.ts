@@ -152,4 +152,26 @@ describe("the draft door's send route", () => {
     expect(response.status).toBe(413);
     expect(sendDraft).not.toHaveBeenCalled();
   });
+
+  it.each([
+    // Each is a few megabytes of body and hundreds of megabytes parsed.
+    ["a million empty files", () => `{"attachments":[${"{},".repeat(1_000_000)}{}]}`],
+    ["millions of numbers", () => `[${"1,".repeat(3_000_000)}1]`],
+  ])("refuses %s by its structure, before a character of it is parsed", async (_name, make) => {
+    const body = make();
+    const parse = vi.spyOn(JSON, "parse");
+    let response: Response;
+    let parsed: number;
+    try {
+      response = await post(body);
+      parsed = parse.mock.calls.length;
+    } finally {
+      parse.mockRestore();
+    }
+
+    expect(parsed).toBe(0);
+    expect(response.status).toBe(400);
+    expect(await refusal(response)).toBe("mail_draft_request_invalid");
+    expect(sendDraft).not.toHaveBeenCalled();
+  });
 });

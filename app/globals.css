@@ -2184,6 +2184,20 @@ html[data-kbd] [contenteditable]:focus-visible {
   opacity: 0.4;
   pointer-events: none;
 }
+/* A menu that says which of the two moved focus last (`data-key-ring`, written
+   by `useMenuKeyRing`). Radix focuses the row under the pointer, and
+   `html[data-kbd]` clears only on a pointer down, so after one arrow key the
+   ring followed the mouse from row to row. Under `pointer` the focused row
+   draws no ring: its hover tint already says where the pointer is. And a
+   focused row keeps its own radius. The global ring's `border-radius: inherit`
+   takes it from the row's parent, which has none, so the row under the keys
+   stood square among rounded ones. */
+html[data-kbd] .brain-menu[data-key-ring] .brain-menu-item:focus-visible {
+  border-radius: var(--r-block);
+}
+html[data-kbd] .brain-menu[data-key-ring="pointer"] .brain-menu-item:focus-visible {
+  outline: none;
+}
 .brain-menu-icon {
   flex-shrink: 0;
   color: var(--ink-2);

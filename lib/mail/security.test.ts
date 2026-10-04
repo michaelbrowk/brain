@@ -1206,6 +1206,46 @@ describe("mail security and resource contracts", () => {
     expect(accessorRead).toBe(false);
   });
 
+  it("admits the SMTP transport in health as one of its two names, or not at all", () => {
+    const health = {
+      apiVersion: 1 as const,
+      build: { commit: "dev", builtAt: "dev" },
+      status: "ok" as const,
+      localSchemaVersion: 1,
+      cacheSchemaVersion: 1,
+      receiveReadiness: "ready" as const,
+      sendReadiness: "ready" as const,
+      activeAccounts: 1,
+      queuedSubmissions: 0,
+      lastSuccessfulSyncAgeMs: 0,
+      cachePressure: "normal" as const,
+      lastErrorCode: null,
+    };
+    expect(validateMailServiceHealth(health)).not.toHaveProperty("sendTransport");
+    for (const sendTransport of ["direct", "authenticated_byte_relay"] as const) {
+      expect(validateMailServiceHealth({ ...health, sendTransport })).toMatchObject({
+        sendTransport,
+      });
+    }
+    for (const sendTransport of ["relay", "wss://relay.example/v1/tunnel", null, 1]) {
+      expect(() =>
+        validateMailServiceHealth({
+          ...health,
+          sendTransport,
+        } as unknown as Parameters<typeof validateMailServiceHealth>[0]),
+      ).toThrow(/send transport/i);
+    }
+    const accessorBacked = Object.defineProperty({ ...health }, "sendTransport", {
+      enumerable: true,
+      get: () => "direct",
+    });
+    expect(() =>
+      validateMailServiceHealth(
+        accessorBacked as Parameters<typeof validateMailServiceHealth>[0],
+      ),
+    ).toThrow(/data properties/i);
+  });
+
   it("projects only stable documented scalar mail log fields", () => {
     const fixture = {
       event: "mail_sync_failed",

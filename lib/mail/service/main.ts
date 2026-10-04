@@ -288,6 +288,7 @@ async function main(): Promise<void> {
     syncPause,
     ...(senderScreen ? { senders: senderScreen.screen } : {}),
     changes,
+    ...(smtpRuntime ? { sendTransport: smtpRuntime.transport } : {}),
   });
 
   await new Promise<void>((resolve, reject) => {

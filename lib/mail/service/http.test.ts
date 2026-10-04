@@ -101,7 +101,19 @@ describe("brain-mail HTTP-over-UDS shell", () => {
       apiVersion: 1,
       usage: { concurrentSmtpSubmissions: 0, temporaryBytes: 0 },
     });
+    // A service that composed no SMTP runtime says nothing about a transport.
+    expect(health.body).not.toHaveProperty("sendTransport");
   });
+
+  it.each(["direct", "authenticated_byte_relay"] as const)(
+    "says in its health that SMTP leaves by the %s transport",
+    async (sendTransport) => {
+      const instance = await startServer(undefined, undefined, undefined, sendTransport);
+      const health = await requestJson(instance.socketPath, "GET", "/v1/health");
+      expect(health.status).toBe(200);
+      expect(health.body).toMatchObject({ apiVersion: 1, sendTransport });
+    },
+  );
 
   it("dispatches exact Gmail OAuth redirects without echoing query or cookie", async () => {
     const cookie = "__Host-brain-gmail-oauth=" + "A".repeat(64);
@@ -738,6 +750,7 @@ async function startServer(
   admission?: MailSystemAdmissionPort,
   accounts?: MailAccountService,
   gmailOAuth?: Parameters<typeof createMailServiceHttpServer>[0]["gmailOAuth"],
+  sendTransport?: Parameters<typeof createMailServiceHttpServer>[0]["sendTransport"],
 ): Promise<TestServer> {
   const root = await mkdtemp(path.join(tmpdir(), "brain-mail-http-"));
   const socketPath = path.join(root, "mail.sock");
@@ -746,6 +759,7 @@ async function startServer(
     admission,
     accounts,
     gmailOAuth,
+    ...(sendTransport === undefined ? {} : { sendTransport }),
   });
   const instance = { server, root, socketPath };
   running.push(instance);

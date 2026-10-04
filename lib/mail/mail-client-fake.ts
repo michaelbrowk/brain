@@ -188,6 +188,9 @@ function defaultClient(): BrainMailClient {
       apiVersion: 3,
       accounts: [fakeAccountV3()],
     }),
+    // A service that does not say how it sends, which is what an older one
+    // answers.
+    readSendTransport: async () => null,
     createAccount: unavailable,
     updateAccount: unavailable,
     deleteAccount: unavailable,

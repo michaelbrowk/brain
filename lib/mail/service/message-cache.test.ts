@@ -3510,6 +3510,75 @@ describe("per-account message cache", () => {
     reopened.close();
   });
 
+  it("rests an account no longer than the longest backoff after the clock is set back", async () => {
+    const HOUR = 60 * 60_000;
+    const LONGEST_REST = 30 * 60_000;
+    const fixture = await createCache();
+    fixture.cache.bindBackgroundSyncCredential(1, 500);
+    const failedAt = 2 * HOUR;
+    fixture.cache.recordSyncFailure({
+      now: failedAt,
+      errorCode: "mail_provider_rate_limited",
+      retryAfterMs: LONGEST_REST,
+    });
+    expect(fixture.cache.readBackgroundSyncState()).toMatchObject({
+      failureCount: 1,
+      retryAt: failedAt + LONGEST_REST,
+    });
+
+    // NTP or a restored VM sets the wall clock back an hour: the rest that
+    // was thirty minutes away is now ninety.
+    const setBack = failedAt - HOUR;
+    expect(fixture.cache.beginSyncAttempt(setBack)).toEqual({
+      allowed: false,
+      status: "backoff",
+      retryAt: setBack + LONGEST_REST,
+    });
+    // The shorter rest is the durable one, so a restart keeps it and a later
+    // attempt does not push it out again.
+    fixture.cache.close();
+    const reopened = new SqliteMailMessageCache({
+      cacheRoot: fixture.cacheRoot,
+      accountId: ACCOUNT_ID,
+    });
+    await reopened.initialize();
+    expect(reopened.readBackgroundSyncState()).toMatchObject({
+      syncStatus: "backoff",
+      failureCount: 1,
+      retryAt: setBack + LONGEST_REST,
+    });
+    expect(reopened.beginSyncAttempt(setBack + LONGEST_REST - 1)).toEqual({
+      allowed: false,
+      status: "backoff",
+      retryAt: setBack + LONGEST_REST,
+    });
+    expect(reopened.beginSyncAttempt(setBack + LONGEST_REST)).toEqual({
+      allowed: true,
+    });
+    reopened.close();
+  });
+
+  it("leaves a rest inside the longest backoff alone", async () => {
+    const LONGEST_REST = 30 * 60_000;
+    const fixture = await createCache();
+    fixture.cache.bindBackgroundSyncCredential(1, 500);
+    fixture.cache.recordSyncFailure({
+      now: 10_000,
+      errorCode: "mail_provider_rate_limited",
+      retryAfterMs: LONGEST_REST,
+    });
+    // Exactly the longest rest away, as it is at the moment of the failure.
+    expect(fixture.cache.beginSyncAttempt(10_000)).toEqual({
+      allowed: false,
+      status: "backoff",
+      retryAt: 10_000 + LONGEST_REST,
+    });
+    expect(fixture.cache.readBackgroundSyncState()).toMatchObject({
+      retryAt: 10_000 + LONGEST_REST,
+    });
+    fixture.cache.close();
+  });
+
   it("drops an IMAP snapshot when the persisted transport binding changes", async () => {
     const fixture = await createCache();
     expect(

@@ -114,6 +114,19 @@ function rows(): HTMLElement[] {
   ];
 }
 
+/** A pointer event of one kind at one place. jsdom's `MouseEvent` stands in
+ *  for `PointerEvent` in this file, so the kind of pointer is put on it. */
+function pointer(
+  type: "pointermove" | "pointerover",
+  clientX: number,
+  clientY: number,
+  pointerType = "mouse",
+): MouseEvent {
+  const event = new MouseEvent(type, { bubbles: true, clientX, clientY });
+  Object.defineProperty(event, "pointerType", { value: pointerType });
+  return event;
+}
+
 /** Rows by LABEL, not by whole-row text — Inbox carries a count. */
 function labels(): string[] {
   return rows().map((row) => row.querySelector("span")?.textContent?.trim() ?? "");
@@ -472,5 +485,197 @@ describe("MailNav", () => {
     expect(pill).not.toBeNull();
     expect(trigger().className).toContain("btn-quiet");
     expect(document.body.querySelectorAll(".toolbar-pill")).toHaveLength(1);
+  });
+
+  /* THE ROWS LIVE IN A SCROLLER, and a scroller clips. In a short window the
+     arrow keys walk rows the browser has to scroll to, and two things went
+     wrong with the row it brought in. The global ring stands 2px outside its
+     element, which is outside the scroller, so it drew as one bar across the
+     row's top or bottom. And the row was scrolled flush to the scroller's
+     edge, which is where the fade is: 20px of a 32px row dissolved at the
+     bottom, 12px at the top. jsdom measures neither, so this holds the two
+     declarations that fix them, and `e2e/mail-shots.spec.ts` measures the
+     result in a 1024x420 and an 844x390 window. */
+  it("keeps the keyboard's row whole inside the scroller", async () => {
+    await act(async () =>
+      root.render(
+        <MailNav {...defaultProps()} accounts={[gmailAccount, imapAccount]} />,
+      ),
+    );
+    await open();
+
+    expect(rows()).toHaveLength(14);
+    for (const item of rows()) {
+      // the ring inside the row, where nothing clips it
+      expect(item.classList.contains("focus-inset")).toBe(true);
+    }
+    const scroller = rows()[0].closest(".edge-fade");
+    // the fade's own two sizes, kept clear when focus scrolls a row in
+    expect(scroller?.classList.contains("scroll-pt-3")).toBe(true);
+    expect(scroller?.classList.contains("scroll-pb-5")).toBe(true);
+  });
+
+  /* THE RING BELONGS TO THE KEYS. Radix focuses the row under the pointer,
+     and `html[data-kbd]` clears only on a pointer DOWN, so after one arrow key
+     the ring followed the mouse from row to row: a full inset ring on whatever
+     the pointer was resting on, which says "the keyboard is here" about a row
+     the keyboard is not on. The menu says which of the two moved focus last
+     (`data-key-ring`), and globals.css draws the ring only for the keys. */
+  it("says whether the keys or the pointer moved focus last", async () => {
+    await act(async () => root.render(<MailNav {...defaultProps()} />));
+    await open();
+    const menu = document.body.querySelector<HTMLElement>(".brain-menu");
+    if (!menu) throw new Error("Menu is not open");
+    const press = (key: string) =>
+      act(async () => {
+        rows()[0].dispatchEvent(
+          new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }),
+        );
+      });
+    const move = (clientX: number, clientY: number, pointerType = "mouse") =>
+      act(async () => {
+        rows()[1].dispatchEvent(pointer("pointermove", clientX, clientY, pointerType));
+      });
+
+    // Opened by a click: the pointer has it.
+    expect(menu.dataset.keyRing).toBe("pointer");
+
+    // A modifier on its own moves nothing, so it claims nothing, and that is
+    // every key that only changes what another key means.
+    for (const key of [
+      "Shift",
+      "Control",
+      "Alt",
+      "Meta",
+      "AltGraph",
+      "CapsLock",
+      "NumLock",
+      "ScrollLock",
+      "Fn",
+      "FnLock",
+    ]) {
+      await press(key);
+      expect(menu.dataset.keyRing, key).toBe("pointer");
+    }
+    await press("ArrowDown");
+    expect(menu.dataset.keyRing).toBe("keys");
+
+    // An arrow key that scrolls the list slides a row under a resting
+    // pointer, and the browser reports that as a move to where the pointer
+    // already was. Only a move that goes somewhere takes the ring back.
+    await move(40, 80);
+    await move(40, 80);
+    expect(menu.dataset.keyRing).toBe("keys");
+    await move(41, 80);
+    expect(menu.dataset.keyRing).toBe("pointer");
+
+    await press("End");
+    expect(menu.dataset.keyRing).toBe("keys");
+
+    // Radix moves focus for a mouse and for nothing else, so a pen or a
+    // finger passing over the menu has not taken the focus anywhere and
+    // does not take the ring off the keyboard's row.
+    await move(60, 90, "pen");
+    await move(70, 95, "touch");
+    expect(menu.dataset.keyRing).toBe("keys");
+    // Nor did they leave a place behind for the mouse to be measured from.
+    await move(70, 95);
+    await move(72, 95);
+    expect(menu.dataset.keyRing).toBe("pointer");
+  });
+
+  it("takes a mouse coming into the menu as a move, from its first event", async () => {
+    await act(async () => root.render(<MailNav {...defaultProps()} />));
+    await open();
+    const menu = document.body.querySelector<HTMLElement>(".brain-menu");
+    if (!menu) throw new Error("Menu is not open");
+    await act(async () => {
+      rows()[0].dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }),
+      );
+    });
+    expect(menu.dataset.keyRing).toBe("keys");
+
+    // A click opened this menu, so the pointer was on the trigger, outside
+    // it. The first event it sent from inside used to be spent on learning
+    // where it was, and the ring stayed under a pointer already on a row.
+    // A pen coming in is still nobody's move.
+    await act(async () => {
+      rows()[1].dispatchEvent(pointer("pointerover", 40, 80, "pen"));
+    });
+    expect(menu.dataset.keyRing).toBe("keys");
+    await act(async () => {
+      rows()[1].dispatchEvent(pointer("pointerover", 40, 80));
+    });
+    expect(menu.dataset.keyRing).toBe("pointer");
+  });
+
+  it("forgets where the pointer was when the menu opens again", async () => {
+    await act(async () => root.render(<MailNav {...defaultProps()} />));
+    await open();
+    await act(async () => {
+      rows()[1].dispatchEvent(pointer("pointermove", 40, 80));
+      rows()[1].dispatchEvent(pointer("pointermove", 50, 90));
+    });
+    await act(async () => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+      );
+    });
+    expect(document.body.querySelector(".brain-menu")).toBeNull();
+
+    await open();
+    const menu = document.body.querySelector<HTMLElement>(".brain-menu");
+    if (!menu) throw new Error("Menu is not open");
+    await act(async () => {
+      rows()[0].dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }),
+      );
+    });
+    // A move the menu saw no entry for (the list slid under a pointer that
+    // has been resting somewhere else since the last time) has nothing from
+    // this opening to be measured against, and a place from the last one
+    // would call it a move.
+    await act(async () => {
+      rows()[1].dispatchEvent(pointer("pointermove", 60, 100));
+    });
+    expect(menu.dataset.keyRing).toBe("keys");
+  });
+
+  it("opens on the keys when the keyboard opened it", async () => {
+    document.documentElement.dataset.kbd = "true";
+    try {
+      await act(async () => root.render(<MailNav {...defaultProps()} />));
+      await open();
+      const menu = document.body.querySelector<HTMLElement>(".brain-menu");
+      expect(menu?.dataset.keyRing).toBe("keys");
+
+      // It may have opened under a pointer that was resting there. The
+      // browser reports that as the pointer coming in, with nobody having
+      // moved it, so the first entry only notes the place.
+      await act(async () => {
+        rows()[1].dispatchEvent(pointer("pointerover", 40, 80));
+        rows()[1].dispatchEvent(pointer("pointermove", 40, 80));
+      });
+      expect(menu?.dataset.keyRing).toBe("keys");
+      // From there on it is measured like any pointer: a move to another
+      // place is one, and so is coming in a second time.
+      await act(async () => {
+        rows()[1].dispatchEvent(pointer("pointermove", 41, 80));
+      });
+      expect(menu?.dataset.keyRing).toBe("pointer");
+      await act(async () => {
+        rows()[0].dispatchEvent(
+          new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }),
+        );
+      });
+      expect(menu?.dataset.keyRing).toBe("keys");
+      await act(async () => {
+        rows()[2].dispatchEvent(pointer("pointerover", 41, 80));
+      });
+      expect(menu?.dataset.keyRing).toBe("pointer");
+    } finally {
+      delete document.documentElement.dataset.kbd;
+    }
   });
 });

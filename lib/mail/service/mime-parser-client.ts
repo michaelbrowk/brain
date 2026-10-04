@@ -72,7 +72,21 @@ class WorkerHungUp extends Error {
  */
 interface WorkerExchange {
   answered: boolean;
+  /**
+   * The caller gave the parse up. From here the client writes nothing and
+   * reads only to hear the worker close the connection.
+   */
+  abandoned: boolean;
 }
+
+/**
+ * How long an abandoned parse waits for its worker to close the connection.
+ * A worker hears the hang-up between the steps of a parse, and the longest
+ * step, the synchronous sanitize of a large HTML part, takes up to a second
+ * and a half under the parser unit's CPU quota. Past this the connection is
+ * destroyed and the runner's re-parse waits are what is left.
+ */
+const WORKER_LET_GO_DEADLINE_MS = 2_000;
 
 export class UnixSocketMailMimeParser implements IsolatedMailParserPort {
   readonly isolation = Object.freeze({
@@ -81,9 +95,21 @@ export class UnixSocketMailMimeParser implements IsolatedMailParserPort {
     sandboxVersion: 1,
   });
   private readonly socketPath: string;
+  private readonly workerLetGoDeadlineMs: number;
 
-  constructor(options: { readonly socketPath?: string } = {}) {
+  constructor(
+    options: {
+      readonly socketPath?: string;
+      /** `WORKER_LET_GO_DEADLINE_MS` unless a test sets it. */
+      readonly workerLetGoDeadlineMs?: number;
+    } = {},
+  ) {
     this.socketPath = validateSocketPath(options.socketPath ?? DEFAULT_PARSER_SOCKET);
+    const deadline = options.workerLetGoDeadlineMs ?? WORKER_LET_GO_DEADLINE_MS;
+    if (!Number.isSafeInteger(deadline) || deadline < 1 || deadline > 60_000) {
+      throw new Error("mail MIME worker let-go deadline is invalid");
+    }
+    this.workerLetGoDeadlineMs = deadline;
   }
 
   async parse(request: MailMimeParseRequest): Promise<MailMimeParseOutcome> {
@@ -106,26 +132,58 @@ export class UnixSocketMailMimeParser implements IsolatedMailParserPort {
     }
 
     let terminal: MailMimeTransientErrorCode | null = null;
+    const exchange: WorkerExchange = { answered: false, abandoned: false };
+    let letGoTimer: NodeJS.Timeout | null = null;
+    /*
+      A caller that gives the parse up, as a prefetch displaced for an owner's
+      letter does, is not answered until its worker has closed the connection.
+      The parser socket counts a connection until its worker has exited, and a
+      worker hears a hang-up only between the steps of a parse: one part way
+      through a synchronous sanitize runs it to the end first. Destroying the
+      socket here returned at once, the queue gave the slot to the owner's
+      letter, and the socket, still counting the old worker, dropped that
+      letter's connection. So the client half-closes, which is the hang-up the
+      worker stops at, and keeps reading until the worker's side closes. A
+      worker that does not close in time loses the connection anyway.
+    */
     const abort = () => {
+      if (terminal !== null) return;
       terminal = "mail_mime_aborted";
-      socket.destroy();
+      exchange.abandoned = true;
+      if (socket.destroyed) return;
+      socket.end();
+      letGoTimer = setTimeout(() => socket.destroy(), this.workerLetGoDeadlineMs);
+      letGoTimer.unref();
+    };
+    // Past its own failures the connection is destroyed, unless the caller
+    // has given the parse up: then it is the worker's to close.
+    const hangUp = () => {
+      if (!exchange.abandoned) socket.destroy();
     };
     request.signal.addEventListener("abort", abort, { once: true });
     const timeout = setTimeout(() => {
-      terminal = "mail_mime_worker_timeout";
+      terminal ??= "mail_mime_worker_timeout";
       socket.destroy();
     }, Math.max(1, projected.budget.deadlineAt - Date.now()));
     timeout.unref();
 
-    const exchange: WorkerExchange = { answered: false };
+    // Reading starts before the first write, so an abort that lands at any
+    // point after the connection has a reader to hear the worker close.
+    const receiveTask = settle(
+      "receive",
+      receiveWorkerResponse(socket, projected, exchange),
+    );
     try {
+      // The signal can have fired while the connection was being made, before
+      // anything listened for it. The worker is starting all the same.
+      if (request.signal.aborted) abort();
+      if (exchange.abandoned) throw new WorkerHungUp();
       await writeBmp1JsonFrame(socket, BMP1_FRAME.request, projected).catch(() => {
         throw new WorkerHungUp();
       });
-      const sendTask = settle("send", sendRawMime(socket, request, projected));
-      const receiveTask = settle(
-        "receive",
-        receiveWorkerResponse(socket, projected, exchange),
+      const sendTask = settle(
+        "send",
+        sendRawMime(socket, request, projected, exchange),
       );
       const first = await Promise.race([sendTask, receiveTask]);
       if (first.error !== null) {
@@ -135,11 +193,11 @@ export class UnixSocketMailMimeParser implements IsolatedMailParserPort {
             new Promise<null>((resolve) => setTimeout(() => resolve(null), 25)),
           ]);
           if (remote !== null && remote.error instanceof ParseFailure) {
-            socket.destroy();
+            hangUp();
             throw remote.error;
           }
         }
-        socket.destroy();
+        hangUp();
         if (first.source === "receive") await sendTask;
         throw first.error;
       }
@@ -177,7 +235,11 @@ export class UnixSocketMailMimeParser implements IsolatedMailParserPort {
         exchange.answered ? "mail_mime_worker_crashed" : "mail_mime_worker_dropped",
       );
     } finally {
+      // The reader ends when the worker closes its side, or when the let-go
+      // deadline or the parse deadline destroys the connection.
+      if (exchange.abandoned) await receiveTask;
       clearTimeout(timeout);
+      if (letGoTimer !== null) clearTimeout(letGoTimer);
       request.signal.removeEventListener("abort", abort);
       socket.destroy();
     }
@@ -202,13 +264,18 @@ async function sendRawMime(
   socket: Socket,
   request: MailMimeParseRequest,
   projected: MailMimeWorkerRequest,
+  exchange: WorkerExchange,
 ): Promise<void> {
   const hash = createHash("sha256");
   let bytes = 0;
-  const write = (type: number, payload?: Uint8Array) =>
-    writeBmp1Frame(socket, type, payload).catch(() => {
+  const write = async (type: number, payload?: Uint8Array) => {
+    // An abandoned connection is half-closed, and a write after that would
+    // destroy it before the worker has closed its side.
+    if (exchange.abandoned) throw transient("mail_mime_aborted");
+    await writeBmp1Frame(socket, type, payload).catch(() => {
       throw new WorkerHungUp();
     });
+  };
   try {
     for await (const candidate of request.rawMimeStream) {
       if (request.signal.aborted) throw transient("mail_mime_aborted");
@@ -261,6 +328,8 @@ async function receiveWorkerResponse(
 
   try {
     for await (const frame of readBmp1Frames(socket)) {
+      // Nobody wants the answer any more: read on only to hear the close.
+      if (exchange.abandoned) continue;
       exchange.answered = true;
       if (frame.type === BMP1_FRAME.error) throw parseRemoteFailure(frame.payload);
       if (frame.type === BMP1_FRAME.artifactBegin) {

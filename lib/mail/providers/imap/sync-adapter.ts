@@ -451,8 +451,8 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
    * Inbox alone, so a letter sent from another client is seen nowhere else.
    *
    * One session a call. The mailbox is examined read-only and the only fetch
-   * is `UID ENVELOPE`: no body, no header block, no flag, and nothing is ever
-   * stored, moved or created. An ENVELOPE carries Bcc on the wire, because
+   * asks for UID and ENVELOPE: no body, no header block, no flag, and nothing
+   * is ever stored, moved or created. An ENVELOPE carries Bcc on the wire, because
    * the protocol has no envelope without it; this adapter never reads that
    * field. Mail that arrived since the cursor is read first, by UID; then the
    * first walk goes on, newest first. The caller spaces the calls.

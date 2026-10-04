@@ -15,6 +15,12 @@ const MAX_PROVIDER_PAGES_PER_BURST = 6;
  * a second; hints inside the window fold into the one pass at its end.
  */
 const IDLE_PASS_FLOOR_MS = 5_000;
+/**
+ * The least time between two Sent-folder scans of one account. The fallback
+ * interval may be set as low as five seconds, and a scan that finds new mail
+ * is a login: that rate is the sync's to choose, not the scan's.
+ */
+const SENT_SCAN_MIN_WINDOW_MS = 60_000;
 const SAFE_ACCOUNT_ID = /^account-a[0-9a-f]{32}$/;
 
 /**
@@ -77,8 +83,8 @@ export interface MailBackgroundSenderPort {
   ): Promise<{ readonly hasMore: boolean }>;
   /**
    * The screen's read of an IMAP account's Sent folder. Unlike the step
-   * above it opens a session at the provider, so the scheduler runs it on
-   * the fallback cadence and not on every visit.
+   * above it may open a session at the provider, so the scheduler runs it
+   * once a window and not on every visit.
    */
   runBackgroundSentScanStep?(accountId: string, signal: AbortSignal): Promise<void>;
 }
@@ -111,11 +117,13 @@ export interface MailBackgroundIdlePort {
  * nothing beyond the cadence. The scheduler is one loop, so no account ever
  * has two passes in flight.
  *
- * One step beside the sync does reach a provider: the senders screen's scan
+ * One step beside the sync may reach a provider: the senders screen's scan
  * of an IMAP account's Sent folder. It has a window of its own, `intervalMs`
- * from the start of one scan to the start of the next, so an IMAP account
- * costs its host at most one more session per fallback interval than its
- * sync does, however often IDLE or a kick brings the scheduler round.
+ * and never less than a minute from the start of one scan to the start of
+ * the next, however often IDLE or a kick brings the scheduler round. Inside
+ * a window the scan opens a session only when the folder has something to
+ * read: the sync's own session asks the folder's STATUS on its way, so a
+ * quiet folder costs its host no login beyond the sync's.
  */
 export class MailBackgroundSyncScheduler {
   private readonly port: MailBackgroundSyncPort;
@@ -474,29 +482,6 @@ export class MailBackgroundSyncScheduler {
         syncSucceeded = this.syncHealthy.has(accountId);
       }
       if (signal.aborted) return false;
-      // The Sent-folder scan is a provider session, so it is not a cache step
-      // that runs on every visit: at most one start per fallback interval,
-      // only for an IMAP account, and only while its sync is healthy, so a
-      // host that is refusing the sync is not asked a second question. It
-      // sits straight after the sync because the window is measured from the
-      // scan's own start: the next sync is due an interval after this one
-      // ended and takes a session of its own, so the visit that runs it
-      // finds the window passed, and the two keep one rhythm. What the scan
-      // has left to read waits for the next window, never for a continuation.
-      if (
-        this.senders?.runBackgroundSentScanStep !== undefined &&
-        syncSucceeded &&
-        this.providers.get(accountId) === "imap" &&
-        (this.sentScanDueAt.get(accountId) ?? 0) <= monotonicNow()
-      ) {
-        this.sentScanDueAt.set(accountId, monotonicNow() + this.intervalMs);
-        try {
-          await this.senders.runBackgroundSentScanStep(accountId, signal);
-        } catch {
-          if (signal.aborted) return false;
-        }
-      }
-      if (signal.aborted) return false;
       let privacyHasMore = false;
       if (this.privacyCache !== null) {
         try {
@@ -538,6 +523,33 @@ export class MailBackgroundSyncScheduler {
               signal,
             ),
           ).hasMore;
+        } catch {
+          if (signal.aborted) return false;
+        }
+      }
+      if (signal.aborted) return false;
+      // The Sent-folder scan may open a provider session, so it is not a
+      // cache step that runs on every visit: at most one start per window,
+      // only for an IMAP account, and only while its sync is healthy, so a
+      // host that is refusing the sync is not asked a second question. The
+      // window is measured from one scan's start to the next and is the
+      // fallback interval, never less than a minute however short that is
+      // set. It comes after the cache steps because a scan can hold its
+      // session to the deadline, and the bodies, the index and the archiver
+      // of this visit should not wait behind it. What a scan leaves to read
+      // waits for the next window, never for a continuation.
+      if (
+        this.senders?.runBackgroundSentScanStep !== undefined &&
+        syncSucceeded &&
+        this.providers.get(accountId) === "imap" &&
+        (this.sentScanDueAt.get(accountId) ?? 0) <= monotonicNow()
+      ) {
+        this.sentScanDueAt.set(
+          accountId,
+          monotonicNow() + Math.max(this.intervalMs, SENT_SCAN_MIN_WINDOW_MS),
+        );
+        try {
+          await this.senders.runBackgroundSentScanStep(accountId, signal);
         } catch {
           if (signal.aborted) return false;
         }

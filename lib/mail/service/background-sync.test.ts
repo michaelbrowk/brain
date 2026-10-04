@@ -1455,7 +1455,7 @@ describe("the Sent-folder scan in the scheduler", () => {
     };
   }
 
-  it("scans an IMAP account once per fallback interval, straight after its sync, and never a Gmail account", async () => {
+  it("scans an IMAP account once per fallback interval, after the visit's cache steps, and never a Gmail account", async () => {
     vi.useFakeTimers({ now: 0 });
     const scans: Array<{ accountId: string; at: number }> = [];
     const log: string[] = [];
@@ -1487,14 +1487,16 @@ describe("the Sent-folder scan in the scheduler", () => {
 
     scheduler.start();
     await vi.advanceTimersByTimeAsync(10);
+    // Last in the visit: a scan may hold its session to the deadline, and
+    // the bodies, the index and the archiver of this account do not wait.
     expect(log).toEqual([
       `sync ${accountA}`,
       `prefetch ${accountA}`,
       `senders ${accountA}`,
       `sync ${imap}`,
-      `scan ${imap}`,
       `prefetch ${imap}`,
       `senders ${imap}`,
+      `scan ${imap}`,
     ]);
     await vi.advanceTimersByTimeAsync(180_000);
     expect(scans).toEqual([
@@ -1634,24 +1636,89 @@ describe("the Sent-folder scan in the scheduler", () => {
     await scheduler.stop();
   });
 
+  it("starts the window afresh after a pause, and for an account that left and came back", async () => {
+    vi.useFakeTimers({ now: 0 });
+    const scans: Array<{ accountId: string; at: number }> = [];
+    let accounts = [{ accountId: imap, providerKind: "imap" as const }];
+    const scheduler = new MailBackgroundSyncScheduler(
+      {
+        listAccountIds: async () => accounts.map((account) => account.accountId),
+        listSyncAccounts: async () => accounts,
+        runBackgroundSyncStep: async () => syncResult(false),
+      },
+      { initialDelayMs: 10, intervalMs: 60_000, senders: scanPort(scans) },
+    );
+
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(10);
+    // Mail is switched off and on again inside the window: what the scan
+    // knew is a pause old, so it does not wait out the rest of the minute.
+    await scheduler.stop();
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(timesOf(scans, imap)).toEqual([10, 20]);
+
+    // Parked for reauth and back, again inside the window.
+    accounts = [];
+    scheduler.kick();
+    await vi.advanceTimersByTimeAsync(0);
+    accounts = [{ accountId: imap, providerKind: "imap" }];
+    scheduler.kick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(timesOf(scans, imap)).toEqual([10, 20, 20]);
+    await scheduler.stop();
+  });
+
+  it("never scans more than once a minute, however short the fallback interval", async () => {
+    vi.useFakeTimers({ now: 0 });
+    const scans: Array<{ accountId: string; at: number }> = [];
+    let syncs = 0;
+    const scheduler = new MailBackgroundSyncScheduler(
+      {
+        listAccountIds: async () => [imap],
+        listSyncAccounts: async () => [{ accountId: imap, providerKind: "imap" }],
+        runBackgroundSyncStep: async () => {
+          syncs += 1;
+          return syncResult(false);
+        },
+      },
+      // The floor BRAIN_MAIL_SYNC_INTERVAL_MS allows.
+      { initialDelayMs: 10, intervalMs: 5_000, gmailIntervalMs: 5_000, senders: scanPort(scans) },
+    );
+
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(3_600_000);
+
+    expect(syncs).toBe(720);
+    const times = timesOf(scans, imap);
+    expect(times).toHaveLength(60);
+    expect(Math.min(...gaps(times))).toBeGreaterThanOrEqual(60_000);
+    await scheduler.stop();
+  });
+
   it("keeps the pass going when a scan fails, and leaves accounts of an unnamed provider alone", async () => {
     vi.useFakeTimers({ now: 0 });
     const log: string[] = [];
     const failing = new MailBackgroundSyncScheduler(
       {
-        listAccountIds: async () => [imap],
-        listSyncAccounts: async () => [{ accountId: imap, providerKind: "imap" }],
-        runBackgroundSyncStep: async () => syncResult(false),
+        listAccountIds: async () => [imap, accountB],
+        listSyncAccounts: async () => [
+          { accountId: imap, providerKind: "imap" },
+          { accountId: accountB, providerKind: "imap" },
+        ],
+        runBackgroundSyncStep: async (accountId) => {
+          log.push(`sync ${accountId}`);
+          return syncResult(false);
+        },
       },
       {
         initialDelayMs: 10,
         senders: {
-          async runBackgroundSenderStep(accountId) {
-            log.push(`senders ${accountId}`);
+          async runBackgroundSenderStep() {
             return { hasMore: false };
           },
-          async runBackgroundSentScanStep() {
-            log.push("scan");
+          async runBackgroundSentScanStep(accountId) {
+            log.push(`scan ${accountId}`);
             throw new Error("senders store unavailable");
           },
         },
@@ -1659,7 +1726,8 @@ describe("the Sent-folder scan in the scheduler", () => {
     );
     failing.start();
     await vi.advanceTimersByTimeAsync(10);
-    expect(log).toEqual(["scan", `senders ${imap}`]);
+    // The account after the one whose scan failed is still visited.
+    expect(log).toEqual([`sync ${imap}`, `scan ${imap}`, `sync ${accountB}`, `scan ${accountB}`]);
     await failing.stop();
 
     // A port that does not name its providers runs no scan at all.

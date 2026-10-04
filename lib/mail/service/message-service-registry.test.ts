@@ -239,7 +239,13 @@ describe("multi-account message registry", () => {
       { cursor: "s1_77_12_0_0_0" },
       expect.any(AbortSignal),
     );
-    // The session it opens ends with the caller's pass and with the account.
+    // The session it opens ends with the caller's pass (a pause, a shutdown)
+    // and with the account (a removal, a credential edit), each on its own.
+    const stopping = new AbortController();
+    await scanning.scanSentEnvelopes(ACCOUNT_ID, { cursor: null }, stopping.signal);
+    expect(signals[1]!.aborted).toBe(false);
+    stopping.abort();
+    expect(signals[1]!.aborted).toBe(true);
     expect(signals[0]!.aborted).toBe(false);
     await scanning.invalidateAccount(ACCOUNT_ID);
     expect(signals[0]!.aborted).toBe(true);

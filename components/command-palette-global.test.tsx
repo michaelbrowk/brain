@@ -630,11 +630,14 @@ describe("CommandPalette global search", () => {
       }
       expect(mailRequests()).toHaveLength(2);
 
-      // It lands still short, and the syncs it missed are one more ask.
+      // It lands still short, and the syncs it missed are one more ask, a
+      // debounce later like any other and not on the heels of the last.
       await act(async () => held[0](response(syncingBody())));
       await settle();
       expect(noteText()).toContain("still syncing");
-      await pass(MAIL_EVENT_DEBOUNCE_MS);
+      await pass(MAIL_EVENT_DEBOUNCE_MS - 1);
+      expect(mailRequests()).toHaveLength(2);
+      await pass(1);
       expect(mailRequests()).toHaveLength(3);
       await act(async () => held[1](response(wholeBody())));
       await settle();
@@ -724,6 +727,321 @@ describe("CommandPalette global search", () => {
       );
       added.mockRestore();
       removed.mockRestore();
+    });
+
+    it("asks once for a burst, and not again for the same burst once it lands", async () => {
+      // Three events inside one debounce are one timer. Left as three, the
+      // first asked and the other two were counted as events that arrived
+      // while it was out, which is one ask too many for every burst.
+      mailAnswer = async () => response(syncingBody());
+      await render();
+      await type("quarterly");
+
+      await act(async () => {
+        mailEvent(synced());
+        mailEvent(synced(["all"]));
+        mailEvent({ kind: "mail", changeKind: "reset" });
+      });
+      await pass(MAIL_EVENT_DEBOUNCE_MS);
+      expect(mailRequests()).toHaveLength(2);
+      expect(noteText()).toContain("still syncing");
+      await pass(MAIL_EVENT_DEBOUNCE_MS * 3);
+      expect(mailRequests()).toHaveLength(2);
+    });
+
+    it("keeps the rows and keeps listening when the ask is refused", async () => {
+      // A re-ask the route refuses (the module paused in another tab, the
+      // mail container going down) is not an answer about the mailbox. It
+      // used to be drawn as one: the rows and the line went, and with them
+      // the listening. The shell takes the group away itself when Mail is
+      // paused (`searchMail`), so the palette has nothing to add here.
+      mailAnswer = async () => response(syncingBody());
+      await render();
+      await type("quarterly");
+
+      for (const refusal of [
+        () => response({ apiVersion: 1, error: { code: "mail_service_unavailable" } }, 503),
+        () => response({ error: "module_off" }, 409),
+        () => response({ error: "invalid_query" }, 400),
+      ]) {
+        const asked = mailRequests().length;
+        mailAnswer = async () => refusal();
+        await act(async () => mailEvent(synced()));
+        await pass(MAIL_EVENT_DEBOUNCE_MS);
+        expect(mailRequests()).toHaveLength(asked + 1);
+        expect(rows("Mail")).toHaveLength(1);
+        expect(noteText()).toContain("still syncing");
+      }
+
+      mailAnswer = async () => response(wholeBody());
+      await act(async () => mailEvent(synced()));
+      await pass(MAIL_EVENT_DEBOUNCE_MS);
+      expect(rows("Mail")).toHaveLength(2);
+      expect(noteText()).toBeNull();
+    });
+
+    it("listens only under a line a sync can clear", async () => {
+      // "needs to be reconnected" waits for the reader, not for a sync. Under
+      // it every sync of any account asked again, for as long as the palette
+      // stood open, and no answer could ever take the line away.
+      const reauth = () =>
+        shortBody(
+          [thread("thread-1", "Quarterly launch review")],
+          [
+            SEARCHED_ACCOUNT,
+            unsearchedAccount("account-b", "design@example.test", "mailbox_reauth_required"),
+          ],
+        );
+      mailAnswer = async () => response(reauth());
+      await render();
+      await type("quarterly");
+      expect(noteText()).toContain("needs to be reconnected");
+
+      for (let beat = 0; beat < 3; beat += 1) {
+        await act(async () => mailEvent(synced()));
+        await pass(MAIL_EVENT_DEBOUNCE_MS);
+      }
+      await act(async () => mailEvent({ kind: "mail", changeKind: "reset" }));
+      await pass(MAIL_EVENT_DEBOUNCE_MS);
+      expect(mailRequests()).toHaveLength(1);
+
+      // A mailbox that failed its last sync will try again, and one beside a
+      // lapsed sign-in that is still syncing will finish: both listen.
+      for (const accounts of [
+        [unsearchedAccount("account-b", "design@example.test", "mailbox_backoff")],
+        [
+          unsearchedAccount("account-b", "design@example.test", "mailbox_reauth_required"),
+          unsearchedAccount("account-c", "studio@example.test", "mailbox_syncing"),
+        ],
+      ]) {
+        mailAnswer = async () =>
+          response(shortBody([thread("thread-1", "Quarterly launch review")], accounts));
+        await type(accounts.length === 1 ? "quarterly backoff" : "quarterly mixed");
+        const asked = mailRequests().length;
+        // What is left once the sync finishes is the line nothing clears.
+        mailAnswer = async () => response(reauth());
+        await act(async () => mailEvent(synced()));
+        await pass(MAIL_EVENT_DEBOUNCE_MS);
+        expect(mailRequests()).toHaveLength(asked + 1);
+        expect(noteText()).toContain("needs to be reconnected");
+        await act(async () => mailEvent(synced()));
+        await pass(MAIL_EVENT_DEBOUNCE_MS);
+        expect(mailRequests()).toHaveLength(asked + 1);
+      }
+    });
+
+    it("asks once on coming back to the tab under a line a sync can clear", async () => {
+      // A sync that finished while the tab was hidden sent its event to a
+      // palette that lets events pass in a hidden tab, so the line stood over
+      // a mailbox that had long been read.
+      const becomeVisible = () =>
+        act(async () => {
+          document.dispatchEvent(new Event("visibilitychange"));
+        });
+      mailAnswer = async () => response(syncingBody());
+      await render();
+      await type("quarterly");
+
+      const hidden = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+      await act(async () => mailEvent(synced()));
+      await pass(MAIL_EVENT_DEBOUNCE_MS);
+      // Hiding is a visibilitychange too, and asks nothing.
+      await becomeVisible();
+      await settle();
+      expect(mailRequests()).toHaveLength(1);
+      hidden.mockRestore();
+
+      mailAnswer = async () => response(wholeBody());
+      await becomeVisible();
+      await settle();
+      // At once: nobody is typing, and the reader is looking at the line now.
+      expect(mailRequests()).toHaveLength(2);
+      expect(noteText()).toBeNull();
+
+      // A whole answer has nothing to come back to.
+      await becomeVisible();
+      await settle();
+      expect(mailRequests()).toHaveLength(2);
+    });
+
+    it("asks nothing of its own for a query whose first answer is not in yet", async () => {
+      // The line on screen belongs to the query before this one. Until the
+      // new query has an answer of its own there is nothing to refresh, and
+      // an ask here would run beside the one the typing started.
+      mailAnswer = async () => response(syncingBody());
+      await render();
+      const input = await type("quarterly");
+      const becomeVisible = () =>
+        act(async () => {
+          document.dispatchEvent(new Event("visibilitychange"));
+        });
+
+      // Typed, and still inside the typing debounce: no ask is out at all.
+      const held: ((value: Response) => void)[] = [];
+      mailAnswer = () => new Promise<Response>((resolve) => held.push(resolve));
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+          input,
+          "quarterly launch",
+        );
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await becomeVisible();
+      await settle();
+      expect(mailRequests()).toHaveLength(1);
+
+      // The typing's own ask goes out and is held: still nothing beside it.
+      await pass(200);
+      expect(mailRequests()).toHaveLength(2);
+      await becomeVisible();
+      await act(async () => mailEvent(synced()));
+      await pass(MAIL_EVENT_DEBOUNCE_MS);
+      expect(mailRequests()).toHaveLength(2);
+      await act(async () => held[0](response(wholeBody())));
+      await settle();
+
+      // The same for a palette the shell closed and opened again on the same
+      // query: its answer is asked for afresh, and nothing rides beside that.
+      mailAnswer = async () => response(syncingBody());
+      await type("quarterly");
+      const asked = mailRequests().length;
+      mailAnswer = () => new Promise<Response>((resolve) => held.push(resolve));
+      await render({ open: false });
+      await render({ open: true });
+      await pass(200);
+      expect(mailRequests()).toHaveLength(asked + 1);
+      await becomeVisible();
+      await settle();
+      expect(mailRequests()).toHaveLength(asked + 1);
+    });
+
+    describe("and never moves the keyboard's cursor off its letter", () => {
+      const accounts = [
+        SEARCHED_ACCOUNT,
+        unsearchedAccount("account-b", "design@example.test", "global_syncing"),
+      ];
+      const old = (index: number) => thread(`old-${index}`, `Quarterly old ${index}`);
+      const fresh = (index: number) => thread(`new-${index}`, `Quarterly new ${index}`);
+      const five = <T,>(make: (index: number) => T) => Array.from({ length: 5 }, (_, i) => make(i));
+      const selected = () =>
+        document.body.querySelector('[cmdk-item][aria-selected="true"]')?.textContent ?? "";
+      const press = (input: HTMLInputElement, key: string) =>
+        act(async () => {
+          input.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+        });
+
+      async function openOnFifthLetter() {
+        mailAnswer = async () => response(shortBody(five(old), accounts));
+        // A page above the mail rows, which is where cmdk sends a cursor
+        // whose row has gone.
+        await render({ tree: [node()] });
+        const input = await type("quarterly");
+        await press(input, "End");
+        await settle();
+        expect(selected()).toContain("Quarterly old 4");
+        return input;
+      }
+
+      it("opens the group when newer letters push its row past the fold", async () => {
+        // The reader has the cursor on the fifth letter and a hand on Enter.
+        // A sync brings five newer ones, the row folds under Show all, cmdk
+        // sends the cursor to the top of the list, and Enter opens a page.
+        const input = await openOnFifthLetter();
+
+        mailAnswer = async () => response(shortBody([...five(fresh), ...five(old)], accounts));
+        await act(async () => mailEvent(synced()));
+        await pass(MAIL_EVENT_DEBOUNCE_MS);
+
+        expect(mailRequests()).toHaveLength(2);
+        // All ten, and no Show all row: the group opened for the cursor.
+        expect(rows("Mail")).toHaveLength(10);
+        expect(group("Mail")?.textContent).not.toContain("Show all");
+        expect(selected()).toContain("Quarterly old 4");
+        await press(input, "Enter");
+        expect(onSelect).toHaveBeenCalledTimes(1);
+        expect(onSelect).toHaveBeenLastCalledWith({
+          kind: "mail",
+          accountId: ACCOUNT_ID,
+          threadId: "old-4",
+          mailboxId: "all",
+        });
+      });
+
+      it("moves to the first letter when its own is no longer in the answer", async () => {
+        const input = await openOnFifthLetter();
+
+        // The fifth letter is gone from the answer (archived elsewhere).
+        mailAnswer = async () =>
+          response(shortBody([...five(fresh), ...five(old).slice(0, 4)], accounts));
+        await act(async () => mailEvent(synced()));
+        await pass(MAIL_EVENT_DEBOUNCE_MS);
+
+        // Folded as any answer is: nothing on screen asked for more.
+        expect(rows("Mail")).toHaveLength(6);
+        expect(selected()).toContain("Quarterly new 0");
+        await press(input, "Enter");
+        expect(onSelect).toHaveBeenCalledTimes(1);
+        expect(onSelect).toHaveBeenLastCalledWith({
+          kind: "mail",
+          accountId: ACCOUNT_ID,
+          threadId: "new-0",
+          mailboxId: "all",
+        });
+      });
+
+      it("leaves a cursor alone whose row stays where it can be seen", async () => {
+        mailAnswer = async () => response(shortBody(five(old), accounts));
+        await render({ tree: [node()] });
+        const input = await type("quarterly");
+        // The page row, then the first two letters.
+        await press(input, "ArrowDown");
+        await press(input, "ArrowDown");
+        await settle();
+        expect(selected()).toContain("Quarterly old 1");
+
+        mailAnswer = async () =>
+          response(shortBody([fresh(0), fresh(1), ...five(old)], accounts));
+        await act(async () => mailEvent(synced()));
+        await pass(MAIL_EVENT_DEBOUNCE_MS);
+
+        // Fourth of seven: still inside the five, so the group stays folded.
+        expect(rows("Mail")).toHaveLength(6);
+        expect(group("Mail")?.textContent).toContain("Show all 7");
+        expect(selected()).toContain("Quarterly old 1");
+
+        // And a cursor that is not in Mail at all is nobody's to move.
+        await press(input, "Home");
+        await settle();
+        expect(selected()).toContain("Quarterly planning page");
+        mailAnswer = async () => response(shortBody(five(fresh), accounts));
+        await act(async () => mailEvent(synced()));
+        await pass(MAIL_EVENT_DEBOUNCE_MS);
+        expect(selected()).toContain("Quarterly planning page");
+      });
+
+      it("moves off a Show all row the answer no longer needs", async () => {
+        mailAnswer = async () =>
+          response(shortBody([...five(old), old(5), old(6)], accounts));
+        await render({ tree: [node()] });
+        const input = await type("quarterly");
+        await press(input, "End");
+        await settle();
+        expect(selected()).toContain("Show all 7");
+
+        mailAnswer = async () => response(shortBody([old(0), old(1), old(2)], accounts));
+        await act(async () => mailEvent(synced()));
+        await pass(MAIL_EVENT_DEBOUNCE_MS);
+
+        expect(rows("Mail")).toHaveLength(3);
+        expect(selected()).toContain("Quarterly old 0");
+        await press(input, "Enter");
+        expect(onSelect).toHaveBeenLastCalledWith({
+          kind: "mail",
+          accountId: ACCOUNT_ID,
+          threadId: "old-0",
+          mailboxId: "all",
+        });
+      });
     });
   });
 

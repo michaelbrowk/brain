@@ -58,6 +58,11 @@ interface MailResults {
    *  every account was searched. It is worded as the answer lands and kept
    *  with it, so the next answer replaces it with its own. */
   readonly unsearched: string | null;
+  /** Whether a sync could make this answer whole: an index still building,
+   *  or a mailbox left out for anything but a lapsed sign-in. It is what the
+   *  quiet re-ask listens on. "needs to be reconnected" waits for the reader,
+   *  and no event from the change feed takes it away. */
+  readonly syncClears: boolean;
 }
 
 const NO_MAIL: MailResults = {
@@ -66,6 +71,7 @@ const NO_MAIL: MailResults = {
   mailboxes: new Map(),
   indexBuilding: false,
   unsearched: null,
+  syncClears: false,
 };
 
 /** Why an account's letters are not in an answer. An account can answer 200
@@ -90,6 +96,17 @@ function mailGapOf(account: MailSearchAllAccountStatus): MailGap | null {
   if (reason === "mailbox_reauth_required") return "reconnect";
   if (reason === "mailbox_backoff" || reason === "mailbox_cache_capacity") return "failed";
   return "syncing";
+}
+
+/** Whether a sync can bring back what an answer left out. A mailbox still
+ *  syncing will finish, one that failed its last sync will try again, and a
+ *  search that threw may answer the next time. A lapsed sign-in is the one
+ *  gap only the reader can close. */
+function syncClearsGaps(accounts: readonly MailSearchAllAccountStatus[]): boolean {
+  return accounts.some((account) => {
+    const gap = mailGapOf(account);
+    return gap !== null && gap !== "reconnect";
+  });
 }
 
 /** The Mail group's one line about mailboxes it could not search, or null
@@ -479,8 +496,17 @@ async function askMail(query: string, signal: AbortSignal): Promise<MailResults 
     mailboxes,
     indexBuilding: body.indexBuilding === true,
     unsearched: mailUnsearchedLine(body.accounts ?? []),
+    syncClears: body.indexBuilding === true || syncClearsGaps(body.accounts ?? []),
   };
 }
+
+/** The cmdk value of a mail row, which is what the keyboard's cursor holds
+ *  while it stands on one. */
+function mailRowValue(thread: MailThreadListItem): string {
+  return `mail-${thread.accountId}-${thread.threadId}`;
+}
+
+const MAIL_SHOW_ALL_VALUE = "mail-show-all";
 
 export function rankTasks(tasks: readonly TaskView[], query: string): TaskView[] {
   if (query.length < 2) return [];
@@ -658,6 +684,10 @@ export function CommandPalette({
   // put it on the first row it reveals. Left to itself cmdk sends the cursor
   // back to the top of the list once the Show all row it stood on goes away.
   const [cursor, setCursor] = useState("");
+  // Where the cursor stands and whether the Mail group is open, for the one
+  // reader that is not a render: an answer landing from the quiet re-ask.
+  const cursorRef = useRef(cursor);
+  const mailExpandedRef = useRef(false);
   // The shell can close the palette through `open` without passing through
   // `handleOpenChange`, so the expansions fold back on the edge of `open`
   // itself, adjusted during render the way React's docs adjust state to a
@@ -989,16 +1019,27 @@ export function CommandPalette({
   // screen in place. A whole answer ends the listening with the line.
   //
   // It is a quiet ask. The reader did not start it, so it shows no Searching
-  // and takes no row away while it is out, and a failure leaves the answer
-  // and its line standing for the next event to try again. One ask is out at
-  // a time: a mailbox syncing in batches sends events faster than a search
-  // answers, and an ask that restarted on each of them would never land.
-  // What arrived meanwhile is one more ask once it has.
+  // and takes no row away while it is out, and a failure or a refusal leaves
+  // the answer and its line standing for the next event to try again. (A
+  // refusal is the route's 409, 400 or 503 mail_service_unavailable. The
+  // shell takes the group away itself when Mail is paused, through
+  // `searchMail`, so there is nothing for this ask to conclude from one.)
+  // One ask is out at a time: a mailbox syncing in batches sends events
+  // faster than a search answers, and an ask that restarted on each of them
+  // would never land. What arrived meanwhile is one more ask once it has.
+  //
+  // It listens only under a line a sync can clear (`syncClears`). "needs to
+  // be reconnected" waits for the reader, and under it every sync of any
+  // account asked again for as long as the palette stood open.
+  //
+  // A hidden tab lets events pass, so coming back to one is an ask of its
+  // own: the sync the line was waiting for may have finished meanwhile.
   const mailShort =
-    mailWanted &&
-    mailResolvedQuery === q &&
-    mailState === "ready" &&
-    (mail.unsearched !== null || mail.indexBuilding);
+    mailWanted && mailResolvedQuery === q && mailState === "ready" && mail.syncClears;
+  useEffect(() => {
+    cursorRef.current = cursor;
+    mailExpandedRef.current = mailExpandedFor === q;
+  }, [cursor, mailExpandedFor, q]);
   useEffect(() => {
     if (!open || !mailShort) return;
     const controller = new AbortController();
@@ -1014,6 +1055,43 @@ export function CommandPalette({
         if (document.visibilityState === "visible") void ask();
       }, MAIL_EVENT_DEBOUNCE_MS);
     };
+    // THE ANSWER LANDS UNDER THE READER'S HAND. They may have the cursor on
+    // a letter and a finger on Enter, and the new answer can take that row
+    // out from under it: five newer letters fold it past Show all, or the
+    // letter is gone. cmdk sends a cursor whose row unmounted to the top of
+    // the list, which here is a page, and Enter opened that. So a row that
+    // is still in the answer keeps the cursor, with the group opened for it
+    // if that is what it takes, and a row that is gone hands the cursor to
+    // the first letter, which is at least what the reader was choosing among.
+    const land = (answer: MailResults) => {
+      const at = cursorRef.current;
+      if (!at.startsWith("mail-")) {
+        setMail(answer);
+        return;
+      }
+      const expanded = mailExpandedRef.current;
+      const within = (count: number) =>
+        answer.threads.slice(0, count).some((thread) => mailRowValue(thread) === at);
+      const stays =
+        at === MAIL_SHOW_ALL_VALUE
+          ? !expanded && answer.threads.length > GROUP_FOLD
+          : within(expanded ? MAIL_LIMIT : GROUP_FOLD);
+      if (stays) {
+        setMail(answer);
+        return;
+      }
+      if (at !== MAIL_SHOW_ALL_VALUE && within(MAIL_LIMIT)) {
+        setMailExpandedFor(q);
+        setMail(answer);
+        return;
+      }
+      // The row goes. cmdk moves the cursor to the top in the commit that
+      // unmounts it, so that commit runs first, on its own, and the cursor is
+      // set after it.
+      flushSync(() => setMail(answer));
+      const first = answer.threads[0];
+      if (first !== undefined) flushSync(() => setCursor(mailRowValue(first)));
+    };
     const ask = async () => {
       if (asking) {
         missed = true;
@@ -1022,7 +1100,7 @@ export function CommandPalette({
       asking = true;
       try {
         const answer = await askMail(q, controller.signal);
-        if (!controller.signal.aborted) setMail(answer ?? NO_MAIL);
+        if (!controller.signal.aborted && answer !== null) land(answer);
       } catch (error) {
         if (!controller.signal.aborted) {
           console.warn("Mail search refresh failed", error);
@@ -1043,11 +1121,21 @@ export function CommandPalette({
       if (change.changeKind !== "sync" && change.changeKind !== "reset") return;
       arm();
     };
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      // At once, and in place of whatever was armed: nobody is typing, and
+      // the reader is looking at the line now.
+      if (due !== null) clearTimeout(due);
+      due = null;
+      void ask();
+    };
     window.addEventListener(MAIL_CHANGED_EVENT, onMailChanged);
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       controller.abort();
       if (due !== null) clearTimeout(due);
       window.removeEventListener(MAIL_CHANGED_EVENT, onMailChanged);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [open, q, mailShort]);
 
@@ -1403,8 +1491,8 @@ export function CommandPalette({
             const snippet = sanitizeSnippet(t.snippet);
             return (
               <Command.Item
-                key={`mail-${t.accountId}-${t.threadId}`}
-                value={`mail-${t.accountId}-${t.threadId}`}
+                key={mailRowValue(t)}
+                value={mailRowValue(t)}
                 onSelect={() => pickMail(t)}
                 className="brain-palette-item flex cursor-pointer flex-col gap-0.5 px-2.5 py-2"
               >
@@ -1430,13 +1518,11 @@ export function CommandPalette({
           })}
           {!mailExpanded && mailThreads.length > GROUP_FOLD && (
             <Command.Item
-              value="mail-show-all"
+              value={MAIL_SHOW_ALL_VALUE}
               onSelect={() => {
-                const last = mailThreads[GROUP_FOLD - 1];
-                const next = mailThreads[GROUP_FOLD];
                 showAll(
-                  `mail-${last.accountId}-${last.threadId}`,
-                  `mail-${next.accountId}-${next.threadId}`,
+                  mailRowValue(mailThreads[GROUP_FOLD - 1]),
+                  mailRowValue(mailThreads[GROUP_FOLD]),
                   () => setMailExpandedFor(q),
                 );
               }}

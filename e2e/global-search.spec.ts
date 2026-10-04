@@ -449,8 +449,10 @@ test("@release the palette names a mailbox it could not search, and drops the li
   // with no rows and the cache's own word for why. Registered after the
   // shared routes, so this one answers.
   let synced = false;
-  await page.route("**/api/mail/search/all", (route) =>
-    route.fulfill({
+  const asked: string[] = [];
+  await page.route("**/api/mail/search/all", (route) => {
+    asked.push((route.request().postDataJSON() as { query: string }).query);
+    return route.fulfill({
       status: 200,
       contentType: "application/json; charset=utf-8",
       body: JSON.stringify({
@@ -474,14 +476,16 @@ test("@release the palette names a mailbox it could not search, and drops the li
                   windowTruncated: null,
                 },
             indexStatus: "ready",
-            resultsTruncated: false,
+            // The service's own rule: a mailbox it could not read answers a
+            // page that is short of the whole, and the route folds that in.
+            resultsTruncated: !synced,
           },
         ],
         indexBuilding: false,
-        truncated: false,
+        truncated: !synced,
       }),
-    }),
-  );
+    });
+  });
   await page.goto("/");
 
   await openPalette(page);
@@ -495,10 +499,22 @@ test("@release the palette names a mailbox it could not search, and drops the li
   );
   await expect(page.getByText(/No results for/)).toHaveCount(0);
 
-  // The mailbox finishes, the next ask reads it, and the line is gone.
+  // The mailbox finishes and the change feed says so. The palette asks the
+  // query on screen again by itself, and the line is gone with nothing typed.
   synced = true;
-  await palette.fill("quarterly");
+  const before = asked.length;
+  await page.evaluate(
+    ({ accountId }) =>
+      window.dispatchEvent(
+        new CustomEvent("brain:mail-changed", {
+          detail: { kind: "mail", changeKind: "sync", accountId, mailboxIds: ["inbox"] },
+        }),
+      ),
+    { accountId: account.accountId },
+  );
   await expect(page.getByRole("option", { name: /Quarterly launch review/ })).toBeVisible();
   await expect(mailGroup.getByRole("status")).toHaveCount(0);
+  expect(asked.slice(before)).toContain("zzquarterly");
+  await expect(palette).toHaveValue("zzquarterly");
   await page.keyboard.press("Escape");
 });

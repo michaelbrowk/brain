@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createServer, type Server, type Socket } from "node:net";
 import { unlink } from "node:fs/promises";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { MailMimeParseBudget, MailMimeParseOutcome } from "../ports";
 import { UnixSocketMailMimeParser } from "./mime-parser-client";
@@ -354,6 +354,106 @@ describe("isolated BMP1 MIME parser", () => {
       errorCode: "mail_mime_worker_timeout",
     });
   });
+
+  it("answers an aborted parse only once the worker has closed the connection", async () => {
+    // A worker part way through a synchronous sanitize hears the hang-up
+    // late, and the parser socket counts it until then.
+    const socketPath = nextSocketPath();
+    const events: string[] = [];
+    const worker = await startBusyWorker(socketPath, events, (socket) => {
+      setTimeout(() => {
+        events.push("worker closed");
+        socket.destroy();
+      }, 80);
+    });
+    const controller = new AbortController();
+    const raw = Buffer.from("From: a@example.com\r\n\r\ndisplaced");
+    const parsing = parse(
+      new UnixSocketMailMimeParser({ socketPath }),
+      raw,
+      {},
+      [raw],
+      controller.signal,
+    ).then((outcome) => {
+      events.push("answered");
+      return outcome;
+    });
+    await vi.waitFor(() => expect(worker.receivedBytes()).toBeGreaterThan(raw.length));
+    controller.abort();
+
+    await expect(parsing).resolves.toEqual({
+      kind: "transient_failure",
+      errorCode: "mail_mime_aborted",
+    });
+    expect(events.slice(0, 3)).toEqual(["hang-up heard", "worker closed", "answered"]);
+  });
+
+  it("hangs up on a worker that was still starting when the parse was aborted, and waits for it too", async () => {
+    const socketPath = nextSocketPath();
+    const events: string[] = [];
+    const worker = await startBusyWorker(socketPath, events, (socket) => {
+      setTimeout(() => {
+        events.push("worker closed");
+        socket.destroy();
+      }, 40);
+    });
+    const controller = new AbortController();
+    const raw = Buffer.from("From: a@example.com\r\n\r\nnever sent");
+    // The abort lands while the connection is being made, before the client
+    // listens for it.
+    const parsing = parse(
+      new UnixSocketMailMimeParser({ socketPath }),
+      raw,
+      {},
+      [raw],
+      controller.signal,
+    ).then((outcome) => {
+      events.push("answered");
+      return outcome;
+    });
+    controller.abort();
+
+    await expect(parsing).resolves.toEqual({
+      kind: "transient_failure",
+      errorCode: "mail_mime_aborted",
+    });
+    expect(events.slice(0, 3)).toEqual(["hang-up heard", "worker closed", "answered"]);
+    expect(worker.receivedBytes()).toBe(0);
+  });
+
+  it("gives up on a worker that does not close within the let-go deadline", async () => {
+    const socketPath = nextSocketPath();
+    const events: string[] = [];
+    const worker = await startBusyWorker(socketPath, events, () => undefined);
+    const controller = new AbortController();
+    const raw = Buffer.from("From: a@example.com\r\n\r\nstuck");
+    const parsing = parse(
+      new UnixSocketMailMimeParser({ socketPath, workerLetGoDeadlineMs: 60 }),
+      raw,
+      {},
+      [raw],
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(worker.receivedBytes()).toBeGreaterThan(raw.length));
+    const abortedAt = performance.now();
+    controller.abort();
+
+    await expect(parsing).resolves.toEqual({
+      kind: "transient_failure",
+      errorCode: "mail_mime_aborted",
+    });
+    // The worker heard the hang-up and never closed its side.
+    expect(performance.now() - abortedAt).toBeGreaterThanOrEqual(55);
+    expect(events).toEqual(["hang-up heard"]);
+  });
+
+  it("refuses a let-go deadline that is not a bounded whole number of milliseconds", () => {
+    for (const workerLetGoDeadlineMs of [0, -1, 1.5, 60_001, Number.NaN]) {
+      expect(
+        () => new UnixSocketMailMimeParser({ workerLetGoDeadlineMs }),
+      ).toThrow("mail MIME worker let-go deadline is invalid");
+    }
+  });
 });
 
 async function parseWithWorker(
@@ -394,6 +494,7 @@ async function parse(
   raw: Buffer,
   overrides: Partial<MailMimeParseBudget> = {},
   chunks: readonly Uint8Array[] = [raw],
+  signal: AbortSignal = new AbortController().signal,
 ): Promise<MailMimeParseOutcome> {
   return parser.parse({
     operationId: `parse-${Date.now()}-${socketSequence}`,
@@ -403,8 +504,42 @@ async function parse(
     },
     budget: budget(overrides),
     rawMimeStream: chunkStream(chunks),
-    signal: new AbortController().signal,
+    signal,
   });
+}
+
+/**
+ * A worker as its client sees it while it is busy: it reads, hears the
+ * client's half-close, and closes its own side only when `close` says so.
+ */
+async function startBusyWorker(
+  socketPath: string,
+  events: string[],
+  close: (socket: Socket) => void,
+): Promise<{ receivedBytes(): number }> {
+  await unlink(socketPath).catch(() => undefined);
+  let received = 0;
+  const server = createServer({ allowHalfOpen: true }, (socket) => {
+    server.close();
+    servers.delete(server);
+    socket.on("error", () => undefined);
+    socket.on("data", (chunk) => {
+      received += chunk.length;
+    });
+    socket.once("end", () => {
+      events.push("hang-up heard");
+      close(socket);
+    });
+  });
+  servers.add(server);
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  return { receivedBytes: () => received };
 }
 
 function budget(overrides: Partial<MailMimeParseBudget>): MailMimeParseBudget {

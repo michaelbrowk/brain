@@ -94,6 +94,12 @@ export const IMAP_SENT_SCAN_BATCH = 250;
  */
 export const IMAP_SENT_SCAN_FIRST_RUN_CAP = 5_000;
 /**
+ * How many times running a batch of one letter has to fail before the letter
+ * is passed over. One is a dropped connection; three in three windows, with
+ * the rest of the session working each time, is the letter.
+ */
+const IMAP_SENT_SCAN_STRIKES = 3;
+/**
  * How long a Sent folder is left alone after a scan session found nothing in
  * it, when no sync session could say whether anything has arrived since.
  */
@@ -548,6 +554,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
       width: IMAP_SENT_SCAN_BATCH,
       crawl: false,
       left: 0,
+      strikes: 0,
       skipped: null,
       lineTooLong: false,
     };
@@ -598,6 +605,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
               width: Math.min(attempt.width, left),
               crawl: attempt.crawl,
               left,
+              strikes: 0,
             })
           : null;
     }
@@ -618,6 +626,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
         width: attempt.width,
         crawl: true,
         left: attempt.left,
+        strikes: attempt.strikes,
       });
       return SENT_SCAN_BATCH_FAILED;
     }
@@ -627,6 +636,24 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
         width: Math.max(1, Math.floor(attempt.asked / 2)),
         crawl: attempt.crawl,
         left: attempt.asked,
+        strikes: 0,
+      });
+      return SENT_SCAN_BATCH_FAILED;
+    }
+    // A batch of one is the ordinary batch: a letter sent from the phone is
+    // one new UID. One failure of it is as likely the network's as the
+    // letter's, so the letter is asked for again, and passed over only when
+    // it has failed IMAP_SENT_SCAN_STRIKES times running. A line past the
+    // session's limit is the letter's own doing and will not read next time
+    // either: that one goes at once.
+    const strikes = attempt.strikes + 1;
+    if (!attempt.lineTooLong && strikes < IMAP_SENT_SCAN_STRIKES) {
+      this.sentScanRetry = Object.freeze({
+        cursor,
+        width: 1,
+        crawl: attempt.crawl,
+        left: Math.max(1, attempt.left),
+        strikes,
       });
       return SENT_SCAN_BATCH_FAILED;
     }
@@ -1430,6 +1457,8 @@ interface SentScanRetry {
   readonly crawl: boolean;
   /** Messages of the batch that failed that have not been gone through yet. */
   readonly left: number;
+  /** Failures running of a batch of one letter at this cursor. */
+  readonly strikes: number;
 }
 
 /** What one scan session got as far as, written as it goes. */
@@ -1443,6 +1472,7 @@ interface SentScanAttempt {
   width: number;
   crawl: boolean;
   left: number;
+  strikes: number;
   /** The answer if the one message asked for is passed over. */
   skipped: ((reason: MailSentScanSkipReason) => MailSentScanResult) | null;
   lineTooLong: boolean;
@@ -1519,6 +1549,7 @@ async function readSentEnvelopes(
   attempt.width = width;
   attempt.crawl = plan?.crawl ?? false;
   attempt.left = plan?.left ?? 0;
+  attempt.strikes = plan?.strikes ?? 0;
   const answer = (
     next: SentScanCursor,
     messages: readonly FetchMessageObject[],

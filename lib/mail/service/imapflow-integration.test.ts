@@ -261,6 +261,34 @@ describe("what the Sent-folder scan survives on a real ImapFlow session", () => 
     expect(fetches).toEqual(["1:3", "3:3", "2:2", "1:1"]);
   });
 
+  it("reads a new letter on the next scan when its first fetch lost the socket", async () => {
+    const options: FakeImapOptions = {
+      capability: "IMAP4rev1 SPECIAL-USE",
+      folders: [{ flags: "\\HasNoChildren \\Sent", path: "Sent" }],
+      uidNext: 13,
+      messages: [letter(11, "a"), letter(12, "b")],
+    };
+    const { adapter } = await sentScanAdapter(options);
+    const signal = new AbortController().signal;
+    const first = await adapter.scanSentEnvelopes({ cursor: null }, signal);
+    if (first.status !== "scanned") throw new Error("the first scan read nothing");
+
+    options.messages = [letter(11, "a"), letter(12, "b"), letter(13, "newfriend")];
+    options.uidNext = 14;
+    options.dropFetches = 1;
+    await expect(
+      adapter.scanSentEnvelopes({ cursor: first.cursor }, signal),
+    ).resolves.toEqual({ status: "batch_failed" });
+    await expect(
+      adapter.scanSentEnvelopes({ cursor: first.cursor }, signal),
+    ).resolves.toMatchObject({
+      status: "scanned",
+      envelopes: [{ from: "person@example.test", recipients: ["newfriend@example.org"] }],
+      skippedCount: 0,
+      cursor: "s1_77_13_0_0_0",
+    });
+  });
+
   it("steps over a FETCH the server sends about another client's flag change", async () => {
     const { adapter } = await sentScanAdapter({
       capability: "IMAP4rev1 SPECIAL-USE",
@@ -482,6 +510,10 @@ interface FakeImapOptions {
   messages?: readonly { readonly uid: number; readonly envelope: string }[];
   /** Sent ahead of every fetch answer, as a server reports another client. */
   readonly unsolicited?: string;
+  /** This many fetches lose their socket instead of being answered. */
+  dropFetches?: number;
+  /** STATUS is never answered, as a server that stalls on it. */
+  statusHangs?: boolean;
 }
 
 const imapAddress = (name: string, local: string, domain: string) =>
@@ -544,6 +576,7 @@ function serveSentImap(socket: TLSSocket, commands: string[], options: FakeImapO
       return;
     }
     if (command === "STATUS") {
+      if (options.statusHangs === true) return;
       socket.write(
         `* STATUS ${line.split(" ")[2]} (UIDNEXT ${options.uidNext ?? 1} UIDVALIDITY ${
           options.uidValidity ?? 77
@@ -582,6 +615,11 @@ function serveSentImap(socket: TLSSocket, commands: string[], options: FakeImapO
       return;
     }
     if (command === "FETCH" || (byUid && / UID FETCH /i.test(line))) {
+      if ((options.dropFetches ?? 0) > 0) {
+        options.dropFetches = (options.dropFetches ?? 0) - 1;
+        socket.destroy();
+        return;
+      }
       const answer =
         options.fetch?.(line) ??
         named(line.split(" ")[byUid ? 3 : 2]!)

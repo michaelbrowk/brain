@@ -489,11 +489,71 @@ describe("a Sent-folder batch that cannot be read", () => {
     expect(read.has("to420@example.org")).toBe(false);
     for (const uid of [1, 419, 421, 600]) expect(read.has(`to${uid}@example.org`)).toBe(true);
     expect(read.size).toBe((total - 1) * 2);
-    // Halving finds it in a few windows, not in one a letter.
-    expect(outcomes.filter((status) => status === "batch_failed").length).toBeLessThanOrEqual(8);
-    expect(outcomes.length).toBeLessThanOrEqual(16);
+    // Halving finds it in a few windows, not in one a letter: seven halvings,
+    // then the letter by itself fails twice more before it is passed over.
+    expect(outcomes.filter((status) => status === "batch_failed").length).toBeLessThanOrEqual(10);
+    expect(outcomes.length).toBeLessThanOrEqual(20);
     // The failed batch was asked for again at half its width, never whole.
     expect(server.fetches.filter((fetch) => fetch.range === "351:600")).toHaveLength(1);
+    // The letter by itself was asked for three times before it was given up.
+    expect(server.fetches.filter((fetch) => fetch.range === "420:420")).toHaveLength(3);
+  });
+
+  it("does not pass a letter over for one dropped connection", async () => {
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
+    const { provider } = providerFor(server);
+    const done = scanned(await provider.scanSentEnvelopes({ cursor: null }, signal()));
+
+    // The owner sends one letter from his phone, and the connection drops
+    // once in the middle of its fetch. In the steady state a batch is one
+    // letter, so a batch of one that fails says nothing about the letter.
+    server.append("Sent", 1);
+    server.failFetchOf(4);
+    await expect(
+      provider.scanSentEnvelopes({ cursor: done.cursor }, signal()),
+    ).resolves.toEqual({ status: "batch_failed" });
+    server.failFetchOf(null);
+    const next = scanned(await provider.scanSentEnvelopes({ cursor: done.cursor }, signal()));
+
+    expect(next).toMatchObject({ envelopeCount: 1, skippedCount: 0, hasMore: false });
+    expect(recipientsOf(next)).toContain("to4@example.org");
+  });
+
+  it("passes a letter over on its third failure running, and starts the count again after a read", async () => {
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
+    const { provider } = providerFor(server);
+    const done = scanned(await provider.scanSentEnvelopes({ cursor: null }, signal()));
+    const failed = { status: "batch_failed" };
+
+    server.append("Sent", 1);
+    server.failFetchOf(4);
+    await expect(provider.scanSentEnvelopes({ cursor: done.cursor }, signal())).resolves.toEqual(failed);
+    await expect(provider.scanSentEnvelopes({ cursor: done.cursor }, signal())).resolves.toEqual(failed);
+    const third = scanned(await provider.scanSentEnvelopes({ cursor: done.cursor }, signal()));
+    expect(third).toMatchObject({
+      envelopeCount: 0,
+      skippedCount: 1,
+      skipReason: "envelope_unreadable",
+      cursor: "s1_500_4_0_0_0",
+    });
+
+    // Two failures, a read, and two more failures: no letter has failed
+    // three times running, so none is passed over.
+    server.append("Sent", 1);
+    server.failFetchOf(5);
+    await expect(provider.scanSentEnvelopes({ cursor: third.cursor }, signal())).resolves.toEqual(failed);
+    await expect(provider.scanSentEnvelopes({ cursor: third.cursor }, signal())).resolves.toEqual(failed);
+    server.failFetchOf(null);
+    const read = scanned(await provider.scanSentEnvelopes({ cursor: third.cursor }, signal()));
+    expect(read).toMatchObject({ envelopeCount: 1, skippedCount: 0 });
+    server.append("Sent", 1);
+    server.failFetchOf(6);
+    await expect(provider.scanSentEnvelopes({ cursor: read.cursor }, signal())).resolves.toEqual(failed);
+    await expect(provider.scanSentEnvelopes({ cursor: read.cursor }, signal())).resolves.toEqual(failed);
+    server.failFetchOf(null);
+    expect(
+      scanned(await provider.scanSentEnvelopes({ cursor: read.cursor }, signal())),
+    ).toMatchObject({ envelopeCount: 1, skippedCount: 0, cursor: "s1_500_6_0_0_0" });
   });
 
   it("does the same above the cursor: one fat new letter does not hold the ones sent after it", async () => {

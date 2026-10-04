@@ -383,7 +383,10 @@ holding it, and then polls for up to `wait` milliseconds (0 to 20000, 8000 by
 default). It answers `state` rather than holding the call open. `not_requested`
 and `fetching` both mean the body is not there yet and the caller should call
 again, `transient` means the fetch failed and may succeed later, `permanent`
-means it will not, and `ready` carries `text` and `attachments`.
+means it will not, and `ready` carries `text` and `attachments`. A letter that
+brings the parser down or runs it out of time also answers `permanent`: the
+service parses it three times at most for one call and does not retry on its
+own, so only another call tries again.
 
 ## Mail, triage
 

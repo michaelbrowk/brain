@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
+import matter from "gray-matter";
 import { describe, expect, it } from "vitest";
 
 const workflow = readFileSync(
@@ -30,21 +31,36 @@ describe("CI cost guardrails", () => {
     // them, so a merged change could go unbuilt, and one did: the standalone
     // smoke broke on main and was first seen at a release gate. A pull
     // request's superseded run is still worth nothing and is still stopped.
-    expect(workflow).toContain(
-      "  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}\n",
+    //
+    // Read as YAML, not as text: the same two lines behind a `#` are text
+    // that is still there and a setting that is gone, and a search for the
+    // text passed with the whole block commented out.
+    const parsed = matter(`---\n${workflow}\n---\n`).data as {
+      concurrency?: Record<string, unknown>;
+      jobs?: Record<string, { concurrency?: unknown }>;
+    };
+    expect(parsed.concurrency).toEqual({
+      // Never displaced while it waits either: a group keeps one run and one
+      // pending, so a commit on main is a group of its own.
+      group:
+        "ci-${{ github.workflow }}-${{ github.ref }}-" +
+        "${{ github.ref == 'refs/heads/main' && github.sha || 'latest' }}",
+      "cancel-in-progress": "${{ github.ref != 'refs/heads/main' }}",
+    });
+    // And no job says otherwise for itself.
+    expect(Object.keys(parsed.jobs ?? {})).toEqual(["check"]);
+    expect(parsed.jobs?.check?.concurrency).toBeUndefined();
+    // The release gate reads that run, so the checklist has to ask for it,
+    // and for the commit being released rather than for whichever is newest.
+    const checklist = readFileSync(
+      path.join(process.cwd(), "docs", "release-checklist.md"),
+      "utf8",
     );
-    expect(workflow.match(/cancel-in-progress:/g)).toHaveLength(1);
-    // And never displaced while it waits: a group keeps one run and one
-    // pending, so a commit on main is a group of its own.
-    expect(workflow).toContain(
-      "  group: ci-${{ github.workflow }}-${{ github.ref }}-" +
-        "${{ github.ref == 'refs/heads/main' && github.sha || 'latest' }}\n",
+    expect(checklist).toContain(
+      "The `CI` run for the commit being released is green: completed, not cancelled",
     );
-    // The release gate reads that run, so the checklist has to ask for it.
-    expect(
-      readFileSync(path.join(process.cwd(), "docs", "release-checklist.md"), "utf8"),
-    ).toContain(
-      "The newest `CI` run for a push to `main` is green: completed, not cancelled",
+    expect(checklist).toContain(
+      "`gh run list --workflow CI --event push --commit <sha>`",
     );
   });
 

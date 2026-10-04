@@ -12,9 +12,9 @@
 // another composer and a stale pill can all reach the same parcel, so every
 // call after the first is a no-op rather than a second request.
 //
-// A section's Done waits the same way (`markSectionDone`): its parcel is the
-// run, its flush hands the run to the queue that archives it, and its Undo
-// takes the run back before anything was sent.
+// A section's Done waits behind its Undo in the same shape, in a ticket of its
+// own (`SectionDoneTicket`, `mail-section-done.ts`): it has to outlive the
+// Mail surface that parked it, which this parcel does not.
 
 export type DeferredDiscardState = "parked" | "restored" | "flushed";
 

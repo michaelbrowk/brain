@@ -41,7 +41,6 @@ import {
   clearOpenThreadRequest,
   defaultMailSurfaceClient,
   isListedDraft,
-  isMailMutationTimeout,
   MailApiError,
   pendingOpenThread,
   subscribeOpenThread,
@@ -102,16 +101,24 @@ import {
   type ShownSenderDecision,
 } from "./mail-new-senders";
 import {
-  NO_DONE,
-  doneQueue,
+  beginDoneRead,
+  doneOverlayServerSnapshot,
+  doneOverlaySnapshot,
+  doneReadLanded,
   hideDone,
-  holdDone,
-  landDone,
-  releaseDone,
-  settleDone,
-  type DoneFailure,
+  holdSectionDone,
+  landSectionDone,
+  parkSectionDone,
+  releaseSectionDone,
+  sendSectionDoneEarly,
+  subscribeDoneOverlay,
+  watchDoneLists,
+  withdrawSectionDone,
+  type DoneClosure,
   type DoneOutcome,
-  type DoneOverlay,
+  type DoneRead,
+  type SectionDoneRun,
+  type SectionDoneTicket,
 } from "./mail-section-done";
 import type { SenderDecide } from "./mail-new-sender-row";
 import {
@@ -391,23 +398,24 @@ const EMPTY_DRAFT_BADGE: DraftBadgeCounts = { failed: 0, submitting: 0 };
 const SECTION_DONE_TOAST_ID = "mail-section-done";
 
 /**
- * One Done, from the press until its window closes: the section it named,
- * what the queue will send for it, and how many of its rows sit on an
- * account that cannot move them. It is parked behind the pill's Undo
- * (`mail-deferred-discard.ts`, the parcel a discarded draft waits in), so it
- * settles exactly once: Undo takes it back and nothing is ever sent, or the
- * window closes and it goes to the queue.
+ * How long the report of a Done that fell short stands. It has no Undo to
+ * wait for, but it is a sentence of several clauses over rows that have just
+ * come back, and the 2.2s a plain message gets is not long enough to read it.
  */
-type SectionDoneRun = {
+const SECTION_DONE_REPORT_MS = 5_000;
+
+/** What a Done said at the press: the section, how many of its letters left
+ *  the column and how many sit on an account that cannot move them. */
+type SectionDonePress = {
   readonly label: string;
-  readonly threads: readonly MailThreadListItem[];
+  readonly left: number;
   readonly blocked: number;
 };
 
 /** The title a Done says at the press, and again when its Undo is taken away:
  *  a press that leaves rows behind has not cleared the section. */
-function sectionDoneTitle(run: SectionDoneRun): string {
-  return run.blocked === 0 ? `${run.label} cleared` : `${run.label} partly cleared`;
+function sectionDoneTitle(press: SectionDonePress): string {
+  return press.blocked === 0 ? `${press.label} cleared` : `${press.label} partly cleared`;
 }
 
 /**
@@ -416,11 +424,44 @@ function sectionDoneTitle(run: SectionDoneRun): string {
  * LEAVE of the rows it could not take for the same reason, since one sentence
  * cannot hold both that and the provider's verb.
  */
-function sectionDoneSubtitle(run: SectionDoneRun): string {
+function sectionDoneSubtitle(press: SectionDonePress): string {
   return [
-    `${threadWord(run.threads.length)} out of your inbox`,
-    ...(run.blocked === 0 ? [] : [`${run.blocked} can’t leave`]),
+    `${threadWord(press.left)} out of your inbox`,
+    ...(press.blocked === 0 ? [] : [`${press.blocked} can’t leave`]),
   ].join(", ");
+}
+
+/**
+ * Why an account was closed for a run, as the report says it. A refusal is
+ * the server's folder layout, not a bad minute, so "try again" would be a lie
+ * and the reader is owed the actual reason; an account that went quiet is
+ * named apart from one that refused, because "no folder for it" would be a
+ * lie about it. A session that ended and a connection that dropped are not
+ * about the account at all, and say so.
+ */
+function sectionDoneClosures(closed: ReadonlyMap<string, DoneClosure>): string[] {
+  const count = (reason: DoneClosure) =>
+    [...closed.values()].filter((each) => each === reason).length;
+  const refused = count("refused");
+  const silent = count("silent");
+  return [
+    ...(refused === 0
+      ? []
+      : [
+          refused === 1
+            ? "that account has no folder for it"
+            : "those accounts have no folder for it",
+        ]),
+    ...(silent === 0
+      ? []
+      : [
+          silent === 1
+            ? "that account stopped answering"
+            : "those accounts stopped answering",
+        ]),
+    ...(count("signed-out") === 0 ? [] : ["you were signed out"]),
+    ...(count("unreachable") === 0 ? [] : ["no connection to the server"]),
+  ];
 }
 
 /**
@@ -481,11 +522,10 @@ export function MailSurface({
     (startedAt: number, listed: readonly MailThreadListItem[]) => void
   >(() => {});
   /* The same door tells Done. A thread it archived is held out of the column
-     until a read that began after the archive answered lands
-     (`settleDone`). */
-  const doneReadLandedRef = useRef<
-    (startedAt: number, listed: readonly MailThreadListItem[]) => void
-  >(() => {});
+     until a read of its account that began after the archive answered lands
+     (`settleDone`). Its count of reads is the store's, not this mount's: a
+     hold outlives the surface that made it. */
+  const doneReadLandedRef = useRef<(read: DoneRead) => void>(() => {});
   /* THE SAME DOOR COUNTS LIST READS STILL OUT. A silent refresh that was
      skipped or dropped runs again once nothing else is reading the column
      (`singleRefreshPendingRef` below): running it beside a read still out would move
@@ -498,6 +538,7 @@ export function MailSurface({
       ...givenClient,
       listThreads: async (...request) => {
         const startedAt = ++inboxReadsRef.current;
+        const doneStartedAt = beginDoneRead();
         listReadsOutRef.current += 1;
         let page: Awaited<ReturnType<MailSurfaceClient["listThreads"]>>;
         try {
@@ -507,7 +548,11 @@ export function MailSurface({
           if (listReadsOutRef.current === 0) listReadsSettledRef.current();
         }
         inboxReadLandedRef.current(startedAt, page.items);
-        doneReadLandedRef.current(startedAt, page.items);
+        doneReadLandedRef.current({
+          startedAt: doneStartedAt,
+          accountId: request[0].accountId,
+          listed: page.items,
+        });
         return page;
       },
       listMailboxThreads: async (...request) => {
@@ -648,17 +693,20 @@ export function MailSurface({
   const readerScopeRef = useRef<{ readonly key: string; readonly scope: SenderScope } | null>(
     null,
   );
-  /** Section Done: the threads it is holding out of the Inbox lists
-   *  (`mail-section-done.ts`), and the one Done still waiting behind its
-   *  pill's Undo. */
-  const [doneOverlay, setDoneOverlay] = useState<DoneOverlay>(NO_DONE);
-  const doneOverlayRef = useRef<DoneOverlay>(NO_DONE);
-  const sectionDoneParkedRef = useRef<DeferredDiscard<SectionDoneRun> | null>(null);
-  /** The latest `flushSectionDone`, for the page and unmount handlers that
-   *  are wired before it is made (see `flushDeferredDiscardRef`). */
-  const flushSectionDoneRef = useRef<
-    (options?: { readonly keepalive?: boolean }) => void
-  >(() => {});
+  /** Section Done: the threads it is holding out of the Inbox lists, and the
+   *  one Done this surface pressed that still waits behind its pill's Undo.
+   *  The holds are the page's, not this mount's (`mail-section-done.ts`): a
+   *  reader who leaves Mail mid-run and comes back finds them standing. The
+   *  handlers read the store itself, the render reads this snapshot. */
+  const doneOverlay = useSyncExternalStore(
+    subscribeDoneOverlay,
+    doneOverlaySnapshot,
+    doneOverlayServerSnapshot,
+  );
+  const sectionDoneTicketRef = useRef<SectionDoneTicket | null>(null);
+  /** The latest `flushSectionDone`, for the unmount handler that is wired
+   *  before it is made (see `flushDeferredDiscardRef`). */
+  const flushSectionDoneRef = useRef<() => void>(() => {});
   const reduceMotion = useReducedMotion();
   const reduceMotionRef = useRef(reduceMotion);
   useEffect(() => {
@@ -695,20 +743,13 @@ export function MailSurface({
     setUnifiedState(next);
   }, []);
 
-  const commitDoneOverlay = useCallback((next: DoneOverlay) => {
-    if (next === doneOverlayRef.current) return;
-    doneOverlayRef.current = next;
-    setDoneOverlay(next);
-  }, []);
-
   /**
    * Take threads Done archived out of the lists that hold them, as their
    * hold ends: the merged streams, and an account's own Inbox if that is
    * where the column stands. The overlay hid them until this commit, so
    * nothing moves on screen. Without it a row would come back the moment the
    * overlay let go: a page-one read never reaches a row a deep list keeps
-   * below it, and another account's read says nothing of this one's rows.
-   * It moves no epoch, so a read on its way is not dropped for it.
+   * below it. It moves no epoch, so a read on its way is not dropped for it.
    */
   const sweepDoneThreads = useCallback(
     (threads: readonly MailThreadListItem[]) => {
@@ -737,12 +778,38 @@ export function MailSurface({
   );
 
   useEffect(() => {
-    doneReadLandedRef.current = (startedAt, listed) => {
-      const settled = settleDone(doneOverlayRef.current, startedAt, listed);
-      commitDoneOverlay(settled.overlay);
-      sweepDoneThreads(settled.gone);
-    };
-  }, [commitDoneOverlay, sweepDoneThreads]);
+    doneReadLandedRef.current = (read) => sweepDoneThreads(doneReadLanded(read));
+  }, [sweepDoneThreads]);
+
+  /* THE QUEUE ASKS THIS SURFACE WHAT ITS LISTS HOLD NOW, before each send
+     (`watchDoneLists`). The streams keep a held thread and every refresh
+     folds its newest copy in, so a reply that arrived since the press is on
+     that copy: one more message, a later date. A thread no list holds has
+     nothing to say, and is sent. */
+  useEffect(
+    () =>
+      watchDoneLists((thread) => {
+        const key = unifiedThreadKey(thread);
+        const unified = unifiedStateRef.current;
+        if (unified.kind === "ready") {
+          for (const stream of unified.streams) {
+            if (stream.accountId !== thread.accountId) continue;
+            const found = stream.items.find((item) => unifiedThreadKey(item) === key);
+            if (found) return found;
+          }
+        }
+        const single = threadStateRef.current;
+        if (
+          single.kind !== "ready" ||
+          selectedAccountIdRef.current !== thread.accountId ||
+          selectedMailboxIdRef.current !== "inbox"
+        ) {
+          return undefined;
+        }
+        return single.page.items.find((item) => unifiedThreadKey(item) === key);
+      }),
+    [],
+  );
 
   /**
    * Leaving unified mode drops the merged streams but NOT which sections are
@@ -1609,9 +1676,9 @@ export function MailSurface({
       // A delete parked behind an Undo leaves with the page, bounded and
       // allowed to outlive the tab like the last autosave below.
       flushDeferredDiscardRef.current({ keepalive: true });
-      // So does what a section's Done has not sent yet, whether its window
-      // is still open or its queue is part of the way through.
-      flushSectionDoneRef.current({ keepalive: true });
+      // What a section's Done has not sent yet leaves with the page too, and
+      // not from here: its store hears `pagehide` itself, once, so it leaves
+      // whether or not a Mail surface is still mounted to say so.
       const sync = draftSyncRef.current;
       if (!sync || sync.closed || sync.frozen) return;
       // `keepalive` lets the browser finish this bounded request after the tab
@@ -3450,17 +3517,20 @@ export function MailSurface({
       ? pendingOpen.mailboxId
       : "inbox";
 
-    // A letter a section's Done is holding out of the Inbox is gone as far as
-    // the Inbox goes, from the press on: a request for it there is dropped
-    // the way one for an archived letter is, rather than opening a row the
-    // column does not draw or fetching a letter on its way out. A request
-    // that names another mailbox is still followed there, where the letter
-    // is listed either way.
-    const heldByDone = doneOverlay.has(unifiedThreadKey(pendingOpen));
-    if (heldByDone && mailboxId === "inbox") {
-      clearOpenThreadRequest();
-      return;
-    }
+    // A letter a section's Done is holding out, asked for by name: a
+    // notification pressed, the palette, a link. That press outranks the
+    // Done. While nothing has been sent for the letter it comes out of its
+    // run and off the overlay, and the list in hand answers below as it
+    // would for any row. One whose archive is in flight or has landed cannot
+    // be taken back: its row stays hidden, so it is not opened as a row of a
+    // list that does not draw it, and the request goes on the way one for a
+    // letter the list does not hold does. The store is read as it stands and
+    // not as the render saw it: a development double invoke of this effect
+    // runs the second time against a hold the first has already let go.
+    const requestedKey = unifiedThreadKey(pendingOpen);
+    const heldThread = doneOverlaySnapshot().get(requestedKey)?.thread;
+    if (heldThread !== undefined) withdrawSectionDone(heldThread);
+    const heldByDone = doneOverlaySnapshot().has(requestedKey);
 
     // The list on screen has not committed since the column last moved, so
     // "not in the list" is not yet an answer, and neither is "in it": the
@@ -3558,7 +3628,6 @@ export function MailSurface({
   }, [
     accountsState,
     changeSearchQuery,
-    doneOverlay,
     fetchRequestedThread,
     pendingOpen,
     searchQuery,
@@ -4577,7 +4646,7 @@ export function MailSurface({
       const overlay = { inbox: columnIsInbox() };
       return hideDone(
         applyShownDecisions(items, decisions, overlay),
-        doneOverlayRef.current,
+        doneOverlaySnapshot(),
         overlay,
       );
     },
@@ -5047,23 +5116,60 @@ export function MailSurface({
     [decideSender, openLetterTarget],
   );
 
-  /** THE TRANSPORT of a section's Done, and the reading of its failures. One
-   *  queue for every Done still going out, so their requests stay one at a
-   *  time. A batch endpoint replaces the first function here and nothing
-   *  else. It sends through the client as given: the counting wrapper above
-   *  is about list reads and leaves a mutation as it is. */
-  const sectionDoneQueue = useMemo(
-    () =>
-      doneQueue(
-        (mutation, { keepalive }) =>
-          givenClient.updateThread(
-            mutation,
-            undefined,
-            keepalive ? { keepalive: true } : undefined,
-          ),
-        sectionDoneFailure,
-      ),
-    [givenClient],
+  /**
+   * Moves the column to a new set of Done holds, the way a New senders
+   * decision moves it (`mail-flip.ts`). A section that empties unmounts
+   * whole, and a row that unmounts cannot play an exit of its own, so the
+   * change is committed synchronously between two measurements and played
+   * back from them. What leaves goes as a ghost of its last frame on a fade
+   * (the whole group in one piece when all of it goes, header included, so
+   * the header does not blink out under its rows), what it leaves behind
+   * closes up, and what returns rises in the way a row enters the list.
+   * Reduced motion keeps the opacity and nothing else. A browser without the
+   * Web Animations API, or a test's DOM, simply shows the new arrangement.
+   */
+  const moveDoneHolds = useCallback(
+    (
+      change: () => void,
+      motion: {
+        readonly leave?: {
+          readonly keys: ReadonlySet<string>;
+          /** The section's own element, when every row of it goes. */
+          readonly whole: HTMLElement | null;
+        };
+        readonly enter?: {
+          readonly keys: ReadonlySet<string>;
+          /** The section's flip key: it rises as one piece if it was gone. */
+          readonly section: string | null;
+        };
+      },
+    ) => {
+      const root = document.querySelector<HTMLElement>(".brain-mail-list");
+      const reduce = reduceMotionRef.current === true;
+      const before = root ? snapshotFlip(root) : null;
+      const leaving =
+        root && motion.leave
+          ? motion.leave.whole
+            ? [motion.leave.whole]
+            : flipElements(root, motion.leave.keys)
+          : [];
+      if (root && motion.leave) handFocusOn(root, motion.leave.keys);
+      const letGo = root ? ghostFlip(root, leaving, "fade", reduce) : null;
+      flushSync(change);
+      letGo?.();
+      if (!root || !before) return;
+      const section = motion.enter?.section ?? null;
+      playFlip(root, before, {
+        rise:
+          motion.enter === undefined
+            ? undefined
+            : section !== null && !before.has(section)
+              ? new Set([section])
+              : motion.enter.keys,
+        reduce,
+      });
+    },
+    [],
   );
 
   /**
@@ -5077,130 +5183,83 @@ export function MailSurface({
    * recognises (`mail_thread_stale`: moved by another client, or its mailbox
    * re-keyed under the list) did not "stay put". It is not where the column
    * had it, so it is held out like one that moved, and the next read says
-   * where it is.
+   * where it is. A letter that got new mail before its turn was never sent
+   * and is back in the column already; the report counts it.
    *
-   * The report waits its turn behind a standing Undo like any other, and
-   * wears no id: the Done pill's id may by now belong to a later Done, and a
-   * report must not take that one's way back.
+   * The report stands `SECTION_DONE_REPORT_MS`, waits its turn behind a
+   * standing Undo like any other, and wears no id: the Done pill's id may by
+   * now belong to a later Done, and a report must not take that one's way
+   * back.
    */
   const reportSectionDone = useCallback(
-    (run: SectionDoneRun, outcome: DoneOutcome) => {
-      commitDoneOverlay(
-        releaseDone(
-          landDone(doneOverlayRef.current, outcome.changed, inboxReadsRef.current),
-          outcome.stayed,
-        ),
-      );
-      if (outcome.stayed.length === 0 && outcome.changed.length === 0) return;
-      /* Why the threads that stayed are never coming back on their own. A
-         refusal is the server's folder layout, not a bad minute, so "try
-         again" would be a lie and the reader is owed the actual reason. An
-         account that went quiet is named apart from one that refused, because
-         "no folder for it" would be a lie about it. */
-      const missing = [
-        ...(outcome.refused.size === 0
+    (
+      press: SectionDonePress,
+      outcome: DoneOutcome,
+      putBack: (threads: readonly MailThreadListItem[]) => void,
+    ) => {
+      landSectionDone(outcome.changed);
+      putBack(outcome.stayed);
+      if (
+        outcome.stayed.length === 0 &&
+        outcome.changed.length === 0 &&
+        outcome.renewed.length === 0
+      ) {
+        return;
+      }
+      const tail = [
+        ...(outcome.changed.length === 0
           ? []
-          : [
-              outcome.refused.size === 1
-                ? "that account has no folder for it"
-                : "those accounts have no folder for it",
-            ]),
-        ...(outcome.silent.size === 0
+          : [`${outcome.changed.length} changed on the server`]),
+        ...(outcome.renewed.length === 0
           ? []
-          : [
-              outcome.silent.size === 1
-                ? "that account stopped answering"
-                : "those accounts stopped answering",
-            ]),
+          : [`${outcome.renewed.length} got new mail and stayed`]),
+        ...sectionDoneClosures(outcome.closed),
+        /* What the press could never have moved, named in every report: a
+           row that stays behind with nothing said about it never corrects
+           itself. */
+        ...(press.blocked === 0 ? [] : [`${press.blocked} can’t leave`]),
       ];
-      /* What the press could never have moved, named in every report: a row
-         that stays behind with nothing said about it never corrects itself. */
-      const held = run.blocked === 0 ? [] : [`${run.blocked} can’t leave`];
-      const changed =
-        outcome.changed.length === 0
-          ? []
-          : [`${outcome.changed.length} changed on the server`];
       if (outcome.moved.length === 0) {
-        onToast?.(`Couldn’t clear ${run.label}`, {
+        onToast?.(`Couldn’t clear ${press.label}`, {
           icon: "danger-triangle-linear",
           subtitle: [
             ...(outcome.stayed.length === 0
               ? []
               : [`${threadWord(outcome.stayed.length)} stayed put`]),
-            ...changed,
-            ...missing,
-            ...held,
+            ...tail,
           ].join(", "),
+          durationMs: SECTION_DONE_REPORT_MS,
         });
         return;
       }
-      onToast?.(`${run.label} partly cleared`, {
+      onToast?.(`${press.label} partly cleared`, {
         icon: "check-linear",
         subtitle: [
           `${outcome.moved.length} archived`,
           ...(outcome.stayed.length === 0
             ? []
             : [`${outcome.stayed.length} stayed put`]),
-          ...changed,
-          ...missing,
-          ...held,
+          ...tail,
         ].join(", "),
+        durationMs: SECTION_DONE_REPORT_MS,
       });
     },
-    [commitDoneOverlay, onToast],
-  );
-
-  /**
-   * The window closed: the run goes to the queue, in the background. It takes
-   * no mutation lock and moves no list epoch, so every other mail action
-   * works while it sends, and it goes on to its end whatever the column does
-   * meanwhile. Leaving All inboxes or switching account stops nothing.
-   *
-   * Each archive that answers marks its thread's hold as landed. The hold
-   * itself stays until a list read begun after that answer lands
-   * (`doneReadLandedRef`): a read that left earlier may still list the
-   * thread, and the mail events the run's own mutations raise bring exactly
-   * such reads.
-   */
-  const commitSectionDone = useCallback(
-    (run: SectionDoneRun) => {
-      void sectionDoneQueue
-        .commit(run.threads, (thread) =>
-          commitDoneOverlay(
-            landDone(doneOverlayRef.current, [thread], inboxReadsRef.current),
-          ),
-        )
-        .then((outcome) => reportSectionDone(run, outcome));
-    },
-    [commitDoneOverlay, reportSectionDone, sectionDoneQueue],
+    [onToast],
   );
 
   /**
    * The way back is gone before its window ran out: a second Done was
-   * pressed, the surface is unmounting, or the page is leaving. The waiting
-   * run goes to the queue now, and the sentence is said again under its id
-   * without an Undo, so no pill is left offering a way back over archives
-   * already out (see `flushDeferredDiscard`, whose shape this is).
-   *
-   * At pagehide (`keepalive`) the queue is emptied in the same task: what
-   * this run and any run still going out have not sent leaves at once,
-   * allowed to outlive the tab.
+   * pressed, or the surface is unmounting. The waiting run goes to the queue
+   * now, and its sentence is said again under its id without an Undo, so no
+   * pill is left offering a way back over archives already out (see
+   * `flushDeferredDiscard`, whose shape this is). The page leaving does the
+   * same, from the store's own listener.
    */
-  const flushSectionDone = useCallback(
-    (options?: { readonly keepalive?: boolean }) => {
-      const parked = sectionDoneParkedRef.current;
-      sectionDoneParkedRef.current = null;
-      if (parked?.flush()) {
-        onToast?.(sectionDoneTitle(parked.parcel), {
-          id: SECTION_DONE_TOAST_ID,
-          icon: "check-linear",
-          subtitle: sectionDoneSubtitle(parked.parcel),
-        });
-      }
-      if (options?.keepalive) sectionDoneQueue.unload();
-    },
-    [onToast, sectionDoneQueue],
-  );
+  const flushSectionDone = useCallback(() => {
+    const ticket = sectionDoneTicketRef.current;
+    sectionDoneTicketRef.current = null;
+    if (ticket) sendSectionDoneEarly(ticket);
+  }, []);
   useEffect(() => {
     flushSectionDoneRef.current = flushSectionDone;
   }, [flushSectionDone]);
@@ -5219,10 +5278,27 @@ export function MailSurface({
    * **Undo inside the window takes the threads off the overlay.** The rows
    * are back, no request was ever made, and so it cannot fail.
    *
-   * **When the window closes the commit runs in the background**
-   * (`commitSectionDone`). The shell owns the window, hover included, and
-   * says so through `onExpire`. One Done waits at a time: a second press
-   * lets the first go at once and opens a window of its own.
+   * **When the window closes the run goes to the queue, in the background.**
+   * The shell owns the window, hover included, and says so through
+   * `onExpire`. The queue takes no mutation lock and moves no list epoch, so
+   * every other mail action works while it sends, and it is the page's, not
+   * this surface's: leaving All inboxes, switching account or leaving Mail
+   * stops nothing, and coming back finds the same holds. Every request goes
+   * with `keepalive`, so one in flight when the page leaves is not cut. One
+   * Done waits at a time: a second press lets the first go at once and
+   * opens a window of its own.
+   *
+   * **Before each thread is sent the queue asks what the lists hold now**
+   * (`watchDoneLists`). A thread that got new mail since the press is not
+   * sent: a provider's archive acts on every message the thread has when it
+   * is called, and the reply would be filed away, read, unseen. Its row
+   * comes back at once and the report counts it.
+   *
+   * Each archive that answers marks its thread's hold as landed. The hold
+   * itself stays until a list read of that account begun after the answer
+   * lands (`doneReadLandedRef`): a read that left earlier may still list the
+   * thread, and the mail events the run's own mutations raise bring exactly
+   * such reads.
    *
    * The count in the message is a statement about the COLUMN, which is true
    * when it is made: this many letters just left the list. It is not a
@@ -5258,50 +5334,99 @@ export function MailSurface({
       }
       // One Done waits at a time: this press lets an earlier one go.
       flushSectionDone();
-      const run: SectionDoneRun = { label, threads: pending, blocked: blocked.length };
-      commitDoneOverlay(holdDone(doneOverlayRef.current, pending));
-      // A letter open in the reader leaves with its row, as Archive closes it.
-      closeReaderOn(pending);
+      const press: SectionDonePress = {
+        label,
+        left: pending.length,
+        blocked: blocked.length,
+      };
+      /* The group as it stands, found by the name it is drawn under. It goes
+         as one piece when every row of it goes, and its flip key is how a
+         return knows whether the group itself has to come back. */
+      const section =
+        [
+          ...document.querySelectorAll<HTMLElement>(".brain-mail-list section"),
+        ].find((candidate) => candidate.getAttribute("aria-label") === label) ?? null;
+      const sectionKey = section?.dataset.flip ?? null;
+      /** Rows coming back to the column: an Undo, new mail, an archive that
+       *  failed. They rise in the way a row enters the list. */
+      const putBack = (threads: readonly MailThreadListItem[]) => {
+        if (threads.length === 0) return;
+        moveDoneHolds(() => releaseSectionDone(threads), {
+          enter: { keys: new Set(threads.map(flipRowKey)), section: sectionKey },
+        });
+      };
+      moveDoneHolds(
+        () => {
+          holdSectionDone(pending);
+          // A letter open in the reader leaves with its row, as Archive
+          // closes it.
+          closeReaderOn(pending);
+        },
+        {
+          leave: {
+            keys: new Set(pending.map(flipRowKey)),
+            whole: blocked.length === 0 ? section : null,
+          },
+        },
+      );
+      const run: SectionDoneRun = {
+        label,
+        threads: pending,
+        blocked: blocked.length,
+        /* THE TRANSPORT. One mutation, one request, and every one of them
+           with `keepalive`: a request in flight when the page leaves would
+           otherwise be cut with the document. A batch endpoint replaces this
+           function and nothing else. */
+        send: (mutation) =>
+          client.updateThread(mutation, undefined, { keepalive: true }),
+        respeak: () =>
+          onToast?.(sectionDoneTitle(press), {
+            id: SECTION_DONE_TOAST_ID,
+            icon: "check-linear",
+            subtitle: sectionDoneSubtitle(press),
+          }),
+        onRenewed: (thread) => putBack([thread]),
+        onSettled: (outcome) => reportSectionDone(press, outcome, putBack),
+      };
+      const ticket = parkSectionDone(run);
       // No toast channel, no Undo to offer, and so nothing to wait for.
       if (!onToast) {
-        commitSectionDone(run);
+        ticket.send();
         return;
       }
-      const parked = parkDiscard<SectionDoneRun>(run, (parcel) =>
-        commitSectionDone(parcel),
-      );
-      sectionDoneParkedRef.current = parked;
-      onToast(sectionDoneTitle(run), {
+      sectionDoneTicketRef.current = ticket;
+      onToast(sectionDoneTitle(press), {
         id: SECTION_DONE_TOAST_ID,
         icon: "check-linear",
-        subtitle: sectionDoneSubtitle(run),
+        subtitle: sectionDoneSubtitle(press),
         actionLabel: "Undo",
         durationMs: SMART_UNDO_MS,
         onAction: () => {
           // Nothing left to bring back (the run already went to the queue):
           // the press is refused rather than spending a pill that was
           // replaced.
-          const back = parked.restore();
+          const back = ticket.undo();
           if (!back) return false;
-          if (sectionDoneParkedRef.current === parked) {
-            sectionDoneParkedRef.current = null;
+          if (sectionDoneTicketRef.current === ticket) {
+            sectionDoneTicketRef.current = null;
           }
-          commitDoneOverlay(releaseDone(doneOverlayRef.current, back.threads));
+          putBack(back);
         },
         onExpire: () => {
-          if (sectionDoneParkedRef.current === parked) {
-            sectionDoneParkedRef.current = null;
+          if (sectionDoneTicketRef.current === ticket) {
+            sectionDoneTicketRef.current = null;
           }
-          parked.flush();
+          ticket.send();
         },
       });
     },
     [
+      client,
       closeReaderOn,
-      commitDoneOverlay,
-      commitSectionDone,
       flushSectionDone,
+      moveDoneHolds,
       onToast,
+      reportSectionDone,
     ],
   );
 
@@ -5624,7 +5749,7 @@ export function MailSurface({
                   mergedDisplayItems(state.streams).items,
                   senderDecisionsRef.current,
                 ),
-                doneOverlayRef.current,
+                doneOverlaySnapshot(),
               ),
               accountsForSections,
               stickyOpenRef.current,
@@ -7129,21 +7254,6 @@ function isMutationUnsupported(error: unknown): boolean {
  */
 function isThreadStale(error: unknown): boolean {
   return error instanceof MailApiError && error.code === "mail_thread_stale";
-}
-
-/**
- * What a mutation a section's Done sent and lost says about the rest of its
- * run (`DoneFailure`). A 409 that names no folder is the account's server
- * answering for every thread on it, and a request the client's own clock
- * ended (`MAIL_MUTATION_TIMEOUT_MS`) is an account the next request would sit
- * on just as long, so both close the account. Anything else is that thread's
- * alone.
- */
-function sectionDoneFailure(error: unknown): DoneFailure {
-  if (isThreadStale(error)) return "changed";
-  if (isMutationUnsupported(error)) return "refused";
-  if (isMailMutationTimeout(error)) return "silent";
-  return "failed";
 }
 
 /** The service's `mail_sync_in_progress` on a list read: a sync is moving the

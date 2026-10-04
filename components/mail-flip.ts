@@ -31,6 +31,9 @@ export type FlipSnapshot = ReadonlyMap<
 
 const FLIP = "[data-flip]";
 
+/** How far a row rises as it enters the merged list (`UnifiedRow`'s `y: 4`). */
+const ROW_RISE = 4;
+
 function cubic(curve: readonly number[]): string {
   return `cubic-bezier(${curve.join(", ")})`;
 }
@@ -166,7 +169,9 @@ export function ghostFlip(
  * Plays the change back. `travel` names the rows that changed sections (they
  * lift and take the longer curve), `arrive` the rows that should flash the
  * selection tint once they land, and `enter` the keys that come back into the
- * column, which slide in from the left they left by.
+ * column, which slide in from the left they left by. `rise` names keys that
+ * come back after leaving on a fade, as a section's Done takes them: they
+ * rise the 4px a row rises when it enters the list, on the same `DUR.fast`.
  */
 export function playFlip(
   root: ParentNode,
@@ -175,12 +180,14 @@ export function playFlip(
     readonly travel?: ReadonlySet<string>;
     readonly arrive?: ReadonlySet<string>;
     readonly enter?: ReadonlySet<string>;
+    readonly rise?: ReadonlySet<string>;
     readonly reduce: boolean;
   },
 ): void {
   const travel = options.travel ?? new Set<string>();
   const arrive = options.arrive ?? new Set<string>();
   const enter = options.enter ?? new Set<string>();
+  const rise = options.rise ?? new Set<string>();
   const after = new Map<string, { element: HTMLElement; rect: DOMRect }>();
   for (const element of root.querySelectorAll<HTMLElement>(FLIP)) {
     const key = element.dataset.flip;
@@ -192,6 +199,18 @@ export function playFlip(
     if (!canAnimate(element)) continue;
     const from = before.get(key);
     if (from === undefined) {
+      if (rise.has(key)) {
+        element.animate(
+          options.reduce
+            ? [{ opacity: 0 }, { opacity: 1 }]
+            : [
+                { opacity: 0, transform: `translateY(${ROW_RISE}px)` },
+                { opacity: 1, transform: "none" },
+              ],
+          { duration: DUR.fast * 1000, easing: cubic(EASE_OUT) },
+        );
+        continue;
+      }
       if (!enter.has(key)) continue;
       element.animate(
         options.reduce

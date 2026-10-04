@@ -2454,7 +2454,7 @@ describe("MailContentCoordinator", () => {
     await vi.waitFor(async () => {
       await expect(
         coordinator.getContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID }),
-      ).resolves.toMatchObject({ state: "transient" });
+      ).resolves.toMatchObject({ state: "permanent" });
     });
     // One try: one download, parsed three times, and no retry after it.
     await sleep(700);
@@ -2463,12 +2463,103 @@ describe("MailContentCoordinator", () => {
     now += MAIL_RESOURCE_LIMITS.remoteImageTransientRetryMs + 1;
     await expect(step()).resolves.toEqual({ hasMore: false });
     expect(fetches).toHaveLength(1);
-    // The owner's open fetches it again, and tries again after a failure as
-    // any open does.
+    // The owner's open fetches it again.
     await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID });
-    await vi.waitFor(() => expect(fetches.length).toBeGreaterThanOrEqual(3), {
-      timeout: 4_000,
+    await vi.waitFor(() => expect(fetches).toHaveLength(2), { timeout: 4_000 });
+  });
+
+  it("parses a letter that brings the parser down three times for an open, and again only for another open", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    const counts = { fetches: 0, parses: 0 };
+    const runner = new ProductionMailContentWorkRunner({
+      sourceFactory: {
+        async create({ incomingBlobStore }) {
+          return {
+            source: {
+              async fetchRaw() {
+                counts.fetches += 1;
+                return {
+                  descriptor: await incomingBlobStore.putIncoming(
+                    chunks(Buffer.from("raw MIME that kills the parser")),
+                    1024,
+                  ),
+                };
+              },
+            },
+            destroy() {},
+          };
+        },
+      },
+      // The worker dies before answering, every time.
+      parser: {
+        isolation: { networkAccess: false, credentialAccess: false, sandboxVersion: 1 },
+        async parse() {
+          counts.parses += 1;
+          return { kind: "transient_failure", errorCode: "mail_mime_worker_dropped" };
+        },
+      },
+      now: () => 1_000,
     });
+    // A retry policy that would take the queue's four attempts at once.
+    const coordinator = fixture.coordinator(
+      runner,
+      { nextDelayMs: () => 1 },
+      undefined,
+      () => 1_000,
+    );
+    const input = { accountId: ACCOUNT_ID, messageId: MESSAGE_ID };
+
+    await expect(coordinator.requestContent(input)).resolves.toMatchObject({
+      state: "fetching",
+    });
+    // The reader is told the letter cannot be shown, so it stops asking: a
+    // `transient` answer is what it asks again on, three times an open.
+    await vi.waitFor(
+      async () => {
+        await expect(coordinator.getContent(input)).resolves.toMatchObject({
+          state: "permanent",
+        });
+      },
+      { timeout: 4_000 },
+    );
+    await sleep(700);
+    expect(counts).toEqual({ fetches: 1, parses: 3 });
+
+    // Opening it again is the one thing that tries again, once more.
+    await expect(coordinator.requestContent(input)).resolves.toMatchObject({
+      state: "fetching",
+    });
+    await vi.waitFor(() => expect(counts.parses).toBe(6), { timeout: 4_000 });
+    await sleep(700);
+    expect(counts).toEqual({ fetches: 2, parses: 6 });
+    await expect(coordinator.getContent(input)).resolves.toMatchObject({
+      state: "permanent",
+    });
+  });
+
+  it("still retries an owner's letter whose fetch failed, and says so", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    let fetches = 0;
+    const runner: MailContentWorkRunnerPort = {
+      async run() {
+        fetches += 1;
+        throw new MailContentWorkError("transient", "mail_content_source_transient");
+      },
+    };
+    const coordinator = fixture.coordinator(runner, {
+      nextDelayMs: () => (fetches < 4 ? 1 : null),
+    });
+    const input = { accountId: ACCOUNT_ID, messageId: MESSAGE_ID };
+    await coordinator.requestContent(input);
+    await vi.waitFor(() => expect(fetches).toBe(4), { timeout: 4_000 });
+    await vi.waitFor(
+      async () => {
+        await expect(coordinator.getContent(input)).resolves.toMatchObject({
+          state: "transient",
+        });
+      },
+      { timeout: 4_000 },
+    );
   });
 
   it("claims nothing at the budget while every body it holds is pinned", async () => {

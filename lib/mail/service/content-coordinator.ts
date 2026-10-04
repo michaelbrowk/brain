@@ -1599,12 +1599,13 @@ export class MailContentCoordinator
             throw markError;
           }
           if (failure.kind === "permanent") return complete();
-          // A letter that brought the parser down may do so every time: the
-          // prefetch tries it once and leaves it for an open.
-          if (
-            input.lane.background &&
-            MAIL_PARSER_FAILURE_CODES.includes(failure.errorCode)
-          ) {
+          // A letter that brought the parser down may do so every time, so
+          // nobody's attempt at it is retried: the prefetch leaves it for an
+          // open, and an open leaves it for the next open. The runner has
+          // already parsed it up to three times in this one attempt. The
+          // queue's four attempts made that twelve parser processes an ask,
+          // and the reader asks three times an open.
+          if (MAIL_PARSER_FAILURE_CODES.includes(failure.errorCode)) {
             return complete();
           }
           const attempt = input.nextAttempt();
@@ -1636,7 +1637,18 @@ export class MailContentCoordinator
       return contentState(accountId, messageId, "fetching");
     }
     if (snapshot.kind === "transient_failure") {
-      return contentState(accountId, messageId, "transient");
+      // A parser-caused failure is not retried on its own (see
+      // `runQueuedAttempt`), so to whoever polls it is final: `transient`
+      // would tell the reader the service is between retries, and it would
+      // ask again, three times an open. The row stays a transient failure,
+      // which is what lets the next open claim it and try once more.
+      return contentState(
+        accountId,
+        messageId,
+        MAIL_PARSER_FAILURE_CODES.includes(snapshot.errorCode)
+          ? "permanent"
+          : "transient",
+      );
     }
     if (snapshot.kind === "permanent_failure") {
       return contentState(accountId, messageId, "permanent");

@@ -11,6 +11,10 @@
 // hand back. The window running out, the page unloading, the writer opening
 // another composer and a stale pill can all reach the same parcel, so every
 // call after the first is a no-op rather than a second request.
+//
+// A section's Done waits the same way (`markSectionDone`): its parcel is the
+// run, its flush hands the run to the queue that archives it, and its Undo
+// takes the run back before anything was sent.
 
 export type DeferredDiscardState = "parked" | "restored" | "flushed";
 

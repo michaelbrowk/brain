@@ -109,9 +109,10 @@ export function landDone(
  * what keeps that row from flashing back.
  *
  * `gone` is what such a read did not list. Those threads are out of the
- * Inbox, and the caller sweeps them from the lists in the same commit, since
- * an earlier read may have put a row back under the hold. A thread the read
- * does list is in the Inbox again by someone's hand, and it simply shows.
+ * Inbox, and the caller sweeps them from the lists in the same commit: the
+ * lists were never told, and a deep row or one an earlier read put back
+ * would show the moment the hold let go. A thread the read does list is in
+ * the Inbox again by someone's hand, and it simply shows.
  */
 export function settleDone(
   overlay: DoneOverlay,

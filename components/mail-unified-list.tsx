@@ -75,10 +75,11 @@ export function MailUnifiedList({
   expand: UnifiedExpandState;
   selectedThreadKey: string | null;
   /**
-   * True while an explicit mutation is in flight (the section Done loop and
-   * its undo, archive/trash/spam). Only then do unmounting rows play the exit
-   * fade — every other re-partition (sticky release, silent refresh) removes
-   * and moves rows as a plain re-render.
+   * True while an explicit mutation is in flight (archive, trash, spam, a
+   * read flag). Only then do unmounting rows play the exit fade — every
+   * other re-partition (sticky release, silent refresh, a section's Done and
+   * its Undo, which hold no lock) removes and moves rows as a plain
+   * re-render.
    */
   exitFades: boolean;
   /**

@@ -7,10 +7,15 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type {
+  MailMailboxUnavailableReason,
+  MailSearchAllAccountStatus,
+} from "@/lib/mail/message-types";
 import type { TaskView } from "@/lib/tasks/model";
 import type { TreeNode } from "@/lib/store/types";
 import {
   CommandPalette,
+  mailUnsearchedLine,
   rankTasks,
   type CommandPaletteSelection,
 } from "./command-palette";
@@ -61,27 +66,49 @@ function thread(
   };
 }
 
+const SEARCHED_ACCOUNT: MailSearchAllAccountStatus = {
+  accountId: ACCOUNT_ID,
+  emailAddress: OWN_ADDRESS,
+  mailboxId: "all",
+  availability: {
+    status: "available",
+    lastSuccessfulAt: 1_700_000_000_000,
+    windowTruncated: false,
+  },
+  indexStatus: "ready",
+  resultsTruncated: false,
+};
+
 function mailBody(threads: unknown[], overrides: Record<string, unknown> = {}) {
   return {
     apiVersion: 1,
     threads,
-    accounts: [
-      {
-        accountId: ACCOUNT_ID,
-        emailAddress: OWN_ADDRESS,
-        mailboxId: "all",
-        availability: {
-          status: "available",
-          lastSuccessfulAt: 1_700_000_000_000,
-          windowTruncated: false,
-        },
-        indexStatus: "ready",
-        resultsTruncated: false,
-      },
-    ],
+    accounts: [SEARCHED_ACCOUNT],
     indexBuilding: false,
     truncated: false,
     ...overrides,
+  };
+}
+
+/** An account the search could not read: the route still answers 200 for it,
+ *  with no rows and the cache's own reason. */
+function unsearchedAccount(
+  accountId: string,
+  emailAddress: string,
+  reason: MailMailboxUnavailableReason,
+): MailSearchAllAccountStatus {
+  return {
+    accountId,
+    emailAddress,
+    mailboxId: "inbox",
+    availability: {
+      status: "unavailable",
+      reason,
+      lastSuccessfulAt: null,
+      windowTruncated: null,
+    },
+    indexStatus: "ready",
+    resultsTruncated: false,
   };
 }
 
@@ -265,6 +292,115 @@ describe("CommandPalette global search", () => {
     expect(rows("Mail")[0].textContent).toContain("(no subject)");
     expect(rows("Mail")[0].querySelector(".font-semibold")).toBeNull();
     expect(group("Mail")?.textContent).toContain("Older mail is still being indexed");
+  });
+
+  it("says the index is still building when it has no row to stand above", async () => {
+    // The line used to ride on the rows, so an index that had not reached the
+    // match yet answered a bare "No results" for a letter that exists.
+    mailAnswer = async () => response(mailBody([], { indexBuilding: true }));
+    await render();
+    await type("quarterly");
+
+    expect(rows("Mail")).toHaveLength(0);
+    expect(group("Mail")?.textContent).toContain("Older mail is still being indexed");
+    expect(document.body.textContent).not.toContain("No results for");
+  });
+
+  it("names the mailbox that could not be searched instead of claiming no results", async () => {
+    // For a few minutes after the mail service restarts an account answers
+    // `unavailable` and no rows, which read as "nothing matched".
+    mailAnswer = async () =>
+      response(
+        mailBody([], {
+          accounts: [
+            unsearchedAccount(ACCOUNT_ID, "design@example.test", "global_syncing"),
+          ],
+        }),
+      );
+    await render();
+    await type("quarterly");
+
+    expect(rows("Mail")).toHaveLength(0);
+    const note = group("Mail")?.querySelector('[role="status"]');
+    expect(note?.textContent).toBe(
+      "design@example.test is still syncing. Some letters may be missing.",
+    );
+    expect(document.body.textContent).not.toContain("No results for");
+  });
+
+  it("keeps the line above the rows another account answered, and drops it on the next answer", async () => {
+    mailAnswer = async () =>
+      response(
+        mailBody([thread("thread-1", "Quarterly launch review")], {
+          accounts: [
+            SEARCHED_ACCOUNT,
+            unsearchedAccount("account-b", "design@example.test", "mailbox_syncing"),
+          ],
+          // Both gaps at once still read as one line: the mailbox that was
+          // not searched says more than the index that is not finished.
+          indexBuilding: true,
+        }),
+      );
+    await render();
+    await type("quarterly");
+
+    expect(rows("Mail")).toHaveLength(1);
+    const statuses = [...(group("Mail")?.querySelectorAll('[role="status"]') ?? [])];
+    expect(statuses.map((status) => status.textContent)).toEqual([
+      "design@example.test is still syncing. Some letters may be missing.",
+    ]);
+
+    // The line belongs to the answer it came with. The next ask finds the
+    // mailbox synced, and nothing of the line is left.
+    mailAnswer = async () =>
+      response(mailBody([thread("thread-1", "Quarterly launch review")]));
+    await type("quarterly launch");
+    expect(rows("Mail")).toHaveLength(1);
+    expect(group("Mail")?.textContent).not.toContain("still syncing");
+    expect(group("Mail")?.querySelector('[role="status"]')).toBeNull();
+  });
+
+  it("words the line by why each mailbox was left out", () => {
+    expect(mailUnsearchedLine([SEARCHED_ACCOUNT])).toBeNull();
+    expect(
+      mailUnsearchedLine([
+        unsearchedAccount("a", "a@example.test", "mailbox_reauth_required"),
+      ]),
+    ).toBe("a@example.test needs to be reconnected. Some letters may be missing.");
+    expect(
+      mailUnsearchedLine([unsearchedAccount("a", "a@example.test", "mailbox_backoff")]),
+    ).toBe("a@example.test could not be searched. Some letters may be missing.");
+    // An account whose search threw carries words instead of a page.
+    expect(
+      mailUnsearchedLine([
+        {
+          accountId: "a",
+          emailAddress: "a@example.test",
+          error: "this account needs to be reconnected",
+          reason: "mail_account_reauth_required",
+        },
+      ]),
+    ).toBe("a@example.test needs to be reconnected. Some letters may be missing.");
+    expect(
+      mailUnsearchedLine([
+        SEARCHED_ACCOUNT,
+        unsearchedAccount("a", "a@example.test", "mailbox_uninitialized"),
+        unsearchedAccount("b", "b@example.test", "history_mismatch"),
+      ]),
+    ).toBe(
+      "a@example.test and b@example.test are still syncing. Some letters may be missing.",
+    );
+    // Mixed reasons share the one thing true of all of them, and a long run
+    // of addresses is counted rather than listed.
+    expect(
+      mailUnsearchedLine([
+        unsearchedAccount("a", "a@example.test", "global_syncing"),
+        unsearchedAccount("b", "b@example.test", "mailbox_reauth_required"),
+        unsearchedAccount("c", "c@example.test", "mailbox_cache_capacity"),
+      ]),
+    ).toBe(
+      "a@example.test and 2 more could not be searched. Some letters may be missing.",
+    );
   });
 
   it("reads a snippet's entities the way the mail list does", async () => {

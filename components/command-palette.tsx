@@ -18,6 +18,7 @@ import { emitTaskCommand, type TaskCommand } from "./tasks-commands";
 import { sanitizeSnippet } from "@/lib/mail/reader-content";
 import { normalizeMailSearchQueryText } from "@/lib/mail/search-query";
 import type {
+  MailSearchAllAccountStatus,
   MailSearchAllResponse,
   MailSystemMailbox,
   MailThreadListItem,
@@ -48,6 +49,10 @@ interface MailResults {
   readonly ownAddresses: ReadonlyMap<string, string>;
   readonly mailboxes: ReadonlyMap<string, MailSystemMailbox>;
   readonly indexBuilding: boolean;
+  /** The line for the mailboxes this answer could not read, or null when
+   *  every account was searched. It is worded as the answer lands and kept
+   *  with it, so the next answer replaces it with its own. */
+  readonly unsearched: string | null;
 }
 
 const NO_MAIL: MailResults = {
@@ -55,7 +60,61 @@ const NO_MAIL: MailResults = {
   ownAddresses: new Map(),
   mailboxes: new Map(),
   indexBuilding: false,
+  unsearched: null,
 };
+
+/** Why an account's letters are not in an answer. An account can answer 200
+ *  with no rows because its cache is not readable yet, which the route says
+ *  per account and the palette used to drop: a mailbox that was never read
+ *  drew the same bare "No results" as one that held no match.
+ *
+ *  Three wordings and no more. Everything the cache will finish on its own
+ *  (the first sync, a resync, a generation it has not caught up with) is
+ *  "still syncing". A lapsed sign-in is the one thing the reader has to act
+ *  on, so it is named. A sync that is backing off, a cache that is full and a
+ *  search that threw are not syncing and the palette is not where they are
+ *  explained, so they only say the mailbox was not searched. */
+type MailGap = "syncing" | "reconnect" | "failed";
+
+function mailGapOf(account: MailSearchAllAccountStatus): MailGap | null {
+  if ("error" in account) {
+    return account.reason === "mail_account_reauth_required" ? "reconnect" : "failed";
+  }
+  if (account.availability.status === "available") return null;
+  const { reason } = account.availability;
+  if (reason === "mailbox_reauth_required") return "reconnect";
+  if (reason === "mailbox_backoff" || reason === "mailbox_cache_capacity") return "failed";
+  return "syncing";
+}
+
+/** The Mail group's one line about mailboxes it could not search, or null
+ *  when the answer covers every account. Two addresses are both named, a
+ *  longer run is counted, and accounts left out for different reasons share
+ *  the one thing true of all of them. */
+export function mailUnsearchedLine(
+  accounts: readonly MailSearchAllAccountStatus[],
+): string | null {
+  const gaps: { address: string; gap: MailGap }[] = [];
+  for (const account of accounts) {
+    const gap = mailGapOf(account);
+    if (gap !== null) gaps.push({ address: account.emailAddress, gap });
+  }
+  if (gaps.length === 0) return null;
+  const one = gaps.length === 1;
+  const names = one
+    ? gaps[0].address
+    : gaps.length === 2
+      ? `${gaps[0].address} and ${gaps[1].address}`
+      : `${gaps[0].address} and ${gaps.length - 1} more`;
+  const shared = gaps.every(({ gap }) => gap === gaps[0].gap) ? gaps[0].gap : "failed";
+  const what =
+    shared === "syncing"
+      ? `${one ? "is" : "are"} still syncing`
+      : shared === "reconnect"
+        ? `${one ? "needs" : "need"} to be reconnected`
+        : "could not be searched";
+  return `${names} ${what}. Some letters may be missing.`;
+}
 
 interface FlatPage {
   id: string;
@@ -889,6 +948,7 @@ export function CommandPalette({
           ownAddresses,
           mailboxes,
           indexBuilding: body.indexBuilding === true,
+          unsearched: mailUnsearchedLine(body.accounts ?? []),
         });
         setMailResolvedQuery(q);
         setMailState("ready");
@@ -1007,8 +1067,20 @@ export function CommandPalette({
   // status line at a time, so a screen reader hears the search once.
   const panelSearching = effectiveSearchState === "loading";
   const mailSearching = effectiveMailState === "loading" && !panelSearching;
+  // What the answer could not cover, in one line: a mailbox that was not
+  // searched says more than an index that is not finished, so it speaks for
+  // both. The line stands with rows or without them. An answer that is short
+  // of the whole and has no row yet must not read as "No results".
+  const mailNote =
+    effectiveMailState === "ready" && !panelSearching
+      ? (mail.unsearched ??
+        (mail.indexBuilding ? "Older mail is still being indexed" : null))
+      : null;
   const mailGroupShown =
-    mailSearching || effectiveMailState === "error" || mailThreads.length > 0;
+    mailSearching ||
+    effectiveMailState === "error" ||
+    mailThreads.length > 0 ||
+    mailNote !== null;
   const nothing =
     effectiveSearchState !== "loading" &&
     effectiveSearchState !== "error" &&
@@ -1230,9 +1302,14 @@ export function CommandPalette({
               </Command.Item>
             </>
           )}
-          {effectiveMailState === "ready" && mail.indexBuilding && !panelSearching && (
-            <div role="status" className="px-2.5 pt-2 text-[12px] text-ink-2">
-              Older mail is still being indexed
+          {mailNote !== null && (
+            <div
+              role="status"
+              // With no row under it the line closes the group, so it takes
+              // the bottom padding the searching row has.
+              className={`break-words px-2.5 pt-2 text-[12px] text-ink-2${mailThreads.length === 0 ? " pb-2" : ""}`}
+            >
+              {mailNote}
             </div>
           )}
           {visibleMail.map((t) => {

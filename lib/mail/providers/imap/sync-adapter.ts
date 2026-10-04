@@ -1745,6 +1745,13 @@ function mapImapProviderError(error: unknown): MailProviderSyncError {
 
 export type ImapMailboxRole = "archive" | "trash" | "junk";
 
+/**
+ * Every mailbox LIST is asked to name: the three a message is moved into, and
+ * the Sent mailbox, which is only ever read. Sent stays out of
+ * `ImapMailboxRole` so that no move can be addressed to it.
+ */
+export type ImapDiscoveredMailbox = ImapMailboxRole | "sent";
+
 export interface ImapMailboxDescriptor {
   readonly path: string;
   /** Leaf name as listed. Derived from `path` and `delimiter` when absent. */
@@ -1771,7 +1778,7 @@ type RoleTier =
   | { readonly kind: "special_use"; readonly attribute: string }
   | { readonly kind: "name"; readonly names: readonly string[] };
 
-const ROLE_TIERS: Readonly<Record<ImapMailboxRole, readonly RoleTier[]>> =
+const ROLE_TIERS: Readonly<Record<ImapDiscoveredMailbox, readonly RoleTier[]>> =
   Object.freeze({
     archive: Object.freeze<readonly RoleTier[]>([
       Object.freeze({ kind: "special_use", attribute: "\\Archive" }),
@@ -1814,6 +1821,30 @@ const ROLE_TIERS: Readonly<Record<ImapMailboxRole, readonly RoleTier[]>> =
         names: Object.freeze(["junk", "spam", "junk e-mail", "junk email"]),
       }),
     ]),
+    // The words mail clients give the folder of sent mail in the languages
+    // they ship, under the archive's own rule: at the root or directly under
+    // the Inbox, and only when exactly one folder answers.
+    sent: Object.freeze<readonly RoleTier[]>([
+      Object.freeze({ kind: "special_use", attribute: "\\Sent" }),
+      Object.freeze({
+        kind: "name",
+        names: Object.freeze([
+          "sent",
+          "sent items",
+          "sent messages",
+          "отправленные",
+          "надіслані",
+          "gesendet",
+          "envoyés",
+          "enviados",
+          "inviati",
+          "wysłane",
+          "gönderilmiş öğeler",
+          "verzonden",
+          "skickat",
+        ]),
+      }),
+    ]),
   });
 
 /** Attributes that make a listed mailbox impossible to select or move into. */
@@ -1836,7 +1867,7 @@ export function isInboxPath(path: string): boolean {
  * order.
  */
 export function selectImapMailboxPath(
-  role: ImapMailboxRole,
+  role: ImapDiscoveredMailbox,
   mailboxes: readonly ImapMailboxDescriptor[],
 ): string | null {
   const candidates = mailboxes.filter(isSelectableMailbox);

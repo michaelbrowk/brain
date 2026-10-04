@@ -172,6 +172,75 @@ describe("IMAP mailbox role discovery", () => {
     expect(selectImapMailboxPath("archive", [{ path: "Archive" }])).toBe("Archive");
   });
 
+  /*
+    The Sent mailbox is only ever read: the new-senders screen learns from its
+    envelopes whom the owner wrote to. It is found the way the archive is, the
+    stated attribute first and then the name a mail client gives the folder.
+  */
+  it("finds the Sent mailbox by its stated attribute before any name", () => {
+    expect(
+      selectImapMailboxPath("sent", [
+        { path: "Sent", name: "Sent", delimiter: "/" },
+        { path: "Outgoing", name: "Outgoing", delimiter: "/", specialUse: "\\Sent" },
+      ]),
+    ).toBe("Outgoing");
+  });
+
+  it("finds the Sent mailbox under the name a localized server gives it", () => {
+    for (const name of [
+      "Sent",
+      "Sent Items",
+      "Sent Messages",
+      "Отправленные",
+      "Надіслані",
+      "Gesendet",
+      "Envoyés",
+      "Enviados",
+      "Inviati",
+      "Wysłane",
+      "Gönderilmiş Öğeler",
+      "Verzonden",
+      "Skickat",
+    ]) {
+      expect(
+        selectImapMailboxPath("sent", [
+          { path: "Archive", name: "Archive", delimiter: "|" },
+          { path: name, name, delimiter: "|" },
+        ]),
+      ).toBe(name);
+      expect(
+        selectImapMailboxPath("sent", [
+          { path: `INBOX.${name}`, name, delimiter: "." },
+        ]),
+      ).toBe(`INBOX.${name}`);
+    }
+  });
+
+  it("names no Sent mailbox when the server lists none, two, or one out of place", () => {
+    expect(
+      selectImapMailboxPath("sent", [
+        { path: "Archive", name: "Archive", delimiter: "/" },
+        { path: "Drafts", name: "Drafts", delimiter: "/" },
+      ]),
+    ).toBeNull();
+    expect(
+      selectImapMailboxPath("sent", [
+        { path: "Sent", name: "Sent", delimiter: "/" },
+        { path: "Sent Items", name: "Sent Items", delimiter: "/" },
+      ]),
+    ).toBeNull();
+    expect(
+      selectImapMailboxPath("sent", [
+        { path: "Projects/2019/Sent", name: "Sent", delimiter: "/" },
+      ]),
+    ).toBeNull();
+    expect(
+      selectImapMailboxPath("sent", [
+        { path: "Sent", name: "Sent", delimiter: "/", flags: new Set(["\\Noselect"]) },
+      ]),
+    ).toBeNull();
+  });
+
   it("rejects a mailbox list longer than the documented budget", () => {
     const oversized = Array.from({ length: MAX_LISTED_MAILBOXES + 1 }, (_value, index) => ({
       path: `Folder${index}`,

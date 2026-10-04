@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -7,6 +8,12 @@ import {
   MAX_LISTED_MAILBOXES,
   selectImapMailboxPath,
 } from "./sync-adapter";
+
+// ImapFlow's own lists of localized folder names, read from the package so
+// that an upgrade that adds a name fails the test that compares them.
+const imapFlowSpecialUse = createRequire(import.meta.url)("imapflow/lib/special-use.js") as {
+  readonly names: Readonly<Record<string, readonly string[]>>;
+};
 
 describe("IMAP mailbox role discovery", () => {
   it("prefers the stated SPECIAL-USE attribute over any name", () => {
@@ -45,6 +52,133 @@ describe("IMAP mailbox role discovery", () => {
     const mailboxes = [{ path: "INBOX/ARCHIVE", delimiter: "/" }];
 
     expect(selectImapMailboxPath("archive", mailboxes)).toBe("INBOX/ARCHIVE");
+  });
+
+  /*
+    Until 0.20.3 a server that states no attribute had its trash, junk and
+    sent folders found by ImapFlow's guess, from some forty, thirty and a
+    hundred localized names. The guess is gone, so the name tiers have to
+    know those names themselves, or a German, Russian or French mailbox loses
+    its trash and spam buttons. They hold ImapFlow's own lists, under the
+    rule the guess never had: at the root or directly under the Inbox, and
+    only when exactly one folder answers.
+  */
+  it("knows every name ImapFlow knows for trash, junk and sent, where a mail client puts the folder", () => {
+    for (const [role, attribute] of [
+      ["trash", "\\Trash"],
+      ["junk", "\\Junk"],
+      ["sent", "\\Sent"],
+    ] as const) {
+      const names = [...new Set(imapFlowSpecialUse.names[attribute])];
+      expect(names.length).toBeGreaterThan(30);
+      for (const name of names) {
+        expect(selectImapMailboxPath(role, [{ path: name, name, delimiter: "/" }]), name).toBe(name);
+        expect(
+          selectImapMailboxPath(role, [{ path: `INBOX.${name}`, name, delimiter: "." }]),
+          name,
+        ).toBe(`INBOX.${name}`);
+        // Nested deeper, or under another user's tree, it is somebody
+        // else's folder.
+        expect(
+          selectImapMailboxPath(role, [{ path: `Projects/Acme/${name}`, name, delimiter: "/" }]),
+          name,
+        ).toBeNull();
+      }
+    }
+  });
+
+  it("finds the folders of a German, a Russian and a French mailbox that states no attribute", () => {
+    const roles = (names: readonly string[]) => {
+      const listed = names.map((name) => ({ path: name, name, delimiter: "/" }));
+      return Object.fromEntries(
+        (["archive", "trash", "junk", "sent"] as const).map((role) => [
+          role,
+          selectImapMailboxPath(role, listed),
+        ]),
+      );
+    };
+
+    expect(
+      roles(["Gesendete Elemente", "Gelöschte Elemente", "Junk-E-Mail", "Archiv", "Entwürfe"]),
+    ).toEqual({
+      archive: "Archiv",
+      trash: "Gelöschte Elemente",
+      junk: "Junk-E-Mail",
+      sent: "Gesendete Elemente",
+    });
+    expect(roles(["Отправленные", "Удаленные", "Спам", "Архив", "Черновики"])).toEqual({
+      archive: "Архив",
+      trash: "Удаленные",
+      junk: "Спам",
+      sent: "Отправленные",
+    });
+    expect(
+      roles(["Éléments envoyés", "Éléments supprimés", "Courrier indésirable", "Archive", "Brouillons"]),
+    ).toEqual({
+      archive: "Archive",
+      trash: "Éléments supprimés",
+      junk: "Courrier indésirable",
+      sent: "Éléments envoyés",
+    });
+  });
+
+  it("refuses two localized folders that answer to one role, as it does two English ones", () => {
+    expect(
+      selectImapMailboxPath("trash", [
+        { path: "Papierkorb", delimiter: "/" },
+        { path: "Gelöschte Elemente", delimiter: "/" },
+        { path: "Trash", delimiter: "/" },
+      ]),
+    ).toBeNull();
+    expect(
+      selectImapMailboxPath("junk", [
+        { path: "Spam", delimiter: "/" },
+        { path: "Courrier indésirable", delimiter: "/" },
+      ]),
+    ).toBeNull();
+    expect(
+      selectImapMailboxPath("sent", [
+        { path: "Gesendete Elemente", delimiter: "/" },
+        { path: "Sent", delimiter: "/" },
+      ]),
+    ).toBeNull();
+  });
+
+  it("reads a name through the left-to-right marks and padding some clients put around it", () => {
+    expect(
+      selectImapMailboxPath("trash", [
+        { path: "‎العناصر المحذوفة‎", name: " ‎العناصر المحذوفة‎", delimiter: "/" },
+      ]),
+    ).toBe("‎العناصر المحذوفة‎");
+  });
+
+  it("takes the older attributes a server may state for junk and all mail", () => {
+    // What XLIST servers and some SPECIAL-USE ones list instead of \Junk and
+    // \All. They are the server's own word, like the standard ones.
+    const mailboxes = [
+      { path: "Спам", delimiter: "/", flags: new Set(["\\HasNoChildren", "\\Spam"]) },
+      { path: "Вся почта", delimiter: "/", flags: new Set(["\\HasNoChildren", "\\AllMail"]) },
+    ];
+
+    expect(selectImapMailboxPath("junk", mailboxes)).toBe("Спам");
+    expect(selectImapMailboxPath("archive", mailboxes)).toBe("Вся почта");
+    // The standard attribute and a named Archive still come first.
+    expect(
+      selectImapMailboxPath("junk", [
+        { path: "Old spam", delimiter: "/", flags: new Set(["\\Spam"]) },
+        { path: "Bulk", delimiter: "/", flags: new Set(["\\Junk"]) },
+      ]),
+    ).toBe("Bulk");
+    expect(
+      selectImapMailboxPath("archive", [
+        ...mailboxes,
+        { path: "Архив", delimiter: "/" },
+      ]),
+    ).toBe("Архив");
+    // And a stated \Spam shows where the server keeps its role folders.
+    expect(
+      archiveCreatePath([{ path: "INBOX.Spam", delimiter: ".", flags: new Set(["\\Spam"]) }]),
+    ).toBe("INBOX.Archive");
   });
 
   /*
@@ -257,12 +391,13 @@ describe("IMAP mailbox role discovery", () => {
   });
 
   it("anchors a created Archive on stated attributes only", () => {
-    // A guessed \Trash three levels down says nothing about where this
-    // server keeps its role folders; a stated one under the Inbox does.
+    // A guessed \Trash on a folder whose name says nothing tells nothing
+    // about where this server keeps its role folders; a stated one under the
+    // Inbox does.
     expect(
       archiveCreatePath([
         {
-          path: "INBOX.Bin",
+          path: "INBOX.Old stuff",
           delimiter: ".",
           flags: new Set(["\\Trash"]),
         },
@@ -271,7 +406,7 @@ describe("IMAP mailbox role discovery", () => {
     expect(
       archiveCreatePath([
         {
-          path: "INBOX.Bin",
+          path: "INBOX.Old stuff",
           delimiter: ".",
           flags: new Set<string>(),
           specialUse: "\\Trash",

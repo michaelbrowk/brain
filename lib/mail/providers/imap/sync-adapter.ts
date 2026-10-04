@@ -2462,6 +2462,66 @@ type RoleTier =
   | { readonly kind: "special_use"; readonly attribute: string }
   | { readonly kind: "name"; readonly names: readonly string[] };
 
+/*
+ * The names a server's own language gives the trash, junk and sent folders.
+ *
+ * These are ImapFlow's lists (`imapflow/lib/special-use`, 1.4.7), written out
+ * here rather than read from the package, with the few names this adapter
+ * knew before them. ImapFlow uses them to guess a `specialUse` for a folder
+ * at any depth; that guess is never read here, but on a server that states no
+ * attribute it was the only thing that found a German or a Russian mailbox's
+ * trash, and without the names those accounts lose the trash and spam
+ * buttons. Here they are bound by the name tier's own rule: at the account
+ * root or directly under the Inbox, and only when exactly one folder answers.
+ * `mailbox-roles.test.ts` compares them with the package's lists, so an
+ * upgrade that adds a name fails there until it is added here on purpose.
+ */
+const TRASH_NAMES = Object.freeze([
+  "trash", "deleted items", "deleted messages", "articole șterse", "bin",
+  "borttagna objekt", "deleted", "elementi eliminati", "elementos borrados",
+  "elementos eliminados", "gelöschte objekte", "gelöschte elemente",
+  "item dipadam", "itens apagados", "itens excluídos", "kustutatud üksused",
+  "mục đã xóa", "odstraněné položky", "odstraněná pošta", "pesan terhapus",
+  "poistetut", "praht", "prügikast", "silinmiş öğeler", "slettede beskeder",
+  "slettede elementer", "törölt elemek", "törölt", "usunięte wiadomości",
+  "verwijderde items", "vymazané správy", "éléments supprimés", "видалені",
+  "жойылғандар", "удаленные", "פריטים שנמחקו", "العناصر المحذوفة",
+  "موارد حذف شده", "รายการที่ลบ", "已删除邮件", "已刪除項目",
+]);
+const JUNK_NAMES = Object.freeze([
+  "junk", "spam", "junk e-mail", "junk email", "bulk mail",
+  "correo no deseado", "courrier indésirable", "istenmeyen",
+  "istenmeyen e-posta", "junk-e-mail", "levélszemét", "nevyžiadaná pošta",
+  "nevyžádaná pošta", "no deseado", "posta indesiderata", "pourriel",
+  "roskaposti", "rämpspost", "skräppost", "spamowanie", "søppelpost",
+  "thư rác", "wiadomości-śmieci", "спам", "דואר זבל", "الرسائل العشوائية",
+  "هرزنامه", "สแปม", "垃圾郵件", "垃圾邮件", "垃圾電郵",
+]);
+const SENT_NAMES = Object.freeze([
+  "sent", "sent items", "sent messages", "отправленные", "надіслані",
+  "gesendet", "envoyés", "enviados", "inviati", "wysłane",
+  "gönderilmiş öğeler", "verzonden", "skickat", "aika", "bidaliak",
+  "bidalita", "dihantar", "e rometsweng", "e tindami", "elküldött",
+  "elküldöttek", "elementos enviados", "éléments envoyés", "enviadas",
+  "enviats", "ethunyelweyo", "expediate", "ezipuru", "gesendete",
+  "gesendete elemente", "gestuur", "göndərilənlər", "iberilen",
+  "išsiųstieji", "kuthunyelwe", "lasa", "lähetetyt", "messages envoyés",
+  "naipadala", "nalefa", "napadala", "nosūtītās ziņas", "odeslané",
+  "odeslaná pošta", "padala", "poslane", "poslano", "poslané", "poslato",
+  "saadetud", "saadetud kirjad", "saadetud üksused", "sendt",
+  "sända poster", "sänt", "terkirim", "ti fi ranṣẹ", "të dërguara",
+  "vilivyotumwa", "đã gửi", "σταλθέντα", "жиберилген", "жіберілгендер",
+  "изпратени", "илгээсэн", "ирсол шуд", "испратено", "пасланыя",
+  "юборилган", "ուղարկված", "נשלחו", "פריטים שנשלחו", "المرسلة",
+  "بھیجے گئے", "سوزمژہ", "لېګل شوی", "موارد ارسال شده", "पाठविले",
+  "पाठविलेले", "प्रेषित", "भेजा गया", "প্রেরিত", "প্ৰেৰিত", "ਭੇਜੇ",
+  "મોકલેલા", "ପଠାଗଲା", "அனுப்பியவை", "పంపించబడింది", "ಕಳುಹಿಸಲಾದ", "അയച്ചു",
+  "යැවු පණිවුඩ", "ส่งแล้ว", "გაგზავნილი", "የተላኩ",
+  // Khmer, with the zero-width space the name is written with.
+  "បាន​ផ្ញើ",
+  "寄件備份", "已发信息", "送信済みﾒｰﾙ", "발신 메시지", "보낸 편지함",
+]);
+
 const ROLE_TIERS: Readonly<Record<ImapDiscoveredMailbox, readonly RoleTier[]>> =
   Object.freeze({
     archive: Object.freeze<readonly RoleTier[]>([
@@ -2489,45 +2549,27 @@ const ROLE_TIERS: Readonly<Record<ImapDiscoveredMailbox, readonly RoleTier[]>> =
         ]),
       }),
       Object.freeze({ kind: "special_use", attribute: "\\All" }),
+      // What XLIST calls the same view. It is the server's own statement,
+      // like \All, and it ranks where \All does.
+      Object.freeze({ kind: "special_use", attribute: "\\AllMail" }),
       Object.freeze({ kind: "name", names: Object.freeze(["all mail"]) }),
     ]),
     trash: Object.freeze<readonly RoleTier[]>([
       Object.freeze({ kind: "special_use", attribute: "\\Trash" }),
-      Object.freeze({
-        kind: "name",
-        names: Object.freeze(["trash", "deleted items", "deleted messages"]),
-      }),
+      Object.freeze({ kind: "name", names: TRASH_NAMES }),
     ]),
     junk: Object.freeze<readonly RoleTier[]>([
       Object.freeze({ kind: "special_use", attribute: "\\Junk" }),
-      Object.freeze({
-        kind: "name",
-        names: Object.freeze(["junk", "spam", "junk e-mail", "junk email"]),
-      }),
+      // XLIST's word for \Junk, which some SPECIAL-USE servers list too.
+      Object.freeze({ kind: "special_use", attribute: "\\Spam" }),
+      Object.freeze({ kind: "name", names: JUNK_NAMES }),
     ]),
-    // The words mail clients give the folder of sent mail in the languages
-    // they ship, under the archive's own rule: at the root or directly under
-    // the Inbox, and only when exactly one folder answers.
+    // Sent is found under the archive's own rule: the stated attribute, then
+    // a name at the root or directly under the Inbox when exactly one folder
+    // answers.
     sent: Object.freeze<readonly RoleTier[]>([
       Object.freeze({ kind: "special_use", attribute: "\\Sent" }),
-      Object.freeze({
-        kind: "name",
-        names: Object.freeze([
-          "sent",
-          "sent items",
-          "sent messages",
-          "отправленные",
-          "надіслані",
-          "gesendet",
-          "envoyés",
-          "enviados",
-          "inviati",
-          "wysłane",
-          "gönderilmiş öğeler",
-          "verzonden",
-          "skickat",
-        ]),
-      }),
+      Object.freeze({ kind: "name", names: SENT_NAMES }),
     ]),
   });
 
@@ -2562,9 +2604,7 @@ export function selectImapMailboxPath(
       continue;
     }
     const named = candidates.filter(
-      (entry) =>
-        isRoleMountPoint(entry) &&
-        tier.names.includes(leafName(entry).toLowerCase()),
+      (entry) => isRoleMountPoint(entry) && tier.names.includes(comparableLeafName(entry)),
     );
     if (named.length === 1) return named[0]!.path;
     if (named.length > 1) return null;
@@ -2605,15 +2645,14 @@ const ARCHIVE_MAILBOX_NAME = "Archive";
 const NAMESPACE_ANCHOR_ATTRIBUTES = Object.freeze([
   "\\trash",
   "\\junk",
+  "\\spam",
   "\\sent",
   "\\drafts",
 ]);
 const NAMESPACE_ANCHOR_NAMES = Object.freeze([
-  ...ROLE_TIERS.trash.flatMap((tier) => (tier.kind === "name" ? tier.names : [])),
-  ...ROLE_TIERS.junk.flatMap((tier) => (tier.kind === "name" ? tier.names : [])),
-  "sent",
-  "sent items",
-  "sent messages",
+  ...TRASH_NAMES,
+  ...JUNK_NAMES,
+  ...SENT_NAMES,
   "drafts",
 ]);
 
@@ -2630,8 +2669,7 @@ export function archiveCreatePath(mailboxes: readonly ImapMailboxDescriptor[]): 
     (entry) =>
       isSelectableMailbox(entry) &&
       (NAMESPACE_ANCHOR_ATTRIBUTES.some((attribute) => statesAttribute(entry, attribute)) ||
-        (isRoleMountPoint(entry) &&
-          NAMESPACE_ANCHOR_NAMES.includes(leafName(entry).toLowerCase()))),
+        (isRoleMountPoint(entry) && NAMESPACE_ANCHOR_NAMES.includes(comparableLeafName(entry)))),
   );
   const prefixes = new Set(anchors.map(inboxChildPrefix));
   if (prefixes.size !== 1) return ARCHIVE_MAILBOX_NAME;
@@ -2759,4 +2797,14 @@ function leafName(entry: ImapMailboxDescriptor): string {
   if (typeof delimiter !== "string" || delimiter.length !== 1) return entry.path;
   const index = entry.path.lastIndexOf(delimiter);
   return index === -1 ? entry.path : entry.path.slice(index + delimiter.length);
+}
+
+/**
+ * The leaf name as the name tiers compare it: lowercased, trimmed, and
+ * without the left-to-right marks some clients put around a right-to-left
+ * name for display. It is the reading ImapFlow gives a name before it looks
+ * it up in the same lists.
+ */
+function comparableLeafName(entry: ImapMailboxDescriptor): string {
+  return leafName(entry).toLowerCase().replace(/‎/g, "").trim();
 }

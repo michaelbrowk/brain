@@ -488,6 +488,112 @@ describe("mailbox roles against a real ImapFlow LIST", () => {
     expect(selectImapMailboxPath("junk", listed)).toBe("Spam");
   });
 
+  /*
+    What a real LIST answer resolves to, role by role. The first three are
+    mailboxes whose server states no attribute and names its folders in the
+    account's language: before the guess was dropped ImapFlow found them, and
+    the name tiers have to find them now.
+  */
+  const rolesOf = async (capability: string, folders: readonly (string | FakeImapFolder)[]) => {
+    const { client, commands } = await connectedImapFlow({
+      capability,
+      folders: folders.map((folder) =>
+        typeof folder === "string" ? { flags: "\\HasNoChildren", path: folder } : folder,
+      ),
+    });
+    const listed = await client.list();
+    client.close();
+    return {
+      // The folders themselves are listed over XLIST where that is all the
+      // server offers; the delimiter probe before it is always a LIST.
+      command: commandNames(commands).includes("XLIST") ? "XLIST" : "LIST",
+      roles: Object.fromEntries(
+        (["archive", "trash", "junk", "sent"] as const).map((role) => [
+          role,
+          selectImapMailboxPath(role, listed),
+        ]),
+      ),
+    };
+  };
+
+  it("resolves a German, a Russian and a French mailbox at the root on a server without SPECIAL-USE", async () => {
+    expect(
+      (
+        await rolesOf("IMAP4rev1", [
+          "Gesendete Elemente",
+          "Gelöschte Elemente",
+          "Junk-E-Mail",
+          "Archiv",
+          "Entwürfe",
+        ])
+      ).roles,
+    ).toEqual({
+      archive: "Archiv",
+      trash: "Gelöschte Elemente",
+      junk: "Junk-E-Mail",
+      sent: "Gesendete Elemente",
+    });
+    expect(
+      (await rolesOf("IMAP4rev1", ["Отправленные", "Удаленные", "Спам", "Архив", "Черновики"]))
+        .roles,
+    ).toEqual({ archive: "Архив", trash: "Удаленные", junk: "Спам", sent: "Отправленные" });
+    expect(
+      (
+        await rolesOf("IMAP4rev1", [
+          "Éléments envoyés",
+          "Éléments supprimés",
+          "Courrier indésirable",
+          "Archive",
+          "Brouillons",
+        ])
+      ).roles,
+    ).toEqual({
+      archive: "Archive",
+      trash: "Éléments supprimés",
+      junk: "Courrier indésirable",
+      sent: "Éléments envoyés",
+    });
+  });
+
+  it("resolves nothing from names nested under a prefix that is not the Inbox", async () => {
+    expect(
+      (await rolesOf("IMAP4rev1", ["Mail/Sent", "Mail/Trash", "Mail/Junk", "Mail/Archive"])).roles,
+    ).toEqual({ archive: null, trash: null, junk: null, sent: null });
+  });
+
+  it("refuses a role two root folders answer to by name", async () => {
+    expect(
+      (
+        await rolesOf("IMAP4rev1", [
+          "Trash",
+          "Gelöschte Elemente",
+          "Spam",
+          "Junk-E-Mail",
+          "Sent",
+          "Gesendete Elemente",
+          "Archive",
+        ])
+      ).roles,
+    ).toEqual({ archive: "Archive", trash: null, junk: null, sent: null });
+  });
+
+  it("takes \\Spam and \\AllMail as the attributes an XLIST server states them", async () => {
+    const answer = await rolesOf("IMAP4rev1 XLIST", [
+      { flags: "\\HasNoChildren \\Sent", path: "Отправленные" },
+      { flags: "\\HasNoChildren \\Trash", path: "Удаленные" },
+      { flags: "\\HasNoChildren \\Spam", path: "Нежелательная почта" },
+      { flags: "\\HasNoChildren \\AllMail", path: "Вся почта" },
+    ]);
+
+    expect(answer.command).toBe("XLIST");
+    expect(answer.roles).toEqual({
+      archive: "Вся почта",
+      trash: "Удаленные",
+      junk: "Нежелательная почта",
+      sent: "Отправленные",
+    });
+  });
+
   it("does not read a Sent folder three levels down, two that answer to the name, or another user's", async () => {
     for (const { capability, folders } of [
       {
@@ -580,7 +686,7 @@ function serveSentImap(socket: TLSSocket, commands: string[], options: FakeImapO
       socket.write(`${tag} OK LOGIN completed\r\n`);
       return;
     }
-    if (command === "LIST" || command === "LSUB") {
+    if (command === "LIST" || command === "LSUB" || command === "XLIST") {
       let entries: string;
       if (line.includes("*")) {
         entries = `* ${command} (\\HasNoChildren) "/" INBOX\r\n`;

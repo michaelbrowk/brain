@@ -21,6 +21,18 @@ import { createMailSyncPause } from "./sync-pause";
 const ACCOUNT_ID = `account-a${"1".repeat(32)}`;
 const roots: string[] = [];
 
+/** WHAT A SEND AT THE CAP COSTS, FOR THE TWO CASES THAT MAKE ONE.
+ *
+ *  14 to 16 MiB through the validator, the MIME build, a hash and a real
+ *  SQLite file: the insert, then two status updates that each take as long as
+ *  the insert did again. Measured, that is 0.45 s and 0.7 s on an idle
+ *  machine, and all but 30 ms of it is inside `service.send`, so there is
+ *  nothing in the case to trim without sending less than the cap, which is
+ *  the one thing these two exist to send. With the machine fourteen times
+ *  oversubscribed the same work took 5 to 6.5 s, and the default 5 s, which
+ *  was never a statement about this work, called that a failure. */
+const CAP_SEND_TIMEOUT_MS = 30_000;
+
 afterEach(async () => {
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
@@ -218,7 +230,7 @@ describe("durable mail outbound worker integration", () => {
       stored?.message.rawRfc2822Sha256,
     );
     await store.close();
-  });
+  }, CAP_SEND_TIMEOUT_MS);
 
   /** THE WORST MESSAGE THE COMPOSER CAN BUILD, AGAINST THE CEILING.
    *
@@ -370,7 +382,7 @@ describe("durable mail outbound worker integration", () => {
     ).rejects.toMatchObject({ code: "mail_send_request_invalid" });
 
     await store.close();
-  });
+  }, CAP_SEND_TIMEOUT_MS);
 
   /** ONE MESSAGE RESIDENT, WHATEVER THE BACKLOG.
    *

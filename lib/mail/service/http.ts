@@ -20,6 +20,10 @@ import {
   writeMailLogRecord,
 } from "../security";
 import {
+  exceedsMailJsonStructure,
+  MAIL_SEND_BODY_MAX_STRUCTURAL_TOKENS,
+} from "../send-attachment-codec";
+import {
   MAIL_ACCOUNT_CAPABILITIES_CONTRACT_HEADER,
   MAIL_ACCOUNT_CAPABILITIES_CONTRACT_VALUE,
   MailAccountError,
@@ -1466,6 +1470,17 @@ async function readJsonBody(
   });
 
   try {
+    // A body read past the small cap is a send or a draft. Megabytes of JSON
+    // that are all structure cost hundreds of megabytes parsed, which this
+    // process's memory contract does not have, so such a body is refused by
+    // its structure before it is decoded. Brain's own routes refuse it first;
+    // this is the same rule for whatever reaches the socket another way.
+    if (
+      maxBodyBytes > MAIL_SERVICE_HTTP_LIMITS.maxBodyBytes &&
+      exceedsMailJsonStructure(body, MAIL_SEND_BODY_MAX_STRUCTURAL_TOKENS)
+    ) {
+      throw new MailHttpError(400, "json_invalid", true);
+    }
     const text = new TextDecoder("utf-8", { fatal: true }).decode(body);
     return JSON.parse(text);
   } catch {

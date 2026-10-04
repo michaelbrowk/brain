@@ -298,6 +298,33 @@ describe("bounded ripgrep output", () => {
     expect(logged).toEqual([]);
   });
 
+  it("neither answers nor counts a line the caller refuses", async () => {
+    // The cap is on what is answered. A run that drops frontmatter while it
+    // reads has to reach three hundred body lines, not three hundred lines.
+    const match = (text: string) =>
+      '{"type":"match","data":{"path":{"text":"./note/index.md"},' +
+      `"lines":{"text":"${text}"},"line_number":1}}`;
+    const body = [
+      "i=0",
+      "while [ $i -lt 400 ]; do",
+      `printf '%s\\n' '${match("created: 15")}'`,
+      `printf '%s\\n' '${match("body 15")}'`,
+      "i=$((i+1))",
+      "done",
+      "sleep 30",
+    ].join("\n");
+
+    await withFakeRipgrep(body, async (cwd) => {
+      const lines = await runRipgrep(
+        ["needle"],
+        cwd,
+        (line) => !line.includes("created"),
+      );
+      expect(lines).toHaveLength(MAX_MATCH_LINES);
+      expect(lines.every((line) => line.includes("body 15"))).toBe(true);
+    });
+  });
+
   it("still refuses one line past the output limit", async () => {
     // A monstrous single line is the case the 512 KB guard was written for,
     // and it stays a refusal: nothing can be answered out of half of it.
@@ -376,23 +403,7 @@ describe("searchNotes over a real notes root", () => {
       // whole query, and the sort that puts both first — lives in `doSearch`,
       // which every other suite mocks away. Real ripgrep, a real Store, four
       // pages in a temp notes root.
-      const root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-search-notes-"));
-      const globals = globalThis as {
-        __brainStore?: unknown;
-        __brainStoreInit?: unknown;
-      };
-      const heldStore = globals.__brainStore;
-      const heldInit = globals.__brainStoreInit;
-      try {
-        vi.stubEnv("NOTES_ROOT", root);
-        // `NOTES_ROOT` is read at import, so the modules under test are the
-        // ones loaded after the stub, not the ones at the top of this file.
-        vi.resetModules();
-        delete globals.__brainStore;
-        delete globals.__brainStoreInit;
-        const { getStore } = await import("./store");
-        const store = await getStore();
-
+      await withRealNotes(async (store, searchNotes) => {
         // The phrase, in a body. Rank 40.
         await store.createPage(null, "Дневник", {
           markdown: "Урок 15 сентября — пришли все.",
@@ -411,7 +422,6 @@ describe("searchNotes over a real notes root", () => {
           markdown: "Урок сентября без числа.",
         });
 
-        const { searchNotes } = await import("./search");
         const hits = await searchNotes("Урок 15 сентября");
 
         expect(hits.map((hit) => hit.title)).toEqual([
@@ -419,16 +429,83 @@ describe("searchNotes over a real notes root", () => {
           "Сентября 15 урок",
           "Заметки",
         ]);
-      } finally {
-        vi.unstubAllEnvs();
-        globals.__brainStore = heldStore;
-        globals.__brainStoreInit = heldInit;
-        await fs.rm(root, { recursive: true, force: true });
-      }
+      });
+    },
+    30_000,
+  );
+
+  it.skipIf(!HAS_RIPGREP)(
+    "finds a word in the body of a page whose own frontmatter holds it three times",
+    async () => {
+      // WHY THE CASE ABOVE FAILED ONCE A WEEK. ripgrep answers the first three
+      // matching lines of a file, and a page's frontmatter is the top of its
+      // file. "15" is in `created` and `updated` for one hour of the day and
+      // one minute and one second of every sixty, and in one random id in two
+      // hundred. When all three held it, the three lines ripgrep answered were
+      // frontmatter, the body line with the number in it was never read, and
+      // the page failed the intersection. It looked like load because nothing
+      // in the test said which clock and which id it had been dealt. Both are
+      // pinned here, to the worst a page can be dealt.
+      await withRealNotes(async (store, searchNotes) => {
+        vi.useFakeTimers({
+          toFake: ["Date"],
+          now: new Date("2026-09-15T15:15:15.150Z"),
+        });
+        try {
+          await store.createPage(null, "Заметки", {
+            id: "page15page",
+            quickCaptureFingerprint: "a".repeat(64),
+            markdown: "Урок прошёл.\n\nПятнадцатое? нет, 15.\n\nБыло в сентября.",
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+
+        const hits = await searchNotes("Урок 15 сентября");
+
+        expect(hits.map((hit) => hit.title)).toEqual(["Заметки"]);
+        // The lines a reader sees are the page's, never its metadata.
+        expect(hits[0]?.snippet.before + hits[0]?.snippet.match).not.toMatch(
+          /^(id|created|updated):/,
+        );
+      });
     },
     30_000,
   );
 });
+
+/** A real Store over a temp notes root, and the search module that reads it.
+ *
+ *  `NOTES_ROOT` is read at import, so the modules under test are the ones
+ *  loaded after the stub, not the ones at the top of this file. */
+async function withRealNotes(
+  run: (
+    store: Awaited<ReturnType<typeof import("./store").getStore>>,
+    searchNotes: typeof import("./search").searchNotes,
+  ) => Promise<void>,
+) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-search-notes-"));
+  const globals = globalThis as {
+    __brainStore?: unknown;
+    __brainStoreInit?: unknown;
+  };
+  const heldStore = globals.__brainStore;
+  const heldInit = globals.__brainStoreInit;
+  try {
+    vi.stubEnv("NOTES_ROOT", root);
+    vi.resetModules();
+    delete globals.__brainStore;
+    delete globals.__brainStoreInit;
+    const { getStore } = await import("./store");
+    const { searchNotes } = await import("./search");
+    await run(await getStore(), searchNotes);
+  } finally {
+    vi.unstubAllEnvs();
+    globals.__brainStore = heldStore;
+    globals.__brainStoreInit = heldInit;
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
 
 /** True once the process is gone. Polled: the kill is a signal, and the reap
  *  that makes the pid unknown again happens on this process's own event

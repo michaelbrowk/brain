@@ -162,33 +162,14 @@ async function doSearch(q: string): Promise<SearchHit[]> {
     ...wordLines.map((line) => ({ line, fromPhrase: false })),
   ];
   for (const { line, fromPhrase } of scanned) {
-    let obj: {
-      type?: string;
-      data?: {
-        path?: { text?: string };
-        lines?: { text?: string };
-      };
-    };
-    try {
-      obj = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (obj.type !== "match") continue;
-    const file = obj.data?.path?.text;
-    if (!file) continue;
+    // Frontmatter never reaches this loop: `rgJson` drops it while it reads.
+    const match = parseRipgrepMatch(line);
+    if (!match) continue;
     // rg emits paths relative to its cwd (NOTES_ROOT), not the app cwd
-    const dir = path.dirname(path.resolve(NOTES_ROOT, file));
+    const dir = path.dirname(path.resolve(NOTES_ROOT, match.file));
     const page = dirToId.get(dir);
     if (!page) continue;
-    const text = (obj.data?.lines?.text ?? "").trim();
-    // skip frontmatter matches
-    if (
-      /^(id|title|icon|order|created|updated|notionId|notionSourceHash|notionConversionHash|notionTargetRev|notionTargetParentId|notionTargetBeforeId|notionTargetOrder|notionImportHash|notionImportToken|notionImportStarted|notionImportBaseRev|notionImportCreated|notionImportParentId|notionImportBeforeId|notionImportBaseParentId|notionImportBaseBeforeId|notionImportBaseOrder):\s/.test(
-        text,
-      )
-    )
-      continue;
+    const text = match.text;
     const normalizedLine = text.toLocaleLowerCase();
     const candidate = candidates.get(page.id) ?? {
       ...page,
@@ -557,18 +538,111 @@ function saysLittleAlone(term: string): boolean {
   return [...term].length < SHORT_WORD_CHARS || /^\p{N}+$/u.test(term);
 }
 
+/** The frontmatter keys whose lines are never an answer: what the store
+ *  writes about a page rather than what somebody wrote in it. A key is one
+ *  line of a page at most, which is what `rgJson` counts on. */
+const FRONTMATTER_KEYS = [
+  "id",
+  "title",
+  "icon",
+  "order",
+  "created",
+  "updated",
+  "notionId",
+  "notionSourceHash",
+  "notionConversionHash",
+  "notionTargetRev",
+  "notionTargetParentId",
+  "notionTargetBeforeId",
+  "notionTargetOrder",
+  "notionImportHash",
+  "notionImportToken",
+  "notionImportStarted",
+  "notionImportBaseRev",
+  "notionImportCreated",
+  "notionImportParentId",
+  "notionImportBeforeId",
+  "notionImportBaseParentId",
+  "notionImportBaseBeforeId",
+  "notionImportBaseOrder",
+] as const;
+
+const FRONTMATTER_LINE = new RegExp(`^(?:${FRONTMATTER_KEYS.join("|")}):\\s`);
+
+/** How many lines of one page a single run answers. */
+const BODY_LINES_PER_PAGE = 3;
+
+interface RipgrepMatch {
+  /** Relative to ripgrep's cwd, as it printed it. */
+  readonly file: string;
+  readonly text: string;
+}
+
+/** One line of `rg --json`, if it is a match. Null for the begin, end and
+ *  summary lines, and for a line cut off before it could be parsed. */
+function parseRipgrepMatch(line: string): RipgrepMatch | null {
+  let obj: {
+    type?: string;
+    data?: {
+      path?: { text?: string };
+      lines?: { text?: string };
+    };
+  };
+  try {
+    obj = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (obj.type !== "match") return null;
+  const file = obj.data?.path?.text;
+  if (!file) return null;
+  return { file, text: (obj.data?.lines?.text ?? "").trim() };
+}
+
+/** THE PER-PAGE CAP COUNTS WHAT SOMEBODY WROTE, NOT WHAT THE STORE DID.
+ *
+ *  ripgrep's `--max-count` stops at the first matches of a file, and the top
+ *  of every page is its frontmatter. A number is in `created` and `updated`
+ *  whenever the clock happened to hold it, in a random id now and then, and in
+ *  most of the hashes a Notion import leaves behind. With the cap at three,
+ *  three such lines were the whole answer for that page: the body line was
+ *  never read, the word went unmatched, and the page fell out of the
+ *  intersection. "Урок 15 сентября" lost a note that holds all three words
+ *  whenever the note had been created at a quarter past.
+ *
+ *  ripgrep cannot be told where frontmatter ends, so it is asked for three
+ *  lines more than the frontmatter can cost, one for every key above, and the
+ *  reading below keeps the first three of the body. Dropped lines are neither
+ *  stored nor counted against `MAX_MATCH_LINES`, so a broad word still
+ *  answers a hundred pages before the run is stopped. */
+function bodyLinesOnly(): (line: string) => boolean {
+  const kept = new Map<string, number>();
+  return (line) => {
+    const match = parseRipgrepMatch(line);
+    if (!match || FRONTMATTER_LINE.test(match.text)) return false;
+    const count = kept.get(match.file) ?? 0;
+    if (count >= BODY_LINES_PER_PAGE) return false;
+    kept.set(match.file, count + 1);
+    return true;
+  };
+}
+
 async function rgJson(query: string): Promise<{ phrase: string[]; words: string[] }> {
   const phrase: string[] = [];
   const words: string[] = [];
   for (const run of searchRunPlan(query)) {
-    const lines = await runRipgrep([
-      "--fixed-strings",
-      "--ignore-case",
-      "--max-count",
-      "3",
-      "-e",
-      run.pattern,
-    ]);
+    const lines = await runRipgrep(
+      [
+        "--fixed-strings",
+        "--ignore-case",
+        "--max-count",
+        String(BODY_LINES_PER_PAGE + FRONTMATTER_KEYS.length),
+        "-e",
+        run.pattern,
+      ],
+      NOTES_ROOT,
+      bodyLinesOnly(),
+    );
     (run.phrase ? phrase : words).push(...lines);
   }
   return { phrase, words };
@@ -602,6 +676,9 @@ const MATCH_LINE = /"type"\s*:\s*"match"/;
 export function runRipgrep(
   args: string[],
   cwd: string = NOTES_ROOT,
+  /** Asked of every line as it is read. A line it refuses is not answered
+   *  and is not counted against `MAX_MATCH_LINES`. */
+  keep: (line: string) => boolean = () => true,
 ): Promise<string[]> {
   return new Promise((resolve, reject) => {
     const rg = spawn(
@@ -638,7 +715,7 @@ export function runRipgrep(
       while (newline !== -1) {
         const line = pending.slice(0, newline);
         pending = pending.slice(newline + 1);
-        if (line) {
+        if (line && keep(line)) {
           lines.push(line);
           if (MATCH_LINE.test(line)) matches += 1;
         }
@@ -674,7 +751,7 @@ export function runRipgrep(
       if (code === 0 || code === 1) {
         // A last line with no newline after it. ripgrep terminates every JSON
         // line, so this is the shape of a run that was cut off elsewhere.
-        if (pending) lines.push(pending);
+        if (pending && keep(pending)) lines.push(pending);
         finish();
         return;
       }

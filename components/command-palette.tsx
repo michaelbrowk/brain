@@ -15,6 +15,11 @@ import type { ReactNode } from "react";
 import { emitMailCommand, type MailCommand } from "./mail-commands";
 import { renderTaskCheck } from "./tasks-checkbox";
 import { emitTaskCommand, type TaskCommand } from "./tasks-commands";
+import {
+  MAIL_CHANGED_EVENT,
+  MAIL_EVENT_DEBOUNCE_MS,
+  parseBrainMailEvent,
+} from "@/lib/mail/mail-events";
 import { sanitizeSnippet } from "@/lib/mail/reader-content";
 import { normalizeMailSearchQueryText } from "@/lib/mail/search-query";
 import type {
@@ -419,6 +424,62 @@ async function mailErrorCode(response: Response): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/** One ask of the mail route for one query. Two callers read it: the search
+ *  the reader's typing starts, and the quiet re-ask a mail event starts while
+ *  the answer on screen is short of the whole.
+ *
+ *  It resolves with the answer to draw, or with null for an answer that means
+ *  "no Mail group". A paused module answers 409 from the gate and a query the
+ *  route will not search answers 400, and neither is a failure to report: a
+ *  module that is off or a query with nothing to look for has no group, the
+ *  same as when the shell never asked. Brain without its mail container
+ *  answers every mail route with 503 mail_service_unavailable, which is an
+ *  install that has no mail, and it has no group either. Everything else that
+ *  is not an answer throws, a lapsed session (401, 403) included, and the
+ *  caller says so. The caller owns the abort too: a signal aborted while this
+ *  was out makes whatever it returns an answer to drop. */
+async function askMail(query: string, signal: AbortSignal): Promise<MailResults | null> {
+  const response = await fetch("/api/mail/search/all", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query, limit: MAIL_LIMIT }),
+    signal,
+  });
+  if (
+    response.status >= 400 &&
+    response.status < 500 &&
+    response.status !== 401 &&
+    response.status !== 403
+  ) {
+    return null;
+  }
+  if (
+    response.status === 503 &&
+    (await mailErrorCode(response)) === "mail_service_unavailable"
+  ) {
+    return null;
+  }
+  if (!response.ok) throw new Error("mail search unavailable");
+  const body = (await response.json()) as Partial<MailSearchAllResponse>;
+  if (!Array.isArray(body.threads)) throw new Error("invalid mail search response");
+  const ownAddresses = new Map<string, string>();
+  const mailboxes = new Map<string, MailSystemMailbox>();
+  for (const account of body.accounts ?? []) {
+    ownAddresses.set(account.accountId, account.emailAddress);
+    // An account whose search failed reports no mailbox, and has no rows to
+    // pick either.
+    if ("mailboxId" in account) mailboxes.set(account.accountId, account.mailboxId);
+  }
+  return {
+    threads: body.threads,
+    ownAddresses,
+    mailboxes,
+    indexBuilding: body.indexBuilding === true,
+    unsearched: mailUnsearchedLine(body.accounts ?? []),
+  };
 }
 
 export function rankTasks(tasks: readonly TaskView[], query: string): TaskView[] {
@@ -893,63 +954,11 @@ export function CommandPalette({
     mailDebounce.current = setTimeout(async () => {
       setMailState("loading");
       try {
-        const response = await fetch("/api/mail/search/all", {
-          method: "POST",
-          credentials: "same-origin",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query: q, limit: MAIL_LIMIT }),
-          signal: controller.signal,
-        });
-        // A paused module answers 409 from the gate, and a query the route
-        // will not search answers 400. Neither is a failure to report: a
-        // module that is off or a query with nothing to look for has no
-        // group, the same as when the shell never asked. A lapsed session
-        // (401, 403) is a failure, and says so.
-        if (
-          response.status >= 400 &&
-          response.status < 500 &&
-          response.status !== 401 &&
-          response.status !== 403
-        ) {
-          setMail(NO_MAIL);
-          setMailResolvedQuery(q);
-          setMailState("ready");
-          return;
-        }
-        // Brain without its mail container answers every mail route with 503
-        // mail_service_unavailable. That is an install that has no mail, and
-        // it has no group, the way a paused module has none.
-        if (
-          response.status === 503 &&
-          (await mailErrorCode(response)) === "mail_service_unavailable"
-        ) {
-          if (controller.signal.aborted) return;
-          setMail(NO_MAIL);
-          setMailResolvedQuery(q);
-          setMailState("ready");
-          return;
-        }
-        if (!response.ok) throw new Error("mail search unavailable");
-        const body = (await response.json()) as Partial<MailSearchAllResponse>;
+        const answer = await askMail(q, controller.signal);
         // An answer that lands after the query moved on is dropped, not kept
         // as the rows of a query the reader has left.
         if (controller.signal.aborted) return;
-        if (!Array.isArray(body.threads)) throw new Error("invalid mail search response");
-        const ownAddresses = new Map<string, string>();
-        const mailboxes = new Map<string, MailSystemMailbox>();
-        for (const account of body.accounts ?? []) {
-          ownAddresses.set(account.accountId, account.emailAddress);
-          // An account whose search failed reports no mailbox, and has no
-          // rows to pick either.
-          if ("mailboxId" in account) mailboxes.set(account.accountId, account.mailboxId);
-        }
-        setMail({
-          threads: body.threads,
-          ownAddresses,
-          mailboxes,
-          indexBuilding: body.indexBuilding === true,
-          unsearched: mailUnsearchedLine(body.accounts ?? []),
-        });
+        setMail(answer ?? NO_MAIL);
         setMailResolvedQuery(q);
         setMailState("ready");
       } catch (error) {
@@ -970,6 +979,77 @@ export function CommandPalette({
       }
     };
   }, [q, open, mailWanted, mailRetry]);
+
+  // THE LINE FOLLOWS THE MAIL EVENTS. The palette asks once per query, so a
+  // mailbox that finished syncing while the reader looked at "is still
+  // syncing" never took the line away: the same query had to be typed again.
+  // While the answer on screen is short of the whole, a sync or a reset from
+  // the change feed (`lib/mail/mail-events.ts`) asks the same query again, one
+  // debounce after the last of a burst, and the answer replaces the one on
+  // screen in place. A whole answer ends the listening with the line.
+  //
+  // It is a quiet ask. The reader did not start it, so it shows no Searching
+  // and takes no row away while it is out, and a failure leaves the answer
+  // and its line standing for the next event to try again. One ask is out at
+  // a time: a mailbox syncing in batches sends events faster than a search
+  // answers, and an ask that restarted on each of them would never land.
+  // What arrived meanwhile is one more ask once it has.
+  const mailShort =
+    mailWanted &&
+    mailResolvedQuery === q &&
+    mailState === "ready" &&
+    (mail.unsearched !== null || mail.indexBuilding);
+  useEffect(() => {
+    if (!open || !mailShort) return;
+    const controller = new AbortController();
+    let due: ReturnType<typeof setTimeout> | null = null;
+    let asking = false;
+    let missed = false;
+    const arm = () => {
+      if (due !== null) clearTimeout(due);
+      due = setTimeout(() => {
+        due = null;
+        // The tab can hide inside the debounce, and nobody reads a palette
+        // in a hidden tab.
+        if (document.visibilityState === "visible") void ask();
+      }, MAIL_EVENT_DEBOUNCE_MS);
+    };
+    const ask = async () => {
+      if (asking) {
+        missed = true;
+        return;
+      }
+      asking = true;
+      try {
+        const answer = await askMail(q, controller.signal);
+        if (!controller.signal.aborted) setMail(answer ?? NO_MAIL);
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          console.warn("Mail search refresh failed", error);
+        }
+      } finally {
+        asking = false;
+        if (missed && !controller.signal.aborted) {
+          missed = false;
+          arm();
+        }
+      }
+    };
+    const onMailChanged = (event: Event) => {
+      const change = parseBrainMailEvent((event as CustomEvent<unknown>).detail);
+      if (change === null || document.visibilityState !== "visible") return;
+      // A mark-read or an archive and a body becoming ready finish no sync
+      // and index nothing.
+      if (change.changeKind !== "sync" && change.changeKind !== "reset") return;
+      arm();
+    };
+    window.addEventListener(MAIL_CHANGED_EVENT, onMailChanged);
+    return () => {
+      controller.abort();
+      if (due !== null) clearTimeout(due);
+      window.removeEventListener(MAIL_CHANGED_EVENT, onMailChanged);
+    };
+  }, [open, q, mailShort]);
 
   const handleOpenChange = (nextOpen: boolean) => {
     if (!nextOpen) {
@@ -1305,6 +1385,9 @@ export function CommandPalette({
           {mailNote !== null && (
             <div
               role="status"
+              // Said out loud rather than left to the role's default: the line
+              // lands after the rest of the panel, and it must wait its turn.
+              aria-live="polite"
               // With no row under it the line closes the group, so it takes
               // the bottom padding the searching row has.
               className={`break-words px-2.5 pt-2 text-[12px] text-ink-2${mailThreads.length === 0 ? " pb-2" : ""}`}

@@ -16,6 +16,7 @@ import type { TreeNode } from "@/lib/store/types";
 import { apiFetch } from "@/lib/client";
 import type { ToastOptions } from "./ui/primitives";
 import { Shell } from "./shell";
+import { SMART_UNDO_MS } from "./shell/helpers";
 
 vi.mock("@/lib/client", () => ({
   apiFetch: vi.fn(),
@@ -72,19 +73,39 @@ class FakeEventSource {
   close() {}
 }
 
-/** What Done says at the press: a report with a way back and a long window. */
+/** What a section's Done says at the press: the column's fact, its Undo, the
+ *  window every other Undo in Brain has, and the one id every Done wears. */
 function doneReport(
   onAction: () => boolean | void | Promise<unknown>,
+  onExpire?: () => void,
 ): ToastOptions {
   return {
     icon: "check-linear",
     subtitle: "8 threads out of your inbox",
     actionLabel: "Undo",
     onAction,
-    durationMs: 10_000,
-    id: "mail-section-done:1",
+    onExpire,
+    durationMs: SMART_UNDO_MS,
+    id: "mail-section-done",
   };
 }
+
+/** What a Block says once the service has taken it: an Undo whose own request
+ *  takes a moment, so its button wears a pending label while it is out. */
+function blockReport(onAction: () => Promise<unknown>): ToastOptions {
+  return {
+    icon: "user-block-rounded-linear",
+    subtitle: "Next letters go to Blocked too.",
+    actionLabel: "Undo",
+    pendingLabel: "Undoing…",
+    onAction,
+    durationMs: SMART_UNDO_MS,
+    id: "mail-sender:1",
+  };
+}
+
+/** A refusal mail really makes while an Undo may be standing. */
+const REFUSAL = "Couldn’t accept Lena Okafor. Try again.";
 
 describe("shell toast channels, as mail uses them", () => {
   let host: HTMLDivElement;
@@ -176,32 +197,87 @@ describe("shell toast channels, as mail uses them", () => {
     expect(pills().join(" ")).toContain("Undo");
   });
 
-  it("a report with no window stands, and takes a ring only when there is one to count", async () => {
-    // What Done says at the press of a big section. It has no deadline to
-    // name — the run is eighty sequential requests — so it names none, and
-    // the icon slot stays a plain glyph: the ring draws deadlines and there
-    // is nothing here for it to draw.
-    await say("Seen cleared", { ...doneReport(() => {}), durationMs: null });
-    expect(document.body.querySelector(".brain-toast [data-toast-ring]")).toBeNull();
+  it("Done's pill wears its ring from the press, and says so when its window closes", async () => {
+    // The press owes the provider nothing yet, so there is a real deadline
+    // to draw from the first frame: the nine seconds the archives wait.
+    const expired = vi.fn();
+    await say("Seen cleared", doneReport(() => {}, expired));
+    expect(document.body.querySelector(".brain-toast [data-toast-ring]")).not.toBeNull();
 
-    // Past the point where the old arithmetic would have taken the pill down
-    // — ten seconds plus six a thread, over forty threads. The way back is
-    // still on screen, because the work it reverses is still going out.
     await act(async () => {
-      vi.advanceTimersByTime(10_000 + 40 * 6_000 + 1_000);
+      vi.advanceTimersByTime(SMART_UNDO_MS - 1);
     });
     expect(pills().join(" | ")).toContain("Seen cleared");
     expect(pills().join(" | ")).toContain("Undo");
+    expect(expired).not.toHaveBeenCalled();
 
-    // The loop lands and says the same sentence again under the same id. NOW
-    // there is a deadline: the ring appears and drains the plain ten seconds
-    // from here, and the pill goes when they are spent.
-    await say("Seen cleared", doneReport(() => {}));
-    expect(document.body.querySelector(".brain-toast [data-toast-ring]")).not.toBeNull();
+    // The window closes: the pill goes, and the surface is told, which is
+    // the moment its archives start going out.
     await act(async () => {
-      vi.advanceTimersByTime(10_001);
+      vi.advanceTimersByTime(2);
     });
     expect(pills().join(" | ")).not.toContain("Seen cleared");
+    expect(expired).toHaveBeenCalledTimes(1);
+  });
+
+  it("a second Done takes the pill from the first under their one id, and the first is told", async () => {
+    const firstExpired = vi.fn();
+    const firstUndo = vi.fn();
+    await say("Newsletters cleared", doneReport(firstUndo, firstExpired));
+    await act(async () => {
+      vi.advanceTimersByTime(3_000);
+    });
+    await say("People cleared", {
+      ...doneReport(() => {}),
+      subtitle: "2 threads out of your inbox",
+    });
+
+    // Not queued behind the first Undo: the same id is the same pill, said
+    // again. The first lost its way back unspent, so it hears `onExpire`,
+    // and the second counts a whole window of its own from here.
+    expect(pills().join(" | ")).toContain("People cleared");
+    expect(pills().join(" | ")).not.toContain("Newsletters cleared");
+    expect(firstExpired).toHaveBeenCalledTimes(1);
+    expect(firstUndo).not.toHaveBeenCalled();
+    await act(async () => {
+      vi.advanceTimersByTime(SMART_UNDO_MS - 1);
+    });
+    expect(pills().join(" | ")).toContain("People cleared");
+  });
+
+  it("a pill with no window stands, and takes a ring only when it is said again with one", async () => {
+    // A sentence said at the gesture, before the server has answered, the
+    // way a task's completion is: there is no deadline to name yet, so it
+    // names none, and the icon slot stays a plain glyph. The ring draws
+    // deadlines and there is nothing here for it to draw.
+    await say("Completed", {
+      id: "task-complete-1",
+      icon: "check-linear",
+      durationMs: null,
+    });
+    expect(document.body.querySelector(".brain-toast [data-toast-ring]")).toBeNull();
+
+    // Long past any window a guess would have armed. Still standing.
+    await act(async () => {
+      vi.advanceTimersByTime(5 * 60_000);
+    });
+    expect(pills().join(" | ")).toContain("Completed");
+
+    // The answer lands and the same sentence is said again under the same
+    // id, with its Undo. NOW there is a deadline: the ring appears, and the
+    // pill goes when it is spent.
+    await say("Completed", {
+      id: "task-complete-1",
+      icon: "check-linear",
+      actionLabel: "Undo",
+      onAction: () => {},
+      durationMs: SMART_UNDO_MS,
+    });
+    expect(document.body.querySelector(".brain-toast [data-toast-ring]")).not.toBeNull();
+    await act(async () => {
+      vi.advanceTimersByTime(SMART_UNDO_MS + 1);
+    });
+    expect(pills().join(" | ")).not.toContain("Completed");
   });
 
   it("speaks a refusal WHILE an undo is standing, without taking its pill", async () => {
@@ -209,25 +285,49 @@ describe("shell toast channels, as mail uses them", () => {
       "Newsletters cleared",
       doneReport(() => {}),
     );
-    await say("Finish the current mail action first", { urgent: true });
+    await say(REFUSAL, { urgent: true });
 
     // Both, at once: the undo keeps the pill it was given and the refusal
-    // gets one of its own. Queued, this sentence would have surfaced ten
+    // gets one of its own. Queued, this sentence would have surfaced nine
     // seconds later, detached from the press and by then untrue.
     const spoken = pills().join(" | ");
     expect(spoken).toContain("Newsletters cleared");
     expect(spoken).toContain("Undo");
-    expect(alertPill()).toContain("Finish the current mail action first");
+    expect(alertPill()).toContain(REFUSAL);
   });
 
-  it("a REPORT arriving in the same beat still waits its turn", async () => {
+  it("the REPORT of an earlier Done waits behind a standing Undo, and then stands its five seconds", async () => {
+    // Newsletters is inside its window when People's run, already sending,
+    // lands short. The report wears no id, so it cannot take the pill and
+    // the way back with it: it waits its turn.
     await say(
       "Newsletters cleared",
       doneReport(() => {}),
     );
-    await say("People cleared", { id: "mail-section-done:2" });
-    expect(pills().join(" | ")).not.toContain("People cleared");
+    await say("People partly cleared", {
+      icon: "check-linear",
+      subtitle: "2 archived, 1 stayed put",
+      durationMs: 5_000,
+    });
+    expect(pills().join(" | ")).not.toContain("People partly cleared");
     expect(pills().join(" | ")).toContain("Newsletters cleared");
+
+    await act(async () => {
+      vi.advanceTimersByTime(SMART_UNDO_MS);
+    });
+    expect(pills().join(" | ")).toContain("People partly cleared");
+    expect(pills().join(" | ")).toContain("2 archived, 1 stayed put");
+    expect(document.body.querySelector(".brain-toast button")).toBeNull();
+    // Nothing to reach for, so no ring: the five seconds are for reading.
+    expect(document.body.querySelector(".brain-toast [data-toast-ring]")).toBeNull();
+    await act(async () => {
+      vi.advanceTimersByTime(4_999);
+    });
+    expect(pills().join(" | ")).toContain("People partly cleared");
+    await act(async () => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(pills().join(" | ")).not.toContain("People partly cleared");
   });
 
   it("takes the refusal down on its own, leaving the undo standing", async () => {
@@ -235,7 +335,7 @@ describe("shell toast channels, as mail uses them", () => {
       "Newsletters cleared",
       doneReport(() => {}),
     );
-    await say("Finish the current mail action first", { urgent: true });
+    await say(REFUSAL, { urgent: true });
     await act(async () => {
       vi.advanceTimersByTime(4000);
     });
@@ -276,7 +376,7 @@ describe("shell toast channels, as mail uses them", () => {
 
     // The composer, or any field: the window listener runs AFTER ProseMirror
     // has taken the typo back, so without the guard one ⌘Z would fix a letter
-    // and roll eleven archived threads back with it.
+    // and put eight cleared threads back in the column with it.
     for (const field of [
       Object.assign(document.createElement("input"), { type: "text" }),
       (() => {
@@ -309,21 +409,18 @@ describe("shell toast channels, as mail uses them", () => {
   });
 
   it("an action that answers with a promise holds the pill until it settles", async () => {
-    // Undo pressed while Done's loop is still sending: the surface answers
-    // with the run's own settling promise. The pill has to stand until then
-    // — taken down at once, the way back looked spent while nothing had been
-    // reversed, and there was nowhere left to press when the run finally
-    // dropped the lock.
+    // Undo of a Block: the rows come back at the press and the request that
+    // takes the decision off the service follows. The surface answers with
+    // that request's promise, and the pill has to stand until it settles —
+    // taken down at once, a second press or ⌘Z could start the same reversal
+    // twice while the first was still out. (A section's Done answers at
+    // once: its Undo has no request to wait for.)
     let settle: () => void = () => {};
     const settled = new Promise<void>((resolve) => {
       settle = resolve;
     });
     const undo = vi.fn(() => settled);
-    await say("Seen cleared", {
-      ...doneReport(undo),
-      durationMs: null,
-      pendingLabel: "Undoing…",
-    });
+    await say("Blocked Lena Okafor", blockReport(undo));
     const button = () =>
       [...document.body.querySelectorAll<HTMLButtonElement>(".brain-toast button")].at(0) ??
       null;
@@ -335,7 +432,7 @@ describe("shell toast channels, as mail uses them", () => {
     expect(undo).toHaveBeenCalledTimes(1);
     // Still standing, and saying what it is doing; the button is out of
     // reach so the reversal cannot be started twice.
-    expect(pills().join(" | ")).toContain("Seen cleared");
+    expect(pills().join(" | ")).toContain("Blocked Lena Okafor");
     expect(button()?.textContent).toBe("Undoing…");
     expect(button()?.disabled).toBe(true);
 
@@ -352,36 +449,39 @@ describe("shell toast channels, as mail uses them", () => {
       settle();
       await settled;
     });
-    expect(pills().join(" | ")).not.toContain("Seen cleared");
+    expect(pills().join(" | ")).not.toContain("Blocked Lena Okafor");
   });
 
   it("a same-id message arriving under an open action takes the pill, and outlives the action", async () => {
-    // Undo's own "working" pill: posted under Done's id while the way back
-    // goes out. It replaces the pill whose action is open, and when that
-    // action's promise settles the shell must not take it down — it is not
-    // the pill the press spent, and its own report will replace it.
+    // A caller may say its sentence again under the same id while its own
+    // action is still open: a pill that says the reversal is under way, with
+    // no window and no way back of its own. It replaces the pill whose
+    // action is open, and when that action's promise settles the shell must
+    // not take it down — it is not the pill the press spent, and its own
+    // report will replace it. No mail sentence does this today (Done's Undo
+    // did, while it had requests of its own to wait for); the shell keeps
+    // the promise for whoever does next.
     let settle: () => void = () => {};
     const settled = new Promise<void>((resolve) => {
       settle = resolve;
     });
-    await say("Seen cleared", {
-      ...doneReport(() => settled),
-      durationMs: null,
-      pendingLabel: "Undoing…",
-    });
+    await say(
+      "Blocked Lena Okafor",
+      blockReport(() => settled),
+    );
     await act(async () => {
       document.body.querySelector<HTMLButtonElement>(".brain-toast button")!.click();
     });
     expect(pills().join(" | ")).toContain("Undoing…");
 
-    await say("Putting back…", {
+    await say("Taking the block off…", {
       icon: "inbox-linear",
-      subtitle: "8 threads on the way back",
+      subtitle: "2 letters on the way back",
       durationMs: null,
-      id: "mail-section-done:1",
+      id: "mail-sender:1",
     });
-    expect(pills().join(" | ")).toContain("Putting back…");
-    expect(pills().join(" | ")).not.toContain("Seen cleared");
+    expect(pills().join(" | ")).toContain("Taking the block off…");
+    expect(pills().join(" | ")).not.toContain("Blocked Lena Okafor");
     expect(document.body.querySelector(".brain-toast button")).toBeNull();
     expect(document.body.querySelector(".brain-toast [data-toast-ring]")).toBeNull();
 
@@ -392,15 +492,15 @@ describe("shell toast channels, as mail uses them", () => {
     await act(async () => {
       vi.advanceTimersByTime(6_000);
     });
-    expect(pills().join(" | ")).toContain("Putting back…");
+    expect(pills().join(" | ")).toContain("Taking the block off…");
 
     await say("Back in your inbox", {
       icon: "inbox-linear",
-      subtitle: "8 threads restored",
-      id: "mail-section-done:1",
+      subtitle: "2 letters restored",
+      id: "mail-sender:1",
     });
     expect(pills().join(" | ")).toContain("Back in your inbox");
-    expect(pills().join(" | ")).not.toContain("Putting back…");
+    expect(pills().join(" | ")).not.toContain("Taking the block off…");
     await act(async () => {
       vi.advanceTimersByTime(2_201);
     });

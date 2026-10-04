@@ -57,10 +57,10 @@ describe("the IMAP Sent-folder envelope scan", () => {
       envelopes: {
         // A delegate sent it as the owner: the Sender is somebody else.
         1: { from: [me], sender: [{ address: "assistant@example.test" }] },
-        // Two authors.
-        2: { from: [me, { address: "other@example.test" }] },
+        // Two authors, and no Sender to say which of them sent it.
+        2: { from: [me, { address: "other@example.test" }], sender: undefined },
         // No author at all.
-        3: { from: [] },
+        3: { from: [], sender: undefined },
         // The Sender repeats the From, as a server fills it in.
         4: { from: [me], sender: [{ name: "Me again", address: "me@example.test" }] },
         // No Sender stated.

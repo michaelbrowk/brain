@@ -100,7 +100,7 @@ try {
     everything after it is a restart, and a restart is what the stored pause
     has to survive.
   */
-  const runProjectedService = async (socketPath, body) => {
+  const runProjectedService = async (socketPath, body, extraEnvironment = {}) => {
     // Short names on purpose: a Unix socket path over 104 bytes is silently
     // truncated by bind(2), and the chmod that follows then fails on a path
     // nothing created.
@@ -123,7 +123,7 @@ try {
       ],
       {
         cwd: runtimeRoot,
-        env: childEnvironment,
+        env: { ...childEnvironment, ...extraEnvironment },
         stdio: ["ignore", "pipe", "pipe", fd],
       },
     );
@@ -340,6 +340,39 @@ try {
     "the restart read the pause but started its workers anyway",
   );
   assert.match(paused2.logs.stdout, /"event":"mail_service_started","phase":"running"/);
+
+  /*
+    SAYS WHICH WAY IT SENDS.
+
+    One line in `main.ts`, which has no test, hands the transport of the SMTP
+    runtime the flags composed to the HTTP server, and Brain sizes what an
+    agent's send from a custom-domain account may attach by what health then
+    says. Without that line a host that dials its providers directly answers
+    with no `sendTransport`, Brain reads the absence as the relay, and every
+    such send is held to the relay's 1 MiB. The first run above holds the
+    other half: started with neither flag, the service names no transport.
+    This run can carry the direct flag because the flag needs nothing else,
+    where the relay's wants a URL and credentials.
+  */
+  const direct = await runProjectedService(
+    path.join(work, "direct.sock"),
+    async (socket) => {
+      const health = await pollJson(socket, "GET", "/v1/health");
+      assert.equal(health.status, 200);
+      assert.equal(
+        health.body.sendTransport,
+        "direct",
+        "health does not name the transport the direct flag composed",
+      );
+    },
+    { BRAIN_MAIL_SMTP_DIRECT_ENABLED: "1" },
+  );
+  assert.deepEqual(direct.result, { code: 0, signal: null });
+  assert.deepEqual(canonicalMailLogRecords(parseMailLogLines(direct.logs.stderr)), []);
+  assert.match(
+    direct.logs.stdout,
+    /"event":"mail_service_started","phase":"running","transport":"direct"/,
+  );
 
   process.stdout.write("brain-mail artifact smoke passed\n");
 } finally {

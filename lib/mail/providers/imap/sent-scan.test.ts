@@ -666,8 +666,12 @@ describe("a Sent-folder batch that cannot be read", () => {
   only when that answer differs from its cursor or its first walk is not over.
 */
 describe("what a quiet Sent folder costs its host", () => {
-  async function syncing(server: ReturnType<typeof serverFixture>, now?: () => number) {
-    const made = providerFor(server, now);
+  async function syncing(
+    server: ReturnType<typeof serverFixture>,
+    now?: () => number,
+    remainingMs?: () => number,
+  ) {
+    const made = providerFor(server, now, remainingMs);
     const anchor = await made.provider.getSyncAnchor(signal());
     const pass = () =>
       made.provider.listChanges(
@@ -808,6 +812,130 @@ describe("what a quiet Sent folder costs its host", () => {
     expect(server.statuses).toEqual(["Sent"]);
   });
 
+  /*
+    A session is one race against its deadline, and everything asked on it is
+    inside that race. A STATUS the server never answers used to hold the
+    session until the deadline took it, and the Inbox page that was already
+    complete went with it: the Sent folder failed the Inbox sync.
+  */
+  it("hands the Inbox page back when the Sent STATUS is never answered, and rests the STATUS ten minutes", async () => {
+    vi.useFakeTimers({ now: 1_000_000 });
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
+    const { provider, pass } = await syncing(server, () => Date.now());
+    await provider.scanSentEnvelopes({ cursor: null }, signal());
+    server.hangStatus();
+
+    let settled: string | null = null;
+    const page = pass().then(
+      (value) => {
+        settled = "resolved";
+        return value;
+      },
+      (error: unknown) => {
+        settled = "rejected";
+        throw error;
+      },
+    );
+    await vi.advanceTimersByTimeAsync(1_400);
+    expect(settled).toBeNull();
+    await vi.advanceTimersByTimeAsync(200);
+    expect(settled).toBe("resolved");
+    await expect(page).resolves.toMatchObject({ changedThreadIds: [] });
+
+    // A timeout is a refusal: the next syncs do not ask, the scan goes by
+    // its own quiet window, and after ten minutes the sync asks again.
+    await pass();
+    expect(server.statuses).toEqual(["Sent"]);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    const later = pass();
+    await vi.advanceTimersByTimeAsync(1_600);
+    await later;
+    expect(server.statuses).toEqual(["Sent", "Sent"]);
+  });
+
+  it("gives the LIST refresh that rides with the STATUS the same short wait", async () => {
+    vi.useFakeTimers({ now: 1_000_000 });
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
+    const { provider, pass } = await syncing(server, () => Date.now());
+    await provider.scanSentEnvelopes({ cursor: null }, signal());
+    // LIST's ten minutes run out, and the server stalls on the next one.
+    await vi.advanceTimersByTimeAsync(10 * 60_000 + 1);
+    server.hangList();
+
+    const page = pass();
+    await vi.advanceTimersByTimeAsync(1_600);
+
+    await expect(page).resolves.toMatchObject({ changedThreadIds: [] });
+    expect(server.statuses).toEqual([]);
+  });
+
+  it("asks no STATUS on a session with too little of its time left, and holds nothing against the server for it", async () => {
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
+    const left = { ms: 10_000 };
+    const { provider, pass } = await syncing(server, undefined, () => left.ms);
+    await provider.scanSentEnvelopes({ cursor: null }, signal());
+
+    // The Inbox page took nearly all the session had.
+    left.ms = 600;
+    await pass();
+    expect(server.statuses).toEqual([]);
+    // Not a refusal: the next session, with time to spare, asks.
+    left.ms = 9_000;
+    await pass();
+    expect(server.statuses).toEqual(["Sent"]);
+  });
+
+  it("caps the wait for the STATUS by what the session has left", async () => {
+    vi.useFakeTimers({ now: 1_000_000 });
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
+    const { provider, pass } = await syncing(server, () => Date.now(), () => 1_200);
+    await provider.scanSentEnvelopes({ cursor: null }, signal());
+    server.hangStatus();
+
+    let settled = false;
+    const page = pass().then((value) => {
+      settled = true;
+      return value;
+    });
+    // 1,200 ms left, half a second kept back for the session to close in.
+    await vi.advanceTimersByTimeAsync(750);
+    expect(settled).toBe(true);
+    await page;
+  });
+
+  it("asks the STATUS only after the page's own work, and not at all for a page that failed", async () => {
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
+    const { provider, pass } = await syncing(server);
+    await provider.scanSentEnvelopes({ cursor: null }, signal());
+    server.wire.length = 0;
+
+    await pass();
+    expect(server.wire).toEqual(["examine INBOX", "status Sent"]);
+
+    // A cursor of another UIDVALIDITY: the page is refused before anything
+    // is read, and nothing is asked about Sent on the way out.
+    server.wire.length = 0;
+    server.renumber("INBOX", BigInt(78), []);
+    await expect(pass()).rejects.toMatchObject({ code: "mail_provider_cursor_invalid" });
+    expect(server.wire).toEqual(["examine INBOX"]);
+  });
+
+  it("stops asking the STATUS two hours after the screen last asked for a scan", async () => {
+    const clock = { now: 1_000_000 };
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
+    const { provider, pass } = await syncing(server, () => clock.now);
+    await provider.scanSentEnvelopes({ cursor: null }, signal());
+
+    // The screen is switched off: no scan is asked for any more.
+    clock.now += 2 * 60 * 60_000;
+    await pass();
+    expect(server.statuses).toEqual(["Sent"]);
+    clock.now += 1;
+    await pass();
+    await pass();
+    expect(server.statuses).toEqual(["Sent"]);
+  });
+
   it("costs a quiet account its sync's logins and one more in an hour, at the default interval and at the floor", async () => {
     for (const intervalMs of [60_000, 5_000]) {
       vi.useFakeTimers({ now: 0 });
@@ -936,8 +1064,13 @@ function serverFixture(options: {
   const fetches: { readonly range: string; readonly query: unknown; readonly uid: boolean }[] = [];
   const searches: string[] = [];
   const statuses: string[] = [];
+  /** Every command a session issued, in the order it issued them. */
+  const wire: string[] = [];
   const forbidden: string[] = [];
   const counters = { bccReads: 0, lists: 0 };
+  let statusHangs = false;
+  let listHangs = false;
+  const never = () => new Promise<never>(() => undefined);
   const errorListeners: Array<(error: unknown) => void> = [];
   let selected: FakeMailbox | null = null;
   let dropNextExamine = false;
@@ -1018,6 +1151,7 @@ function serverFixture(options: {
       const target = mailboxes.get(path);
       if (!target) throw new Error(`no such mailbox ${path}`);
       selected = target;
+      wire.push(`examine ${path}`);
       locks.push({ path, readOnly: lockOptions?.readOnly === true });
       return {
         path,
@@ -1078,6 +1212,8 @@ function serverFixture(options: {
     },
     async list() {
       counters.lists += 1;
+      wire.push("list");
+      if (listHangs) return never();
       return [...mailboxes.values()].map((entry) => ({
         path: entry.path,
         pathAsListed: entry.path,
@@ -1097,6 +1233,8 @@ function serverFixture(options: {
         throw new Error("only STATUS (UIDNEXT UIDVALIDITY) is modelled");
       }
       statuses.push(path);
+      wire.push(`status ${path}`);
+      if (statusHangs) return never();
       if (options.statusThrows === true) {
         throw Object.assign(new Error(`Mailbox doesn't exist: ${path}`), { code: "NotFound" });
       }
@@ -1117,7 +1255,16 @@ function serverFixture(options: {
     fetches,
     searches,
     statuses,
+    wire,
     forbidden,
+    /** From now on the server never answers a STATUS. */
+    hangStatus() {
+      statusHangs = true;
+    },
+    /** From now on the server never answers a LIST. */
+    hangList() {
+      listHangs = true;
+    },
     get bccReads() {
       return counters.bccReads;
     },
@@ -1163,21 +1310,31 @@ function serverFixture(options: {
       const mailbox = mailboxes.get(path)!;
       mailbox.uidValidity = uidValidity;
       mailbox.uids = [...uids];
-      mailbox.uidNext = Math.max(...uids) + 1;
+      mailbox.uidNext = Math.max(0, ...uids) + 1;
     },
   };
 }
 
-function providerFor(server: ReturnType<typeof serverFixture>, now?: () => number) {
+function providerFor(
+  server: ReturnType<typeof serverFixture>,
+  now?: () => number,
+  /** What the session says it has left of its deadline, when a test says. */
+  remainingMs?: () => number,
+) {
   const opened = { count: 0 };
   const sessions = {
     async withSession<T>(
       _account: StoredImapMailAccount,
       _signal: AbortSignal,
-      operation: (client: ImapSessionClient) => Promise<T>,
+      operation: (
+        client: ImapSessionClient,
+        session?: { remainingMs(): number },
+      ) => Promise<T>,
     ): Promise<T> {
       opened.count += 1;
-      return operation(server.client);
+      return remainingMs === undefined
+        ? operation(server.client)
+        : operation(server.client, { remainingMs });
     },
   };
   return {

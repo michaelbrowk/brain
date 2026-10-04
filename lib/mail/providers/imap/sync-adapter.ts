@@ -35,6 +35,7 @@ import {
 } from "../../service/account-types";
 import {
   MAX_IMAP_READ_LITERAL_BYTES,
+  type ImapSessionBudget,
   type ImapSessionClient,
 } from "../../service/imapflow-adapter";
 import type {
@@ -111,12 +112,26 @@ const SENT_SCAN_QUIET_MS = 10 * 60_000;
  * for, and stops within two hours of the screen being switched off.
  */
 const SENT_STATUS_WANTED_MS = 2 * 60 * 60_000;
+/**
+ * How long a sync session waits for the Sent folder's STATUS, and for the
+ * LIST refresh that rides with it. A STATUS reads two counters and answers in
+ * a round trip; a server that has not answered by now is taken as refusing.
+ */
+const SENT_STATUS_WAIT_MS = 1_500;
+/** What a sync session keeps back of its deadline to hand its page over in. */
+const SENT_STATUS_SESSION_MARGIN_MS = 500;
+/** Below this the STATUS is not asked: the wait would be over before a round trip. */
+const SENT_STATUS_MIN_WAIT_MS = 250;
 
 export interface ImapReadSessions {
+  /**
+   * `session` says how much of the session's deadline is left. A source of
+   * sessions that does not say leaves the operation to its own bounds.
+   */
   withSession<T>(
     expected: StoredImapMailAccount,
     signal: AbortSignal,
-    operation: (client: ImapSessionClient) => Promise<T>,
+    operation: (client: ImapSessionClient, session?: ImapSessionBudget) => Promise<T>,
   ): Promise<T>;
 }
 
@@ -671,11 +686,20 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
    * nothing; LIST is asked here too when its ten minutes have run out, so
    * that refresh costs no login either.
    *
-   * It never fails the sync it rides on. A server that answers NO, or says
-   * the folder is not there, is not asked again for ROLE_REFUSAL_TTL_MS, and
-   * the scan falls back on its own quiet window meanwhile.
+   * It never fails the sync it rides on. The session is one race against its
+   * deadline, so a STATUS or a LIST the server never answers would lose that
+   * race for the page that was already complete: both are given a short wait
+   * of their own, SENT_STATUS_WAIT_MS and never more than the session has
+   * left less a margin to close in, and the page goes back when it runs out.
+   * A session with less than that left is not asked at all. A server that
+   * answers NO, says the folder is not there, or does not answer in time is
+   * not asked again for ROLE_REFUSAL_TTL_MS, and the scan falls back on its
+   * own quiet window meanwhile.
    */
-  private async observeSentStatus(client: ImapSessionClient): Promise<void> {
+  private async observeSentStatus(
+    client: ImapSessionClient,
+    session: ImapSessionBudget | undefined,
+  ): Promise<void> {
     const now = this.now();
     if (
       this.sentScanAskedAt === null ||
@@ -684,11 +708,22 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
     ) {
       return;
     }
-    try {
+    const wait = Math.min(
+      SENT_STATUS_WAIT_MS,
+      (session?.remainingMs() ?? Number.POSITIVE_INFINITY) - SENT_STATUS_SESSION_MARGIN_MS,
+    );
+    // Too little of the session is left to ask and still close it in time.
+    // That is this session's doing and not the server's: the next one asks.
+    if (wait < SENT_STATUS_MIN_WAIT_MS) return;
+    // An answer that arrives after the wait ran out belongs to a session
+    // that has been closed since, and is not kept.
+    let abandoned = false;
+    const asked = (async () => {
       const remembered = this.rememberedSentMailbox();
       const path = remembered === null ? await this.listSentMailbox(client) : remembered.path;
-      if (path === null) return;
+      if (path === null || abandoned) return;
       const status = await client.status(path, { uidNext: true, uidValidity: true });
+      if (abandoned) return;
       if (status === false || status.uidNext === undefined || status.uidValidity === undefined) {
         throw new MailProviderSyncError("mail_provider_response_invalid");
       }
@@ -696,9 +731,23 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
         uidValidity: validateUidValidity(status.uidValidity),
         uidNext: validateUid(status.uidNext),
       });
+    })();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        asked,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("the Sent STATUS was not answered")), wait);
+        }),
+      ]);
     } catch {
+      abandoned = true;
+      // The command may still fail when the session closes under it.
+      asked.catch(() => undefined);
       this.sentStatus = null;
       this.sentStatusRestUntil = this.now() + ROLE_REFUSAL_TTL_MS;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
   }
 
@@ -1053,23 +1102,24 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
   /**
    * A sync page's session: the Inbox work, and then, on the same login, the
    * Sent folder's STATUS for the new-senders scan. The page is complete
-   * before the STATUS is asked and is what the caller gets whatever the
-   * STATUS answers.
+   * before the STATUS is asked, and it is what the caller gets whatever the
+   * STATUS answers and however long it takes to answer: the STATUS has a
+   * short wait of its own inside what the session has left.
    */
   private runSync<T>(
     signal: AbortSignal,
     operation: (client: ImapSessionClient) => Promise<T>,
   ): Promise<T> {
-    return this.run(signal, async (client) => {
+    return this.run(signal, async (client, session) => {
       const page = await operation(client);
-      await this.observeSentStatus(client);
+      await this.observeSentStatus(client, session);
       return page;
     });
   }
 
   private async run<T>(
     signal: AbortSignal,
-    operation: (client: ImapSessionClient) => Promise<T>,
+    operation: (client: ImapSessionClient, session?: ImapSessionBudget) => Promise<T>,
   ): Promise<T> {
     try {
       return await this.sessions.withSession(this.account, signal, operation);

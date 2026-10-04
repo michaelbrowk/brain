@@ -349,6 +349,39 @@ describe("what the Sent-folder scan survives on a real ImapFlow session", () => 
     expect(logins()).toBe(9);
   });
 
+  it("returns the Inbox page of a sync whose Sent STATUS the server never answers, and does not ask again", async () => {
+    const options: FakeImapOptions = {
+      capability: "IMAP4rev1 SPECIAL-USE",
+      folders: [{ flags: "\\HasNoChildren \\Sent", path: "Sent" }],
+      uidNext: 13,
+      messages: [letter(11, "a"), letter(12, "b")],
+    };
+    // A session of two seconds: shorter than the wait the STATUS would get
+    // on its own, so the wait has to fit what the session has left.
+    const { adapter, commands } = await sentScanAdapter(options, 2_000);
+    const signal = new AbortController().signal;
+    const anchor = await adapter.getSyncAnchor(signal);
+    await adapter.scanSentEnvelopes({ cursor: null }, signal);
+    const syncPass = () =>
+      adapter.listChanges({ startHistoryId: anchor, pageToken: null, maxItems: 5 }, signal);
+
+    options.statusHangs = true;
+    const started = Date.now();
+    await expect(syncPass()).resolves.toMatchObject({ changedThreadIds: [] });
+    // Inside the session's deadline, with the margin it keeps to close in.
+    expect(Date.now() - started).toBeLessThan(2_000);
+    await expect(syncPass()).resolves.toMatchObject({ changedThreadIds: [] });
+
+    // Asked once, on the sync's session and after its Inbox work; the sync
+    // that followed did not ask.
+    const names = commandNames(commands);
+    expect(names.filter((name) => name === "STATUS")).toHaveLength(1);
+    expect(names.lastIndexOf("EXAMINE", names.indexOf("STATUS"))).toBeGreaterThan(-1);
+    expect(commands[names.lastIndexOf("EXAMINE", names.indexOf("STATUS"))]).toMatch(
+      / EXAMINE "?INBOX"?$/,
+    );
+  });
+
   it("asks which UIDs exist before it fetches mail far above the cursor", async () => {
     const { adapter, commands } = await sentScanAdapter({
       capability: "IMAP4rev1 SPECIAL-USE",
@@ -633,7 +666,7 @@ function serveSentImap(socket: TLSSocket, commands: string[], options: FakeImapO
 }
 
 /** An ImapMailSyncAdapter over real ImapFlow sessions to a fake server. */
-async function sentScanAdapter(options: FakeImapOptions) {
+async function sentScanAdapter(options: FakeImapOptions, operationTimeoutMs?: number) {
   const commands: string[] = [];
   const server = createTlsServer(testTls, (socket) => {
     serveSentImap(socket, commands, options);
@@ -647,6 +680,7 @@ async function sentScanAdapter(options: FakeImapOptions) {
       store: storeFor(account),
       createClient: (clientOptions: ImapFlowOptions) =>
         new ImapFlow({ ...clientOptions, tls: { ...clientOptions.tls, ca: testTls.cert } }),
+      ...(operationTimeoutMs === undefined ? {} : { operationTimeoutMs }),
     }),
   );
   return { adapter, commands };

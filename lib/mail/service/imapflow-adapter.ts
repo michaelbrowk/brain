@@ -169,6 +169,17 @@ export interface ImapMutationCommands {
 /** One authenticated session. Reads always; mutates on a writable lock. */
 export interface ImapSessionClient extends ImapReadClient, ImapMutationCommands {}
 
+/**
+ * What a session's operation may know about the session it runs on. A session
+ * is one race against one deadline, and a command the server never answers
+ * loses that race for everything the operation had already done. An operation
+ * that adds something optional to its work asks how long is left and puts a
+ * shorter wait of its own around it.
+ */
+export interface ImapSessionBudget {
+  remainingMs(): number;
+}
+
 type ImapReadClientFactory = (options: ImapFlowOptions) => ImapSessionClient;
 
 /** What opening an IDLE session needs beyond what the supervisor drives. */
@@ -224,7 +235,7 @@ export class ImapFlowReadSessionFactory {
   async withSession<T>(
     expected: StoredImapMailAccount,
     signal: AbortSignal,
-    operation: (client: ImapSessionClient) => Promise<T>,
+    operation: (client: ImapSessionClient, session: ImapSessionBudget) => Promise<T>,
   ): Promise<T> {
     signal.throwIfAborted();
     const current = await this.store.readAccount(expected.account.accountId);
@@ -330,7 +341,7 @@ export class ImapFlowReadSessionFactory {
     password: Buffer,
     signal: AbortSignal,
     deadlineAt: number,
-    operation: (client: ImapSessionClient) => Promise<T>,
+    operation: (client: ImapSessionClient, session: ImapSessionBudget) => Promise<T>,
   ): Promise<
     | { readonly ok: true; readonly value: T }
     | {
@@ -375,7 +386,10 @@ export class ImapFlowReadSessionFactory {
             throw new MailAccountError("imap_authentication_failed");
           }
           sessionReady = true;
-          const result = await operation(client);
+          const result = await operation(
+            client,
+            Object.freeze({ remainingMs: () => deadlineAt - this.now() }),
+          );
           const current = await this.store.readAccount(
             account.account.accountId,
           );

@@ -63,6 +63,7 @@ import {
 import { MailNav } from "./mail-nav";
 import { markMailCentreRead } from "./notifications-read";
 import { SMART_UNDO_MS } from "./shell/helpers";
+import { surfaceTakesKeys } from "./shell/surface-keys";
 import {
   MailThreadList,
   mailSmartViewItems,
@@ -547,6 +548,9 @@ export function MailSurface({
    *  written in the reader's own callback, so it is true before the first
    *  key can reach the viewer. */
   const attachmentViewerOpenRef = useRef(false);
+  /* The surface's own root, which the keyboard layer asks whether the canvas
+     it stands in is still the one on screen. */
+  const surfaceRef = useRef<HTMLDivElement | null>(null);
   const onAttachmentViewerOpenChange = useCallback((open: boolean) => {
     attachmentViewerOpenRef.current = open;
     setAttachmentViewerOpen(open);
@@ -5765,6 +5769,13 @@ export function MailSurface({
       if (attachmentViewerOpenRef.current) return;
       const composerOpen = composerRef.current !== null;
       if (composerOpen && event.key !== "Escape") return;
+      /* A surface on its way out takes no key (`surfaceTakesKeys`): the shell
+         keeps the leaving canvas mounted and inert through its exit, and an e
+         pressed in those frames archived a letter nobody could see any more.
+         Asked after the two sheets, because the shell is inert under them
+         too and that one is Mail's own doing: the composer's Escape below is
+         still this surface's to answer. */
+      if (!composerOpen && !surfaceTakesKeys(surfaceRef.current)) return;
 
       if (event.key === "Escape") {
         if (composerOpen) {
@@ -6301,7 +6312,10 @@ export function MailSurface({
   // the foot is the mobile tab bar's (54 + the 8 inset, twice), so the last
   // row of a column can be scrolled clear of it.
   return (
-    <div className="flex h-dvh min-h-0 w-full pt-[env(safe-area-inset-top,0px)] pb-[calc(70px+env(safe-area-inset-bottom))] md:pb-0">
+    <div
+      ref={surfaceRef}
+      className="flex h-dvh min-h-0 w-full pt-[env(safe-area-inset-top,0px)] pb-[calc(70px+env(safe-area-inset-bottom))] md:pb-0"
+    >
       <div
         className={`${singlePane === "list" ? "flex" : "hidden"} min-h-0 w-full panes:flex panes:w-auto`}
       >

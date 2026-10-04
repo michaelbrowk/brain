@@ -673,6 +673,118 @@ test("Mail keyboard selects the first conversation with j and toggles read with 
   });
 });
 
+/* THE KEY THAT ARRIVES WITH THE COMMIT.
+ *
+ * The case above waits for "Mark unread" and presses u, and now and then the
+ * u it pressed marked the letter read a second time. Mail's key listener read
+ * the open letter out of a ref that was written in a passive effect, which is
+ * a task after the commit that draws the word, so a key landing between the
+ * two toggled the letter as it had been one commit earlier. Playwright only
+ * lands there when the machine is busy. This case lands there every time: the
+ * key is pressed from inside the page, in the microtask after the mutation
+ * that draws the word, which is the earliest a reader could ever be shown it. */
+test("Mail keyboard u marks the letter unread in the turn it is drawn as read", async ({
+  page,
+}) => {
+  await login(page);
+  const { mutationBodies } = await installMailRoutes(page);
+  await page.goto("/mail");
+  await enterSingleAccount(page);
+  await expect(page.getByText(thread.subject, { exact: true })).toBeVisible();
+
+  await page.evaluate(() => {
+    const observer = new MutationObserver(() => {
+      const drawn = [...document.querySelectorAll("button")].some(
+        (button) => button.textContent === "Mark unread",
+      );
+      if (!drawn) return;
+      observer.disconnect();
+      document.body.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "u", bubbles: true, cancelable: true }),
+      );
+    });
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+  });
+
+  await page.keyboard.press("j");
+  await expect.poll(() => mutationBodies.length).toBeGreaterThan(1);
+  expect(mutationBodies.slice(0, 2)).toEqual([
+    { accountId: account.accountId, read: true },
+    { accountId: account.accountId, read: false },
+  ]);
+});
+
+/* A KEY PRESSED AS MAIL LEAVES.
+ *
+ * The shell keeps the leaving canvas mounted through its exit and makes it
+ * inert, which takes the focus out of Mail and leaves its listener on the
+ * window bound. An e pressed in those frames archived the open letter from a
+ * surface the reader had already left. The exit is a tenth of a second, so
+ * the key is pressed from inside the page, in the microtask after the canvas
+ * turns inert, rather than raced against it from here.
+ *
+ * Nothing archived is an absence, and an absence needs an end: the last
+ * request is a marker of the spec's own to the same route, and the route
+ * hears requests in the order the page made them. */
+test("Mail takes no key on its way out: an e pressed as the canvas leaves archives nothing", async ({
+  page,
+}) => {
+  await login(page);
+  const { mutationBodies } = await installMailRoutes(page);
+  await page.goto("/mail");
+  await enterSingleAccount(page);
+  await expect(page.getByText(thread.subject, { exact: true })).toBeVisible();
+  await page.keyboard.press("j");
+  await expect(page.getByRole("button", { name: "Mark unread" })).toBeVisible();
+
+  await page.evaluate(() => {
+    const reader = document.querySelector('section[aria-label="Message reader"]');
+    const main = document.querySelector("main");
+    if (!reader || !main) throw new Error("Mail is not on screen");
+    const observer = new MutationObserver(() => {
+      if (reader.closest("[inert]") === null) return;
+      observer.disconnect();
+      document.body.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "e", bubbles: true, cancelable: true }),
+      );
+      (window as typeof window & { __pressedWhileLeaving?: boolean }).__pressedWhileLeaving =
+        true;
+    });
+    observer.observe(main, {
+      attributes: true,
+      attributeFilter: ["inert"],
+      subtree: true,
+    });
+  });
+
+  await page.getByRole("button", { name: "Home" }).click();
+  await expect(page).toHaveURL("/");
+  await expect(page.locator('section[aria-label="Message reader"]')).toHaveCount(0);
+  expect(
+    await page.evaluate(
+      () =>
+        (window as typeof window & { __pressedWhileLeaving?: boolean })
+          .__pressedWhileLeaving,
+    ),
+  ).toBe(true);
+
+  await page.evaluate(() =>
+    fetch("/api/mail/threads/thread-1", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ marker: true }),
+    }),
+  );
+  expect(mutationBodies).toEqual([
+    { accountId: account.accountId, read: true },
+    { marker: true },
+  ]);
+});
+
 /** Reads the three-pane promise off the DOM: which panes are on screen, how
  *  wide the reader's own head is, and whether its pill still sits on §4's one
  *  inset. */

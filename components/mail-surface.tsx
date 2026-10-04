@@ -3,6 +3,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -1514,7 +1515,11 @@ export function MailSurface({
     return () => onSheetOpenChange?.(false);
   }, [sheetOpen, onSheetOpenChange]);
 
-  useEffect(() => {
+  // In the commit, not after it. A passive effect runs a task later, and the
+  // key listener reads this ref: a u pressed in between toggled the letter as
+  // it had been one commit earlier, so the press that should have marked a
+  // letter unread marked it read a second time and nothing on screen moved.
+  useLayoutEffect(() => {
     readerStateRef.current = readerState;
   }, [readerState]);
 

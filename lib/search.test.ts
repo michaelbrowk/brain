@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   assertSearchReady,
   buildSearchTextTarget,
+  MAX_BYTES_READ,
   MAX_LINES_READ,
   MAX_MATCH_LINES,
   rankSearchCandidate,
@@ -398,6 +399,62 @@ describe("bounded ripgrep output", () => {
       vi.useRealTimers();
     }
   });
+
+  it(
+    "stops reading at the byte ceiling, answers what it kept, and refuses when it kept nothing",
+    async () => {
+      // Lines are not a bound on bytes. A page of long lines offers every one
+      // of them up to the per-page budget, three are kept, and sixty such
+      // pages were 360 MB read for a run that had read 36 MB. Here: one short
+      // match, then 102 MB of lines 400 KB long, each under the line limit,
+      // so nothing but the ceiling ends the run. The clock is held still,
+      // since a run that ends on time proves nothing about bytes.
+      expect(MAX_BYTES_READ).toBe(64 * 1024 * 1024);
+      const body = [
+        "echo $$ > pid",
+        // One line in a file, doubled eight times: a shell that prints 400 KB
+        // two hundred times takes longer over it than the search does.
+        "head -c 399999 /dev/zero | tr '\\0' x > block",
+        "echo >> block",
+        "n=0",
+        "while [ $n -lt 8 ]; do cat block block > twice; mv twice block; n=$((n+1)); done",
+        `printf '%s\\n' '${matchLine("first")}'`,
+        "exec cat block",
+      ].join("\n");
+      const withoutTheClock = async (keep: (line: string) => boolean, cwd: string) => {
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        try {
+          return await runRipgrep(["needle"], cwd, keep);
+        } finally {
+          vi.useRealTimers();
+        }
+      };
+
+      await withFakeRipgrep(body, async (cwd) => {
+        let seen = 0;
+        const lines = await withoutTheClock((line) => {
+          seen += Buffer.byteLength(line) + 1;
+          return line.length < 1_000;
+        }, cwd);
+        expect(lines).toEqual([matchLine("first")]);
+        // Within a line and a pipe's worth of the ceiling, from either side.
+        expect(seen).toBeGreaterThan(MAX_BYTES_READ - 1_000_000);
+        expect(seen).toBeLessThanOrEqual(MAX_BYTES_READ + 1_000_000);
+        const pid = Number((await fs.readFile(path.join(cwd, "pid"), "utf8")).trim());
+        expect(await died(pid)).toBe(true);
+      });
+
+      await withFakeRipgrep(body, async (cwd) => {
+        await expect(withoutTheClock(() => false, cwd)).rejects.toEqual(
+          expect.objectContaining<SearchBackendError>({
+            name: "SearchBackendError",
+            message: "ripgrep search exceeded output limit",
+          }),
+        );
+      });
+    },
+    30_000,
+  );
 
   it("skips a line past the limit once it has something to answer", async () => {
     // The fourth match of a page, 600 KB of it. The three before it are an

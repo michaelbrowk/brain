@@ -676,11 +676,26 @@ export const MAX_MATCH_LINES = 300;
  *  still read forty-nine such pages, twice `MAX_HITS` and more. */
 export const MAX_LINES_READ = 10 * MAX_MATCH_LINES;
 
-/** The one thing bytes are still counted for: a single line past this cannot
- *  be answered out of half of itself, and nothing downstream will parse it.
- *  Measured in bytes with `Buffer.byteLength`, not in `String.length`, which
- *  is UTF-16 units — a line of Cyrillic is two bytes a character and would
- *  otherwise reach a megabyte before this fired. */
+/** How many bytes of ripgrep's output one run reads: 64 MiB.
+ *
+ *  LINES ARE NOT A BOUND ON BYTES. A page of long lines offers every one of
+ *  them up to the per-page budget and three are kept, so sixty pages of
+ *  thirty 200 KB lines each were 360 MB read by a run that had read 36 MB
+ *  while ripgrep stopped at three a page, with nothing but the timeout to end
+ *  it. The number comes from that 36 MB, the most a run read on the worst
+ *  notebook the review could build, with room over it: a run that stays under
+ *  what the search cost before is never cut short by this, and one that goes
+ *  past costs under twice as much, not ten times. The price is breadth on
+ *  that notebook, twelve pages answered where sixty were, which is what a
+ *  broad term degrading looks like here. An ordinary line is a few hundred
+ *  bytes, and the three thousand lines above are under a megabyte. */
+export const MAX_BYTES_READ = 64 * 1024 * 1024;
+
+/** The longest line a run keeps: a single line past this cannot be answered
+ *  out of half of itself, and nothing downstream will parse it. Measured in
+ *  bytes with `Buffer.byteLength`, not in `String.length`, which is UTF-16
+ *  units — a line of Cyrillic is two bytes a character and would otherwise
+ *  reach a megabyte before this fired. */
 const MAX_LINE_BYTES = 512 * 1024;
 
 const MATCH_LINE = /"type"\s*:\s*"match"/;
@@ -690,7 +705,7 @@ export function runRipgrep(
   cwd: string = NOTES_ROOT,
   /** Asked of every line as it is read. A line it refuses is not answered
    *  and is not counted against `MAX_MATCH_LINES`, only against
-   *  `MAX_LINES_READ`. */
+   *  `MAX_LINES_READ` and `MAX_BYTES_READ`. */
   keep: (line: string) => boolean = () => true,
 ): Promise<string[]> {
   return new Promise((resolve, reject) => {
@@ -703,6 +718,7 @@ export function runRipgrep(
     let pending = "";
     let matches = 0;
     let read = 0;
+    let bytes = 0;
     let skippingLine = false;
     let stderr = "";
     let settled = false;
@@ -715,11 +731,11 @@ export function runRipgrep(
       else resolve(lines);
     };
     // WHAT THE RUN HAS IS AN ANSWER, AND NOTHING IS NOT ONE. A run that is
-    // out of time after its first matches found them, and a line too long to
-    // show does not unfind the lines before it, so both end with what was
-    // kept. With nothing kept the same two are a search that did not happen,
-    // and answering "nothing found" for it would be a claim about the notes
-    // that nobody checked. That stays a refusal.
+    // out of time or out of bytes after its first matches found them, and a
+    // line too long to show does not unfind the lines before it, so all three
+    // end with what was kept. With nothing kept the same three are a search
+    // that did not happen, and answering "nothing found" for it would be a
+    // claim about the notes that nobody checked. That stays a refusal.
     const timer = setTimeout(() => {
       rg.kill("SIGKILL");
       finish(
@@ -728,6 +744,15 @@ export function runRipgrep(
           : new SearchBackendError("ripgrep search timed out"),
       );
     }, TIMEOUT_MS);
+    const stopAtByteCeiling = () => {
+      if (bytes < MAX_BYTES_READ) return;
+      rg.kill("SIGKILL");
+      finish(
+        lines.length > 0
+          ? undefined
+          : new SearchBackendError("ripgrep search exceeded output limit"),
+      );
+    };
     // Decoded here rather than by concatenating buffers: a multi-byte
     // character split across two chunks is one character again.
     rg.stdout.setEncoding("utf8");
@@ -735,11 +760,15 @@ export function runRipgrep(
       // Nothing after the answer or after the guard: a kill is not instant,
       // and a chunk already in flight must not reopen a run that is over.
       if (settled || exceededOutputLimit) return;
+      bytes += Buffer.byteLength(chunk);
       if (skippingLine) {
         // The rest of a line that was too long to keep: dropped up to the
         // newline that ends it, and never held.
         const end = chunk.indexOf("\n");
-        if (end === -1) return;
+        if (end === -1) {
+          stopAtByteCeiling();
+          return;
+        }
         skippingLine = false;
         chunk = chunk.slice(end + 1);
       }
@@ -776,6 +805,7 @@ export function runRipgrep(
         pending = "";
         skippingLine = true;
       }
+      stopAtByteCeiling();
     });
     rg.stderr.on("data", (chunk) => {
       if (stderr.length < 4_096) stderr += chunk.toString();

@@ -241,6 +241,44 @@ describe("the IMAP Sent-folder envelope scan", () => {
     expect(second.hasMore).toBe(false);
   });
 
+  it("loses no letter and reads none twice through expunges and appends all around the walk", async () => {
+    const total = 1_000;
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, total) } });
+    const { provider } = providerFor(server);
+    const seen = new Map<string, number>();
+    const expunged = new Set<number>();
+    // A fixed pseudo-random sequence, so a failure can be read again.
+    let state = 12_345;
+    const random = () => (state = (state * 1_103_515_245 + 12_345) % 2_147_483_648) / 2_147_483_648;
+    let cursor: string | null = null;
+    let top = total;
+    for (let window = 0; window < 40; window += 1) {
+      const result = await provider.scanSentEnvelopes({ cursor }, signal());
+      if (result.status === "unchanged") break;
+      const read = scanned(result);
+      cursor = read.cursor;
+      for (const address of recipientsOf(read)) {
+        if (address.startsWith("to")) seen.set(address, (seen.get(address) ?? 0) + 1);
+      }
+      if (!read.hasMore && window > 10) break;
+      if (window < 8) {
+        // Between two sessions another client deletes a few letters anywhere
+        // in the folder and sends a few more.
+        const victims = Array.from({ length: 7 }, () => 1 + Math.floor(random() * top));
+        server.expunge("Sent", victims);
+        for (const victim of victims) expunged.add(victim);
+        server.append("Sent", 3);
+        top += 3;
+      }
+    }
+
+    const missing = range(1, top).filter(
+      (uid) => !expunged.has(uid) && !seen.has(`to${uid}@example.org`),
+    );
+    expect(missing).toEqual([]);
+    expect([...seen.values()].filter((count) => count > 1)).toEqual([]);
+  });
+
   it("starts the walk again under a new UIDVALIDITY and says that it did", async () => {
     const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
     const { provider } = providerFor(server);

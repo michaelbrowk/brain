@@ -273,6 +273,23 @@ describe("the senders store", () => {
     }
   });
 
+  it("reads a cursor row that is not a token as no cursor, so the scan begins again instead of failing for good", async () => {
+    const { store, stateDirectory } = await createStore(() => ENABLED_AT);
+    store.recordSentScan(ACCOUNT_A, { enabledAt: ENABLED_AT, cursor: "s1_77_12_0_0_0", known: [] });
+    store.close();
+    const database = new DatabaseSync(path.join(stateDirectory, "senders.sqlite3"));
+    database.prepare("UPDATE sent_scan_progress SET cursor = 'S2:77:12'").run();
+    database.close();
+
+    const reopened = new SqliteMailSenderStore({ stateDirectory, now: () => LATER });
+    stores.push(reopened);
+    await reopened.initialize();
+
+    expect(reopened.readSentScanCursor(ACCOUNT_A)).toBeNull();
+    reopened.recordSentScan(ACCOUNT_A, { enabledAt: ENABLED_AT, cursor: "s1_77_13_0_0_0", known: [] });
+    expect(reopened.readSentScanCursor(ACCOUNT_A)).toBe("s1_77_13_0_0_0");
+  });
+
   it("writes nothing from a scan that began before the screen was switched off, or off and on again", async () => {
     const clock = { now: ENABLED_AT };
     const { store } = await createStore(() => clock.now);
@@ -2375,6 +2392,28 @@ describe("the Sent-folder scan", () => {
       world.screen.decide(block("other@pushy.test", "domain"), NO_DEADLINE),
     ).resolves.toMatchObject({ pending: false });
     expect((await world.screen.readState()).domainScopeRefused).not.toContain("pushy.test");
+  });
+
+  it("keeps an address block over a blocked sender the owner then writes to, and spares a domain-blocked one", async () => {
+    const world = await readyWorld();
+    await world.screen.decide(block("ex@addr.test"), NO_DEADLINE);
+    await world.screen.decide(block("anyone@dom.test", "domain"), NO_DEADLINE);
+    world.mail.scanSentEnvelopes.mockResolvedValueOnce(
+      sentScanned({
+        envelopes: [{ from: "me@a.test", recipients: ["ex@addr.test", "friend@dom.test"] }],
+        envelopeCount: 1,
+      }),
+    );
+    await sentScan(world, ACCOUNT_A);
+
+    world.mail.addThread(ACCOUNT_A, { threadId: "ex", from: "ex@addr.test", at: LATER + 500 });
+    world.mail.addThread(ACCOUNT_A, { threadId: "friend", from: "friend@dom.test", at: LATER + 500 });
+    world.mail.addThread(ACCOUNT_A, { threadId: "other", from: "other@dom.test", at: LATER + 500 });
+    await step(world, ACCOUNT_A, true);
+
+    // Known outranks a domain block and never an address block, as for a
+    // recipient of a letter sent through Brain.
+    expect(world.mail.inbox(ACCOUNT_A)).toEqual(["friend"]);
   });
 
   it("learns from a letter written from an alias the owner is already known to send from", async () => {

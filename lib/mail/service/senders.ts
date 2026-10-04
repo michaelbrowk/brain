@@ -556,17 +556,22 @@ export class SqliteMailSenderStore {
     this.transaction((database) => learnKnownIn(database, addresses, source, now));
   }
 
-  /** Where the account's Sent-folder scan resumes, or null before its first. */
+  /**
+   * Where the account's Sent-folder scan resumes, or null before its first.
+   * A row that is not a token (a hand edit, a format this build does not
+   * know) reads as none too: the scan begins again and writes over it, where
+   * refusing the row would fail every scan of the account from then on.
+   */
   readSentScanCursor(accountId: string): string | null {
     return this.read((database) => {
       const row = database
         .prepare("SELECT cursor FROM sent_scan_progress WHERE account_id = ?")
         .get(validAccountId(accountId));
-      if (row === undefined) return null;
-      if (typeof row.cursor !== "string" || !SENT_SCAN_CURSOR.test(row.cursor)) {
-        throw new MailSenderError("mail_senders_unavailable");
-      }
-      return row.cursor;
+      return row !== undefined &&
+        typeof row.cursor === "string" &&
+        SENT_SCAN_CURSOR.test(row.cursor)
+        ? row.cursor
+        : null;
     });
   }
 

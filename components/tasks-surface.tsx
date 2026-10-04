@@ -43,6 +43,7 @@ import {
   type TaskSection,
   type TasksView,
 } from "./tasks-lists";
+import { surfaceTakesKeys } from "./shell/surface-keys";
 import { ROW_KEYS, TasksRow, tomorrowOf, whenValueFor } from "./tasks-row";
 import type { WhenValue } from "./tasks-when-picker";
 import { Button } from "./ui/button";
@@ -254,8 +255,9 @@ export function TasksSurface({
     [order],
   );
 
-  useArrowKeys({ order, selectedId, setSelectedId });
-  useEscapeLayers({ layers, setExpandedId });
+  const surfaceRef = useRef<HTMLElement | null>(null);
+  useArrowKeys({ surface: surfaceRef, order, selectedId, setSelectedId });
+  useEscapeLayers({ surface: surfaceRef, layers, setExpandedId });
   useNamedTask({
     tasks: state.tasks,
     loading: state.loading,
@@ -304,7 +306,12 @@ export function TasksSurface({
   useTitleReveal(titleRef, TASKS_TITLE_REVEAL);
 
   return (
-    <section aria-label="Tasks" data-testid="tasks-surface" className="brain-tasks">
+    <section
+      ref={surfaceRef}
+      aria-label="Tasks"
+      data-testid="tasks-surface"
+      className="brain-tasks"
+    >
       <div className="brain-tasks-scroll">
         {/* the head floats over the rows at every width, so the edge is
             unconditional and its height follows --mail-chrome in CSS (§7) */}
@@ -852,10 +859,13 @@ function rememberEntranceDay(today: string): void {
 /** The column's own cursor. The capsule flows between rows on `layoutId`, so
  *  what moves here is one string. */
 function useArrowKeys({
+  surface,
   order,
   selectedId,
   setSelectedId,
 }: {
+  /** The column's root: a column on its way out moves no cursor. */
+  surface: React.RefObject<HTMLElement | null>;
   order: readonly string[];
   selectedId: string | null;
   setSelectedId: (id: string | null) => void;
@@ -865,6 +875,7 @@ function useArrowKeys({
       if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
       const target = event.target as HTMLElement | null;
       if (target?.closest?.("input, textarea, [contenteditable]")) return;
+      if (!surfaceTakesKeys(surface.current)) return;
       if (order.length === 0) return;
       event.preventDefault();
       const at = selectedId === null ? -1 : order.indexOf(selectedId);
@@ -876,7 +887,7 @@ function useArrowKeys({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [order, selectedId, setSelectedId]);
+  }, [order, selectedId, setSelectedId, surface]);
 }
 
 /** ESCAPE PEELS ONE LAYER AT A TIME.
@@ -910,9 +921,12 @@ function useArrowKeys({
  *  read. Take the `true` off the listener below and the row folds on the key
  *  that closed the panel. */
 function useEscapeLayers({
+  surface,
   layers,
   setExpandedId,
 }: {
+  /** The column's root: a column on its way out folds no row. */
+  surface: React.RefObject<HTMLElement | null>;
   /** The names of the layers standing over the column. Empty means none. */
   layers: React.RefObject<Set<string>>;
   setExpandedId: (id: string | null) => void;
@@ -920,6 +934,7 @@ function useEscapeLayers({
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      if (!surfaceTakesKeys(surface.current)) return;
       // The layer's key, and the layer's own listener is the one that answers
       // it. The row is the next one.
       if (layers.current.size > 0) return;
@@ -928,5 +943,5 @@ function useEscapeLayers({
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [layers, setExpandedId]);
+  }, [layers, setExpandedId, surface]);
 }

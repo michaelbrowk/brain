@@ -79,6 +79,13 @@ async function queuedOutbox(): Promise<SqliteMailSendStore> {
     "From: person@example.test\r\nTo: friend@example.net\r\n\r\nRuntime body\r\n",
     "utf8",
   );
+  // ONE READING OF THE CLOCK. A message that has never been attempted carries
+  // one moment three times, and the store refuses a first-party row whose
+  // three differ (`createInitialSmtpState`). Read three times, the clock gave
+  // three values whenever a millisecond ended between two of the reads, which
+  // a busy machine makes likely and an idle one only rare, and the enqueue
+  // answered `mail_send_service_unavailable` for a fixture that was wrong.
+  const queuedAt = Date.now() - 1_000;
   const submission: StoredMailSendSubmission = Object.freeze({
     version: 0,
     operationId: "send-00000000-0000-4000-8000-000000000901",
@@ -105,9 +112,9 @@ async function queuedOutbox(): Promise<SqliteMailSendStore> {
     providerMessageId: null,
     providerThreadId: null,
     lastErrorCode: null,
-    nextAttemptAt: Date.now() - 1_000,
-    createdAt: Date.now() - 1_000,
-    updatedAt: Date.now() - 1_000,
+    nextAttemptAt: queuedAt,
+    createdAt: queuedAt,
+    updatedAt: queuedAt,
   });
   await store.enqueue(submission);
   return store;

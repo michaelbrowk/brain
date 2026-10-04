@@ -30,6 +30,12 @@ Automated checks run in CI. The device checks below remain mandatory because bro
   on GitHub and the release list on michaelbrowk.com/brain both render this
   file as written, so it is product copy, not a commit log. `pnpm release`
   refuses a stable version without it; a pre-release may go without.
+- The `CI` run for the commit being released is green: completed, not cancelled
+  and not still running. Check it before `pnpm release`, by the commit and not
+  by whichever run is newest:
+  `gh run list --workflow CI --event push --commit <sha>`.
+  The build and both smokes run only on a push to `main`, so a run that did
+  not finish has checked nothing a pull request had not already checked.
 - `pnpm release <version>` from a clean, current `main`. It moves the image
   tag in `ops/docker/docker-compose.yml` for a stable version, because
   `install.sh` downloads that file from the release tag and installs whatever

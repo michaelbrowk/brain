@@ -1038,15 +1038,41 @@ describe("draft recipient contract", () => {
     // started. This case is about exclusion, so it records whichever send
     // arrives first and holds every later assertion to that one.
     let heldDraftId: string | null = null;
+    // WHAT THE CASE WAITS ON, SINCE IT USED TO WAIT ON TWENTY TIMER TURNS.
+    //
+    // Reading the draft is the last file work a send does before the gate.
+    // Twenty turns was a guess at how long two sends take to get there, and
+    // on a busy machine the first one alone took seventeen of them: three
+    // more and the case failed, and well before that it had stopped proving
+    // anything, because a second send still reading its draft cannot overlap
+    // whether the gate holds or not. So both moments are recorded instead.
+    let draftsRead = 0;
+    let bothDraftsRead: () => void = () => {};
+    const bothRead = new Promise<void>((resolve) => {
+      bothDraftsRead = resolve;
+    });
+    let firstEntered: () => void = () => {};
+    const entered = new Promise<void>((resolve) => {
+      firstEntered = resolve;
+    });
     const recording = new Proxy(fixture.store, {
       get(target, property) {
         const value = Reflect.get(target, property, target);
+        if (property === "readDraft" && typeof value === "function") {
+          return async (...args: unknown[]) => {
+            const draft = await Reflect.apply(value, target, args);
+            draftsRead += 1;
+            if (draftsRead === 2) bothDraftsRead();
+            return draft;
+          };
+        }
         if (property === "commitDraftSend" && typeof value === "function") {
           return async (...args: unknown[]) => {
             const draftId = (args[0] as { readonly draftId: string }).draftId;
             order.push(`enter:${draftId}`);
             if (heldDraftId === null) {
               heldDraftId = draftId;
+              firstEntered();
               await parked;
             }
             const committed = await Reflect.apply(value, target, args);
@@ -1069,11 +1095,12 @@ describe("draft recipient contract", () => {
       }),
       requestContext(),
     );
-    // The first commit is parked. Give the second every turn it would need to
-    // build and reach the store if the gate ended at the build.
-    for (let turn = 0; turn < 20; turn += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
+    // The first commit is parked and the second send holds its draft. From
+    // there to the store is the build and promise turns, no file and no
+    // timer, so one trip round the event loop runs all of it: a second send
+    // that could reach the store while the first is in it has reached it.
+    await Promise.all([entered, bothRead]);
+    await new Promise((resolve) => setImmediate(resolve));
     expect(heldDraftId).not.toBeNull();
     expect(order).toEqual([`enter:${heldDraftId}`]);
 

@@ -33,8 +33,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # A pull request's superseded run is stopped: nobody will read it. A run on
+  # main is never stopped, because the build and both smokes run nowhere else,
+  # and a merge that cancelled the run before it left that merge unbuilt until
+  # a release gate found out. Not cancelling is half of it: a group holds one
+  # run and one waiting, and a third push takes the waiting one's place. So
+  # each commit on main is a group of its own and waits for nobody.
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'latest' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   check:

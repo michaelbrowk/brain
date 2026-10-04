@@ -24,8 +24,12 @@ export function parsePage(raw: string): {
  *  metadata object came from outside this application — an Obsidian plugin,
  *  a hand edit, another clone of the notes, a removed feature — and is carried
  *  through verbatim. Notes captured before the Inbox was removed still carry
- *  `inbox: true`; it rides along untouched and nothing reads it. */
-const MANAGED_PAGE_META_KEYS = new Set([
+ *  `inbox: true`; it rides along untouched and nothing reads it.
+ *
+ *  Exported for the search, which refuses a line under any of these as an
+ *  answer: a key added here is a line the store writes, and `sharePass` is
+ *  one of them. */
+export const MANAGED_PAGE_META_KEYS: ReadonlySet<string> = new Set([
   "id",
   "title",
   "icon",

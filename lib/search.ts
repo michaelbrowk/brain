@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { getStore, NOTES_ROOT } from "./store";
+import { MANAGED_PAGE_META_KEYS } from "./store/frontmatter";
 import {
   projectMarkdownSearchText,
   type SearchTextTarget,
@@ -162,33 +163,14 @@ async function doSearch(q: string): Promise<SearchHit[]> {
     ...wordLines.map((line) => ({ line, fromPhrase: false })),
   ];
   for (const { line, fromPhrase } of scanned) {
-    let obj: {
-      type?: string;
-      data?: {
-        path?: { text?: string };
-        lines?: { text?: string };
-      };
-    };
-    try {
-      obj = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (obj.type !== "match") continue;
-    const file = obj.data?.path?.text;
-    if (!file) continue;
+    // Frontmatter never reaches this loop: `rgJson` drops it while it reads.
+    const match = parseRipgrepMatch(line);
+    if (!match) continue;
     // rg emits paths relative to its cwd (NOTES_ROOT), not the app cwd
-    const dir = path.dirname(path.resolve(NOTES_ROOT, file));
+    const dir = path.dirname(path.resolve(NOTES_ROOT, match.file));
     const page = dirToId.get(dir);
     if (!page) continue;
-    const text = (obj.data?.lines?.text ?? "").trim();
-    // skip frontmatter matches
-    if (
-      /^(id|title|icon|order|created|updated|notionId|notionSourceHash|notionConversionHash|notionTargetRev|notionTargetParentId|notionTargetBeforeId|notionTargetOrder|notionImportHash|notionImportToken|notionImportStarted|notionImportBaseRev|notionImportCreated|notionImportParentId|notionImportBeforeId|notionImportBaseParentId|notionImportBaseBeforeId|notionImportBaseOrder):\s/.test(
-        text,
-      )
-    )
-      continue;
+    const text = match.text;
     const normalizedLine = text.toLocaleLowerCase();
     const candidate = candidates.get(page.id) ?? {
       ...page,
@@ -557,18 +539,108 @@ function saysLittleAlone(term: string): boolean {
   return [...term].length < SHORT_WORD_CHARS || /^\p{N}+$/u.test(term);
 }
 
+/** A LINE THE STORE WROTE IS NEVER AN ANSWER.
+ *
+ *  The keys are the store's own list of what it manages in frontmatter, not a
+ *  second list kept here. The second list was twenty-three keys long while
+ *  the store managed fifty-six, and one of the thirty-three it missed was
+ *  `sharePass`: a query the hash happened to hold was answered with the hash
+ *  as its snippet, in the palette and through the MCP `search` tool. A key
+ *  added to the store is refused here from the commit that adds it.
+ *
+ *  THIS IS A GUESS AT WHERE FRONTMATTER ENDS, and it is wrong in both
+ *  directions. A body line that opens with one of these words and a colon,
+ *  `status: shipped`, is refused too, and the lines under a key that holds a
+ *  list or a map are not recognised and are answered as body. Both end when
+ *  the reading knows the line the closing `---` is on. */
+const FRONTMATTER_LINE = new RegExp(
+  `^(?:${[...MANAGED_PAGE_META_KEYS].join("|")}):(?:\\s|$)`,
+);
+
+/** How many lines of one page a single run answers. */
+const BODY_LINES_PER_PAGE = 3;
+
+interface RipgrepMatch {
+  /** Relative to ripgrep's cwd, as it printed it. */
+  readonly file: string;
+  readonly text: string;
+}
+
+/** One line of `rg --json`, if it is a match. Null for the begin, end and
+ *  summary lines, and for a line cut off before it could be parsed. */
+function parseRipgrepMatch(line: string): RipgrepMatch | null {
+  let obj: {
+    type?: string;
+    data?: {
+      path?: { text?: string };
+      lines?: { text?: string };
+    };
+  };
+  try {
+    obj = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (obj.type !== "match") return null;
+  const file = obj.data?.path?.text;
+  if (!file) return null;
+  return { file, text: (obj.data?.lines?.text ?? "").trim() };
+}
+
+/** THE PER-PAGE CAP COUNTS WHAT SOMEBODY WROTE, NOT WHAT THE STORE DID.
+ *
+ *  ripgrep's `--max-count` stops at the first matches of a file, and the top
+ *  of every page is its frontmatter. A number is in `created` and `updated`
+ *  whenever the clock happened to hold it, in a random id now and then, and in
+ *  most of the hashes a Notion import leaves behind. With the cap at three,
+ *  three such lines were the whole answer for that page: the body line was
+ *  never read, the word went unmatched, and the page fell out of the
+ *  intersection. "Урок 15 сентября" lost a note that holds all three words
+ *  whenever the note's id and both of its dates happened to hold a 15.
+ *
+ *  ripgrep cannot be told where frontmatter ends, so it is asked for a line
+ *  for every key the store manages and three more, and the reading below
+ *  keeps the first three of the body. A key is one line of a page at most,
+ *  which is what makes that enough. Dropped lines are neither stored nor
+ *  counted against `MAX_MATCH_LINES`, so a broad word still answers a hundred
+ *  pages. They are counted against `MAX_LINES_READ`, which is what keeps a
+ *  word that is in every page's dates from reading the whole notebook. */
+function bodyLinesOnly(): (line: string) => boolean {
+  const kept = new Map<string, number>();
+  return (line) => {
+    const match = parseRipgrepMatch(line);
+    if (!match || FRONTMATTER_LINE.test(match.text)) return false;
+    const count = kept.get(match.file) ?? 0;
+    if (count >= BODY_LINES_PER_PAGE) return false;
+    kept.set(match.file, count + 1);
+    return true;
+  };
+}
+
+/** One run of the plan: the body lines that hold `pattern`, three a page. */
+export function runBodySearch(
+  pattern: string,
+  cwd: string = NOTES_ROOT,
+): Promise<string[]> {
+  return runRipgrep(
+    [
+      "--fixed-strings",
+      "--ignore-case",
+      "--max-count",
+      String(BODY_LINES_PER_PAGE + MANAGED_PAGE_META_KEYS.size),
+      "-e",
+      pattern,
+    ],
+    cwd,
+    bodyLinesOnly(),
+  );
+}
+
 async function rgJson(query: string): Promise<{ phrase: string[]; words: string[] }> {
   const phrase: string[] = [];
   const words: string[] = [];
   for (const run of searchRunPlan(query)) {
-    const lines = await runRipgrep([
-      "--fixed-strings",
-      "--ignore-case",
-      "--max-count",
-      "3",
-      "-e",
-      run.pattern,
-    ]);
+    const lines = await runBodySearch(run.pattern);
     (run.phrase ? phrase : words).push(...lines);
   }
   return { phrase, words };
@@ -590,11 +662,40 @@ function rgLines(pattern: string, maxCount: number): Promise<string[]> {
  *  anything narrower than the cap. */
 export const MAX_MATCH_LINES = 300;
 
-/** The one thing bytes are still counted for: a single line past this cannot
- *  be answered out of half of itself, and nothing downstream will parse it.
- *  Measured in bytes with `Buffer.byteLength`, not in `String.length`, which
- *  is UTF-16 units — a line of Cyrillic is two bytes a character and would
- *  otherwise reach a megabyte before this fired. */
+/** How many lines of ripgrep's output one run reads, answered or not: three
+ *  thousand, ten for every line it may answer.
+ *
+ *  THE CAP ABOVE IS ON ANSWERS, AND A RUN CAN READ FOR A LONG TIME WITHOUT
+ *  ONE. A line the caller refuses is not counted there, so a word that is in
+ *  every page's `created` and `updated` and in nobody's body read the whole
+ *  notebook: eighty thousand lines over twenty thousand pages, where the run
+ *  had read six hundred before the refusing was moved into the reading. This
+ *  is the bound on that. Ten times is the room the per-page budget needs: at
+ *  the worst a page costs a line for each key the store manages and three
+ *  more, about sixty with ripgrep's two of its own, so a run stopped here has
+ *  still read forty-nine such pages, twice `MAX_HITS` and more. */
+export const MAX_LINES_READ = 10 * MAX_MATCH_LINES;
+
+/** How many bytes of ripgrep's output one run reads: 64 MiB.
+ *
+ *  LINES ARE NOT A BOUND ON BYTES. A page of long lines offers every one of
+ *  them up to the per-page budget and three are kept, so sixty pages of
+ *  thirty 200 KB lines each were 360 MB read by a run that had read 36 MB
+ *  while ripgrep stopped at three a page, with nothing but the timeout to end
+ *  it. The number comes from that 36 MB, the most a run read on the worst
+ *  notebook the review could build, with room over it: a run that stays under
+ *  what the search cost before is never cut short by this, and one that goes
+ *  past costs under twice as much, not ten times. The price is breadth on
+ *  that notebook, twelve pages answered where sixty were, which is what a
+ *  broad term degrading looks like here. An ordinary line is a few hundred
+ *  bytes, and the three thousand lines above are under a megabyte. */
+export const MAX_BYTES_READ = 64 * 1024 * 1024;
+
+/** The longest line a run keeps: a single line past this cannot be answered
+ *  out of half of itself, and nothing downstream will parse it. Measured in
+ *  bytes with `Buffer.byteLength`, not in `String.length`, which is UTF-16
+ *  units — a line of Cyrillic is two bytes a character and would otherwise
+ *  reach a megabyte before this fired. */
 const MAX_LINE_BYTES = 512 * 1024;
 
 const MATCH_LINE = /"type"\s*:\s*"match"/;
@@ -602,6 +703,10 @@ const MATCH_LINE = /"type"\s*:\s*"match"/;
 export function runRipgrep(
   args: string[],
   cwd: string = NOTES_ROOT,
+  /** Asked of every line as it is read. A line it refuses is not answered
+   *  and is not counted against `MAX_MATCH_LINES`, only against
+   *  `MAX_LINES_READ` and `MAX_BYTES_READ`. */
+  keep: (line: string) => boolean = () => true,
 ): Promise<string[]> {
   return new Promise((resolve, reject) => {
     const rg = spawn(
@@ -612,6 +717,9 @@ export function runRipgrep(
     const lines: string[] = [];
     let pending = "";
     let matches = 0;
+    let read = 0;
+    let bytes = 0;
+    let skippingLine = false;
     let stderr = "";
     let settled = false;
     let exceededOutputLimit = false;
@@ -622,10 +730,29 @@ export function runRipgrep(
       if (error) reject(error);
       else resolve(lines);
     };
+    // WHAT THE RUN HAS IS AN ANSWER, AND NOTHING IS NOT ONE. A run that is
+    // out of time or out of bytes after its first matches found them, and a
+    // line too long to show does not unfind the lines before it, so all three
+    // end with what was kept. With nothing kept the same three are a search
+    // that did not happen, and answering "nothing found" for it would be a
+    // claim about the notes that nobody checked. That stays a refusal.
     const timer = setTimeout(() => {
       rg.kill("SIGKILL");
-      finish(new SearchBackendError("ripgrep search timed out"));
+      finish(
+        lines.length > 0
+          ? undefined
+          : new SearchBackendError("ripgrep search timed out"),
+      );
     }, TIMEOUT_MS);
+    const stopAtByteCeiling = () => {
+      if (bytes < MAX_BYTES_READ) return;
+      rg.kill("SIGKILL");
+      finish(
+        lines.length > 0
+          ? undefined
+          : new SearchBackendError("ripgrep search exceeded output limit"),
+      );
+    };
     // Decoded here rather than by concatenating buffers: a multi-byte
     // character split across two chunks is one character again.
     rg.stdout.setEncoding("utf8");
@@ -633,18 +760,35 @@ export function runRipgrep(
       // Nothing after the answer or after the guard: a kill is not instant,
       // and a chunk already in flight must not reopen a run that is over.
       if (settled || exceededOutputLimit) return;
+      bytes += Buffer.byteLength(chunk);
+      if (skippingLine) {
+        // The rest of a line that was too long to keep: dropped up to the
+        // newline that ends it, and never held.
+        const end = chunk.indexOf("\n");
+        if (end === -1) {
+          stopAtByteCeiling();
+          return;
+        }
+        skippingLine = false;
+        chunk = chunk.slice(end + 1);
+      }
       pending += chunk;
       let newline = pending.indexOf("\n");
       while (newline !== -1) {
         const line = pending.slice(0, newline);
         pending = pending.slice(newline + 1);
         if (line) {
-          lines.push(line);
-          if (MATCH_LINE.test(line)) matches += 1;
+          read += 1;
+          if (keep(line)) {
+            lines.push(line);
+            if (MATCH_LINE.test(line)) matches += 1;
+          }
         }
-        if (matches >= MAX_MATCH_LINES) {
+        if (matches >= MAX_MATCH_LINES || read >= MAX_LINES_READ) {
           // Answered, not refused: these are the first matches, and ripgrep
           // has no more work to do for a caller that keeps twenty of them.
+          // At the second bound the answer may be short or empty, which is
+          // what this run answered before it refused lines as it read them.
           rg.kill("SIGKILL");
           finish();
           return;
@@ -652,9 +796,16 @@ export function runRipgrep(
         newline = pending.indexOf("\n");
       }
       if (Buffer.byteLength(pending) > MAX_LINE_BYTES) {
-        exceededOutputLimit = true;
-        rg.kill("SIGKILL");
+        if (lines.length === 0) {
+          exceededOutputLimit = true;
+          rg.kill("SIGKILL");
+          return;
+        }
+        read += 1;
+        pending = "";
+        skippingLine = true;
       }
+      stopAtByteCeiling();
     });
     rg.stderr.on("data", (chunk) => {
       if (stderr.length < 4_096) stderr += chunk.toString();
@@ -674,7 +825,7 @@ export function runRipgrep(
       if (code === 0 || code === 1) {
         // A last line with no newline after it. ripgrep terminates every JSON
         // line, so this is the shape of a run that was cut off elsewhere.
-        if (pending) lines.push(pending);
+        if (pending && keep(pending)) lines.push(pending);
         finish();
         return;
       }

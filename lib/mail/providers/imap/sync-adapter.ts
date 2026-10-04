@@ -235,8 +235,9 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
   private sentScanRetry: SentScanRetry | null = null;
   /**
    * When the screen last asked for a scan. The sync's sessions ask the Sent
-   * folder's STATUS only while it keeps asking, so an account whose screen is
-   * off is not asked a thing about the folder.
+   * folder's STATUS only while it keeps asking. Nothing tells this adapter
+   * that the screen was switched off, so the STATUS goes on for
+   * SENT_STATUS_WANTED_MS after the last scan and stops then.
    */
   private sentScanAskedAt: number | null = null;
   /**
@@ -533,10 +534,11 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
    * hearing it again costs no session. A connection that drops before
    * anything was asked for is a failure. A batch that was asked for and could
    * not be read is neither: it answers `batch_failed`, and the next call at
-   * the same cursor asks for half as much, down to one message, which is then
-   * passed over and counted. So one envelope a session cannot read (a line
-   * past the session's limit, a server too slow for the deadline) never holds
-   * the scan, or the letters after it.
+   * the same cursor asks for half as much, down to one message. That one is
+   * passed over and counted when its line is past the session's limit, or
+   * when it has failed three times running. So one envelope a session cannot
+   * read never holds the scan, or the letters after it, and one dropped
+   * connection does not cost a letter.
    */
   async scanSentEnvelopes(
     input: { readonly cursor: string | null },
@@ -662,7 +664,8 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
    * What a batch that was asked for and not read turns into. A search that
    * failed is answered by reading new mail by plain UID range from then on. A
    * fetch of several messages is asked for again at half its width. A fetch
-   * of one message is that message being unreadable: it is passed over.
+   * of one message is asked for again, and passed over when it is the letter
+   * that cannot be read and not the connection.
    */
   private afterUnreadBatch(attempt: SentScanAttempt): MailSentScanResult {
     const cursor = attempt.cursor!;

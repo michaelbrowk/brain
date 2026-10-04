@@ -484,7 +484,9 @@ describe("the IMAP Sent-folder envelope scan", () => {
   which a Bcc blast reaches without the adapter ever reading Bcc, or a server
   too slow for the deadline) used to hold the scan at its batch for good, and
   every later letter with it. A batch that fails is asked for again at half
-  its width, down to one message, and that one is passed over and counted.
+  its width, down to one message. That one is passed over and counted when
+  its line is past the limit or it has failed three times running, so that
+  one dropped connection does not cost a letter.
 */
 describe("a Sent-folder batch that cannot be read", () => {
   it("narrows the walk to the one letter, passes it over, and reads every other", async () => {

@@ -1230,7 +1230,8 @@ export type MailSentScanResult =
   /**
    * The folder was reached and the batch asked for could not be read. The
    * cursor stays; the next call asks for half the batch, and a batch of one
-   * that cannot be read is passed over and counted in a `scanned` answer.
+   * that still cannot be read on its third try is passed over and counted in
+   * a `scanned` answer.
    */
   | { readonly status: "batch_failed" }
   | { readonly status: "unavailable"; readonly reason: MailSentScanRefusal };

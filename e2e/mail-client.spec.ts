@@ -1160,12 +1160,13 @@ test("@release Mail's nav menu rings a row for the keys and never for the pointe
   await expect(rows.nth(1)).toBeFocused();
   expect(await focused()).toEqual({ ring: "solid", radius: resting });
 
-  // The pointer crosses to another row. Radix hands that row the focus, and
-  // it wears the hover and no ring.
+  // The pointer crosses from the trigger to a row, in one event. Radix hands
+  // that row the focus, and it wears the hover and no ring: coming into the
+  // menu is a move, and its first event is not spent on learning where the
+  // pointer is.
   const box = await rows.nth(3).boundingBox();
   if (!box) throw new Error("row not on screen");
-  await page.mouse.move(box.x + 24, box.y + box.height / 2 - 4);
-  await page.mouse.move(box.x + 32, box.y + box.height / 2, { steps: 4 });
+  await page.mouse.move(box.x + 24, box.y + box.height / 2);
   await expect(rows.nth(3)).toBeFocused();
   expect((await focused()).ring).toBe("none");
 
@@ -1173,6 +1174,29 @@ test("@release Mail's nav menu rings a row for the keys and never for the pointe
   await page.keyboard.press("ArrowDown");
   await expect(rows.nth(4)).toBeFocused();
   expect(await focused()).toEqual({ ring: "solid", radius: resting });
+
+  // A pen passing over the menu moves no focus (Radix moves it for a mouse
+  // only), so it does not take the ring off the keyboard's row either.
+  await rows.nth(6).evaluate((row) => {
+    const at = row.getBoundingClientRect();
+    for (const dx of [10, 14, 18]) {
+      row.dispatchEvent(
+        new PointerEvent("pointermove", {
+          bubbles: true,
+          pointerType: "pen",
+          clientX: at.x + dx,
+          clientY: at.y + 8,
+        }),
+      );
+    }
+  });
+  await expect(rows.nth(4)).toBeFocused();
+  expect((await focused()).ring).toBe("solid");
+
+  // The mouse, already inside, moves on: one move, and the ring is gone.
+  await page.mouse.move(box.x + 40, box.y + box.height / 2 + 2);
+  await expect(rows.nth(3)).toBeFocused();
+  expect((await focused()).ring).toBe("none");
   await page.keyboard.press("Escape");
 });
 

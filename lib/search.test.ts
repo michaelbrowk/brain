@@ -8,11 +8,13 @@ import {
   buildSearchTextTarget,
   MAX_MATCH_LINES,
   rankSearchCandidate,
+  runBodySearch,
   runRipgrep,
   SearchBackendError,
   searchRunPlan,
   tokenizeSearchQuery,
 } from "./search";
+import { MANAGED_PAGE_META_KEYS } from "./store/frontmatter";
 
 const HAS_RIPGREP = (() => {
   try {
@@ -472,6 +474,108 @@ describe("searchNotes over a real notes root", () => {
     },
     30_000,
   );
+
+  it.skipIf(!HAS_RIPGREP)(
+    "never answers a share password hash, or any other line the store wrote",
+    async () => {
+      // A shared page keeps its password hash, its link version and its
+      // expiry in frontmatter. None of the three was on the list of keys the
+      // search refused, so a query the hash happened to hold was answered
+      // with `sharePass: $2a$10$…` as the snippet, in the palette and through
+      // the MCP `search` tool alike.
+      await withRealNotes(async (store, searchNotes) => {
+        const page = await store.createPage(null, "Заметки", {
+          markdown: "Урок прошёл.\n\nПятнадцатое? нет, 15.\n\nБыло в сентября.",
+        });
+        // Written the way `serializePage` writes them, straight into the
+        // file: a real hash cannot be made to hold a chosen word.
+        const file = path.join(store.resolve(page.id), "index.md");
+        const shared = (await fs.readFile(file, "utf8")).replace(
+          /\n---\n/,
+          "\nsharePass: $2a$10$abc15defghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQ\n" +
+            "shareVersion: 15\nshareExpiresAt: '2026-10-15T10:00:00.000Z'\n---\n",
+        );
+        await fs.writeFile(file, shared);
+
+        const hits = await searchNotes("15");
+        expect(hits.map((hit) => hit.snippet)).toEqual([
+          { before: "Пятнадцатое? нет, ", match: "15", after: "." },
+        ]);
+
+        // And a word only the hash holds answers nothing at all.
+        expect(await searchNotes("defghijklmnopqrstuvwxyz")).toEqual([]);
+      });
+    },
+    30_000,
+  );
+});
+
+/** ONE RUN, ON FILES WRITTEN BY HAND.
+ *
+ *  What a run asks ripgrep for and what it keeps of the answer are two
+ *  numbers that have to agree: a line for every key the store manages, and
+ *  three more, of which the three are kept. Either one wrong is silent. Too
+ *  few lines asked for and a page whose frontmatter holds the word loses its
+ *  body, too many kept and one long note takes the whole answer. So the page
+ *  here holds the word on every managed key and on five lines of its body. */
+describe("one search run over a page", () => {
+  const WORD = "a1b2";
+
+  async function withPage(
+    index: string,
+    run: (root: string) => Promise<void>,
+  ) {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-search-run-"));
+    try {
+      await fs.mkdir(path.join(root, "note"));
+      await fs.writeFile(path.join(root, "note", "index.md"), index);
+      await run(root);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }
+
+  const texts = (lines: string[]) =>
+    lines.map(
+      (line) =>
+        (JSON.parse(line) as { data: { lines: { text: string } } }).data.lines.text,
+    );
+
+  const everyManagedKey = [...MANAGED_PAGE_META_KEYS]
+    .map((key) => `${key}: ${WORD}`)
+    .join("\n");
+
+  it.skipIf(!HAS_RIPGREP)(
+    "reads past every managed key to the body, and keeps three lines of it",
+    async () => {
+      const body = [1, 2, 3, 4, 5].map((n) => `body ${n} ${WORD}`).join("\n");
+      await withPage(`---\n${everyManagedKey}\n---\n${body}\n`, async (root) => {
+        expect(texts(await runBodySearch(WORD, root))).toEqual([
+          `body 1 ${WORD}\n`,
+          `body 2 ${WORD}\n`,
+          `body 3 ${WORD}\n`,
+        ]);
+      });
+    },
+  );
+
+  it.skipIf(!HAS_RIPGREP)("answers no managed key, whichever one it is", async () => {
+    await withPage(`---\n${everyManagedKey}\n---\nnothing here\n`, async (root) => {
+      expect(await runBodySearch(WORD, root)).toEqual([]);
+    });
+  });
+
+  it("asks ripgrep for exactly a line a key and three more", async () => {
+    // The number itself, off the command line: asking for more is as silent
+    // as asking for fewer, and costs a read of every long note in full.
+    await withFakeRipgrep('printf "%s\\n" "$@" > args\nexit 1', async (cwd) => {
+      await runBodySearch(WORD, cwd);
+      const args = (await fs.readFile(path.join(cwd, "args"), "utf8")).split("\n");
+      expect(args[args.indexOf("--max-count") + 1]).toBe(
+        String(MANAGED_PAGE_META_KEYS.size + 3),
+      );
+    });
+  });
 });
 
 /** A real Store over a temp notes root, and the search module that reads it.

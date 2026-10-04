@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { getStore, NOTES_ROOT } from "./store";
+import { MANAGED_PAGE_META_KEYS } from "./store/frontmatter";
 import {
   projectMarkdownSearchText,
   type SearchTextTarget,
@@ -538,36 +539,23 @@ function saysLittleAlone(term: string): boolean {
   return [...term].length < SHORT_WORD_CHARS || /^\p{N}+$/u.test(term);
 }
 
-/** The frontmatter keys whose lines are never an answer: what the store
- *  writes about a page rather than what somebody wrote in it. A key is one
- *  line of a page at most, which is what `rgJson` counts on. */
-const FRONTMATTER_KEYS = [
-  "id",
-  "title",
-  "icon",
-  "order",
-  "created",
-  "updated",
-  "notionId",
-  "notionSourceHash",
-  "notionConversionHash",
-  "notionTargetRev",
-  "notionTargetParentId",
-  "notionTargetBeforeId",
-  "notionTargetOrder",
-  "notionImportHash",
-  "notionImportToken",
-  "notionImportStarted",
-  "notionImportBaseRev",
-  "notionImportCreated",
-  "notionImportParentId",
-  "notionImportBeforeId",
-  "notionImportBaseParentId",
-  "notionImportBaseBeforeId",
-  "notionImportBaseOrder",
-] as const;
-
-const FRONTMATTER_LINE = new RegExp(`^(?:${FRONTMATTER_KEYS.join("|")}):\\s`);
+/** A LINE THE STORE WROTE IS NEVER AN ANSWER.
+ *
+ *  The keys are the store's own list of what it manages in frontmatter, not a
+ *  second list kept here. The second list was twenty-three keys long while
+ *  the store managed fifty-six, and one of the thirty-three it missed was
+ *  `sharePass`: a query the hash happened to hold was answered with the hash
+ *  as its snippet, in the palette and through the MCP `search` tool. A key
+ *  added to the store is refused here from the commit that adds it.
+ *
+ *  THIS IS A GUESS AT WHERE FRONTMATTER ENDS, and it is wrong in both
+ *  directions. A body line that opens with one of these words and a colon,
+ *  `status: shipped`, is refused too, and the lines under a key that holds a
+ *  list or a map are not recognised and are answered as body. Both end when
+ *  the reading knows the line the closing `---` is on. */
+const FRONTMATTER_LINE = new RegExp(
+  `^(?:${[...MANAGED_PAGE_META_KEYS].join("|")}):(?:\\s|$)`,
+);
 
 /** How many lines of one page a single run answers. */
 const BODY_LINES_PER_PAGE = 3;
@@ -611,10 +599,12 @@ function parseRipgrepMatch(line: string): RipgrepMatch | null {
  *  whenever the note's id and both of its dates happened to hold a 15.
  *
  *  ripgrep cannot be told where frontmatter ends, so it is asked for a line
- *  for every key above and three more, and the reading below keeps the first
- *  three of the body. Dropped lines are neither stored nor counted against
- *  `MAX_MATCH_LINES`, so a broad word still answers a hundred pages before
- *  the run is stopped. */
+ *  for every key the store manages and three more, and the reading below
+ *  keeps the first three of the body. A key is one line of a page at most,
+ *  which is what makes that enough. Dropped lines are neither stored nor
+ *  counted against `MAX_MATCH_LINES`, so a broad word still answers a hundred
+ *  pages. They are counted against `MAX_LINES_READ`, which is what keeps a
+ *  word that is in every page's dates from reading the whole notebook. */
 function bodyLinesOnly(): (line: string) => boolean {
   const kept = new Map<string, number>();
   return (line) => {
@@ -627,22 +617,30 @@ function bodyLinesOnly(): (line: string) => boolean {
   };
 }
 
+/** One run of the plan: the body lines that hold `pattern`, three a page. */
+export function runBodySearch(
+  pattern: string,
+  cwd: string = NOTES_ROOT,
+): Promise<string[]> {
+  return runRipgrep(
+    [
+      "--fixed-strings",
+      "--ignore-case",
+      "--max-count",
+      String(BODY_LINES_PER_PAGE + MANAGED_PAGE_META_KEYS.size),
+      "-e",
+      pattern,
+    ],
+    cwd,
+    bodyLinesOnly(),
+  );
+}
+
 async function rgJson(query: string): Promise<{ phrase: string[]; words: string[] }> {
   const phrase: string[] = [];
   const words: string[] = [];
   for (const run of searchRunPlan(query)) {
-    const lines = await runRipgrep(
-      [
-        "--fixed-strings",
-        "--ignore-case",
-        "--max-count",
-        String(BODY_LINES_PER_PAGE + FRONTMATTER_KEYS.length),
-        "-e",
-        run.pattern,
-      ],
-      NOTES_ROOT,
-      bodyLinesOnly(),
-    );
+    const lines = await runBodySearch(run.pattern);
     (run.phrase ? phrase : words).push(...lines);
   }
   return { phrase, words };

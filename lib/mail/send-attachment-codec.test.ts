@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  exceedsMailJsonStructure,
   isSafeAttachmentFilename,
   MAIL_SEND_ATTACHMENT_LIMITS,
+  MAIL_SEND_BODY_MAX_STRUCTURAL_TOKENS,
   mailSendAttachmentBytes,
   safeAttachmentFilename,
   validateMailSendAttachments,
@@ -197,5 +199,76 @@ describe("outgoing attachment codec", () => {
       maxFilenameBytes: 255,
       maxTotalBytes: 10_485_760,
     });
+  });
+});
+
+describe("the structure a send body may hold", () => {
+  const bytes = (text: string) => new TextEncoder().encode(text);
+  const exceeds = (text: string) =>
+    exceedsMailJsonStructure(bytes(text), MAIL_SEND_BODY_MAX_STRUCTURAL_TOKENS);
+
+  it("pins the bound, eight times the most a legal send holds", () => {
+    expect(MAIL_SEND_BODY_MAX_STRUCTURAL_TOKENS).toBe(1_408);
+  });
+
+  it("admits the largest send the codecs admit, eight times over", () => {
+    // A hundred recipients, ten files, and every member a send can carry,
+    // with the characters that are structure outside a string inside every one.
+    const awkward = 'a "quoted" [list], {object} \\ back\\\\slash "';
+    const send = {
+      accountId: "account-a00000000000000000000000000000000",
+      idempotencyKey: awkward,
+      mode: "reply",
+      to: Array.from({ length: 34 }, (_, index) => `to-${index},[x]@example.net`),
+      cc: Array.from({ length: 33 }, (_, index) => `cc-${index}{y}@example.net`),
+      bcc: Array.from({ length: 33 }, (_, index) => `bcc-${index}"z"@example.net`),
+      subject: awkward,
+      text: `${awkward}\n`.repeat(2_000),
+      replyToMessageId: "message-a",
+      attachments: Array.from(
+        { length: MAIL_SEND_ATTACHMENT_LIMITS.maxCount },
+        (_, index) => attachment({ filename: `file-${index},[{}].pdf` }),
+      ),
+      origin: "app",
+      agentLine: false,
+    };
+    const body = JSON.stringify(send);
+    expect(exceeds(body)).toBe(false);
+    const counted = (limit: number) => exceedsMailJsonStructure(bytes(body), limit);
+    // 12 members, 3 lists of 100 addresses, 10 objects of 3 members: 167.
+    expect(counted(166)).toBe(true);
+    expect(counted(167)).toBe(false);
+    expect(167 * 8).toBeLessThan(MAIL_SEND_BODY_MAX_STRUCTURAL_TOKENS);
+  });
+
+  it("refuses the bodies that cost memory to parse, long before their end", () => {
+    expect(exceeds(`{"attachments":[${"{},".repeat(2_000_000)}{}]}`)).toBe(true);
+    expect(exceeds(`[${"1,".repeat(6_000_000)}1]`)).toBe(true);
+    expect(exceeds("[".repeat(1_409))).toBe(true);
+    expect(exceeds(`${"[".repeat(704)}${"]".repeat(704)}`)).toBe(false);
+  });
+
+  it("counts nothing inside a string, whatever escapes it holds", () => {
+    const structure = "[{}],".repeat(2_000);
+    // A string that ends on an escaped backslash ends there.
+    expect(exceeds(`["${structure}\\\\",1]`)).toBe(false);
+    // An escaped quote does not end it, so what follows is still text.
+    expect(exceeds(`["\\"${structure}"]`)).toBe(false);
+    expect(exceeds(`["\\\\\\"${structure}"]`)).toBe(false);
+    // The same structure after the string has ended is counted.
+    expect(exceeds(`["\\\\"${structure}]`)).toBe(true);
+    expect(exceeds(`["text",${structure}]`)).toBe(true);
+    // A string that never ends hides the rest; the parser refuses that body.
+    expect(exceeds(`["${structure}`)).toBe(false);
+  });
+
+  it("reads a body without Node's Buffer, as the codec's other rules do", () => {
+    vi.stubGlobal("Buffer", undefined);
+    try {
+      expect(exceeds('{"a":["b","c"]}')).toBe(false);
+      expect(exceedsMailJsonStructure(bytes('{"a":["b","c"]}'), 4)).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

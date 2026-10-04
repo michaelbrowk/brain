@@ -196,9 +196,17 @@ export function MailRow({
               </span>
             )}
             {/* The domain gives way before the name does: it is the one
-                clue to who a stranger writes for, and still the lesser. */}
+                clue to who a stranger writes for, and still the lesser.
+                Below `md`, where the column is a phone's whole screen, it
+                gives way entirely. The decision keeps 128 of a row that is
+                320 to 430 wide, and what was left of the domain was a stub of
+                three or four letters that named nobody. The row is the name
+                and its two buttons there. The whole address is in the open
+                letter, under the sender's name. The row menu names the
+                domain too, but only where a decision may take a whole domain,
+                which is never one of the big providers or the owner's own. */}
             {waitingOn && (
-              <span className="text-caption min-w-0 shrink-[4] truncate text-ink-3">
+              <span className="text-caption min-w-0 shrink-[4] truncate text-ink-3 max-md:hidden">
                 {senderDomain(waitingOn.address)}
               </span>
             )}

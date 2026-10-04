@@ -552,7 +552,17 @@ export interface MailServiceHealth {
   readonly lastSuccessfulSyncAgeMs: number | null;
   readonly cachePressure: "normal" | "warning" | "critical";
   readonly lastErrorCode: string | null;
+  /**
+   * Which byte transport SMTP submission leaves by, present only when the
+   * service composed an SMTP runtime. Brain reads it to size what a
+   * custom-domain account may attach, since the relay's tunnel carries less
+   * than a direct session does. It names a kind, never a relay URL or a
+   * provider host.
+   */
+  readonly sendTransport?: MailSendTransportKind;
 }
+
+export type MailSendTransportKind = "direct" | "authenticated_byte_relay";
 
 export interface QueueSubmissionRequest extends SmtpSubmissionRequest {
   readonly idempotencyKey: string;

@@ -124,6 +124,7 @@ import type {
 } from "@/lib/mail/message-types";
 import {
   MAIL_CHANGED_EVENT,
+  MAIL_EVENT_DEBOUNCE_MS,
   parseBrainMailEvent,
   type BrainMailEvent,
 } from "@/lib/mail/mail-events";
@@ -175,9 +176,9 @@ const SYNC_HOLD_RETRIES = 3;
  */
 export const MAIL_SAFETY_REFRESH_MS = 5 * 60_000;
 
-/** A burst of events about one account is one page-1 read, this long after
- *  the last of them. */
-export const MAIL_EVENT_DEBOUNCE_MS = 400;
+// The debounce lives beside the event it times (`lib/mail/mail-events.ts`);
+// it is still exported here, where this surface's tests read it.
+export { MAIL_EVENT_DEBOUNCE_MS };
 
 /**
  * Mail events gathered per account, each account handed on

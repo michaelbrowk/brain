@@ -1195,9 +1195,121 @@ test("@release Mail's nav menu stays reachable in a window shorter than itself",
     );
     expect(focused?.onScreen, `focus is off screen at ${height}`).toBe(true);
 
+    // Row by row as well. An arrow key scrolls the next row in to the nearest
+    // edge of the scroller, which is where the fade is, and the scroller
+    // clips whatever a row draws outside itself. So every stop has to stand
+    // clear of the mask with its ring inside the row. The menu moves focus on
+    // a timer after the keydown, so each press waits for the one before it.
+    await page.keyboard.press("Home");
+    await page.waitForFunction(
+      () => document.activeElement === document.querySelector('[role="menuitemradio"]'),
+    );
+    const total = await page.getByRole("menuitemradio").count();
+    for (let step = 1; step < total; step += 1) {
+      await page.keyboard.press("ArrowDown");
+      await page.waitForFunction(
+        (index) =>
+          document.activeElement ===
+          document.querySelectorAll('[role="menuitemradio"]')[index],
+        step,
+      );
+      const stop = await page.evaluate(() => {
+        const active = document.activeElement as HTMLElement;
+        const scroller = active.closest(".edge-fade") as HTMLElement;
+        const row = active.getBoundingClientRect();
+        const box = scroller.getBoundingClientRect();
+        // 12px of mask at the top once scrolled, 20px at the bottom while
+        // content continues (`.edge-fade` in globals.css).
+        const top = scroller.scrollTop > 0 ? 12 : 0;
+        const bottom =
+          scroller.scrollTop + scroller.clientHeight < scroller.scrollHeight - 1 ? 20 : 0;
+        return {
+          label: active.textContent?.trim() ?? "",
+          clear: row.top >= box.top + top - 0.5 && row.bottom <= box.bottom - bottom + 0.5,
+          ringInside: parseFloat(getComputedStyle(active).outlineOffset) < 0,
+        };
+      });
+      expect(stop.clear, `${stop.label} sits under the fade at ${height}`).toBe(true);
+      expect(stop.ringInside, `the scroller clips ${stop.label}'s ring at ${height}`).toBe(
+        true,
+      );
+    }
+
     await page.keyboard.press("Escape");
     await expect(menu).toHaveCount(0);
   }
+});
+
+/* THE RING IN THE MENU BELONGS TO THE KEYS. `html[data-kbd]` is set by an
+   arrow key and cleared only by a pointer down, and Radix focuses the row
+   under the pointer as it moves, so after one arrow key the ring followed the
+   mouse from row to row. The menu says which of the two moved focus last and
+   draws the ring only for the keys, and the row under the keys keeps its own
+   radius instead of the square one the global ring's `inherit` handed it. */
+test("@release Mail's nav menu rings a row for the keys and never for the pointer", async ({
+  page,
+}) => {
+  await login(page);
+  await installMailRoutes(page);
+  await page.goto("/mail");
+  await navTrigger(page).click();
+  const menu = page.locator(".brain-menu");
+  await expect(menu).toBeVisible();
+  const rows = page.getByRole("menuitemradio");
+  const focused = () =>
+    page.evaluate(() => {
+      const style = getComputedStyle(document.activeElement as HTMLElement);
+      return { ring: style.outlineStyle, radius: style.borderTopLeftRadius };
+    });
+  const resting = await rows
+    .nth(5)
+    .evaluate((node) => getComputedStyle(node).borderTopLeftRadius);
+  expect(resting).not.toBe("0px");
+
+  await page.keyboard.press("ArrowDown");
+  await expect(rows.nth(0)).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await expect(rows.nth(1)).toBeFocused();
+  expect(await focused()).toEqual({ ring: "solid", radius: resting });
+
+  // The pointer crosses from the trigger to a row, in one event. Radix hands
+  // that row the focus, and it wears the hover and no ring: coming into the
+  // menu is a move, and its first event is not spent on learning where the
+  // pointer is.
+  const box = await rows.nth(3).boundingBox();
+  if (!box) throw new Error("row not on screen");
+  await page.mouse.move(box.x + 24, box.y + box.height / 2);
+  await expect(rows.nth(3)).toBeFocused();
+  expect((await focused()).ring).toBe("none");
+
+  // And the next key takes the ring back, on the row it moves to.
+  await page.keyboard.press("ArrowDown");
+  await expect(rows.nth(4)).toBeFocused();
+  expect(await focused()).toEqual({ ring: "solid", radius: resting });
+
+  // A pen passing over the menu moves no focus (Radix moves it for a mouse
+  // only), so it does not take the ring off the keyboard's row either.
+  await rows.nth(6).evaluate((row) => {
+    const at = row.getBoundingClientRect();
+    for (const dx of [10, 14, 18]) {
+      row.dispatchEvent(
+        new PointerEvent("pointermove", {
+          bubbles: true,
+          pointerType: "pen",
+          clientX: at.x + dx,
+          clientY: at.y + 8,
+        }),
+      );
+    }
+  });
+  await expect(rows.nth(4)).toBeFocused();
+  expect((await focused()).ring).toBe("solid");
+
+  // The mouse, already inside, moves on: one move, and the ring is gone.
+  await page.mouse.move(box.x + 40, box.y + box.height / 2 + 2);
+  await expect(rows.nth(3)).toBeFocused();
+  expect((await focused()).ring).toBe("none");
+  await page.keyboard.press("Escape");
 });
 
 /* The pane can hold three things, and below the breakpoint only one of them is

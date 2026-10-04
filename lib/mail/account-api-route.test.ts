@@ -4,6 +4,7 @@ import {
   readBoundedMailJson,
   runMailThreadApiAction,
 } from "./account-api-route";
+import { MAIL_SERVICE_HTTP_LIMITS } from "./service/limits";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -69,6 +70,44 @@ describe("readBoundedMailJson", () => {
 
     await expect(result).rejects.toMatchObject({ status: 400 });
     expect(cancelled).toBe(true);
+  });
+
+  const jsonRequest = (body: string) =>
+    new Request("https://brain.test/api/mail/drafts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
+  /** More structure than a send holds, in less than the small cap. */
+  const manyDecisions = `[${"[],".repeat(2_000)}[]]`;
+
+  it("holds a body read past the small cap to the structure of a send", async () => {
+    const parse = vi.spyOn(JSON, "parse");
+    try {
+      await expect(
+        readBoundedMailJson(
+          jsonRequest(manyDecisions),
+          MAIL_SERVICE_HTTP_LIMITS.maxSendBodyBytes,
+        ),
+      ).rejects.toMatchObject({ status: 400 });
+      expect(parse).not.toHaveBeenCalled();
+    } finally {
+      parse.mockRestore();
+    }
+    await expect(
+      readBoundedMailJson(
+        jsonRequest('{"to":["a@example.net","b@example.net"],"attachments":[]}'),
+        MAIL_SERVICE_HTTP_LIMITS.maxSendBodyBytes,
+      ),
+    ).resolves.toEqual({ to: ["a@example.net", "b@example.net"], attachments: [] });
+  });
+
+  it("leaves a body under the small cap to its own route's shape", async () => {
+    // Sixteen kibibytes cost nothing to parse, and a route that reads them
+    // may take a longer list than a send does.
+    await expect(readBoundedMailJson(jsonRequest(manyDecisions))).resolves.toHaveLength(
+      2_001,
+    );
   });
 });
 

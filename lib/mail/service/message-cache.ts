@@ -965,10 +965,29 @@ export class SqliteMailMessageCache {
         state.retryAt !== null &&
         state.retryAt > timestamp
       ) {
+        // `retry_at` is a wall-clock time because it has to hold across a
+        // restart, and no failure ever sets it further off than the longest
+        // backoff. One that is further off than that was set before the
+        // clock went back, by NTP or a restored VM, and would hold the
+        // account for the jump on top of its rest. It rests the longest
+        // backoff from now instead, and the shorter time is written down so
+        // the next attempt and the next process count from the same moment.
+        const latestRetryAt = validateTimestamp(
+          timestamp + BACKGROUND_SYNC_MAX_BACKOFF_MS,
+        );
+        if (state.retryAt > latestRetryAt) {
+          database
+            .prepare(
+              `UPDATE background_sync_control
+                  SET retry_at = ?
+                WHERE account_id = ?`,
+            )
+            .run(latestRetryAt, this.accountId);
+        }
         return Object.freeze({
           allowed: false as const,
           status: "backoff" as const,
-          retryAt: state.retryAt,
+          retryAt: Math.min(state.retryAt, latestRetryAt),
         });
       }
       if (state.syncStatus === "backoff" || state.failureCount > 0) {

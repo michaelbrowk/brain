@@ -273,5 +273,19 @@ describe("MailRow", () => {
     expect(row.textContent).toContain("okafor.example");
     expect(row.textContent).not.toContain("Priya Raman");
     expect(row.querySelector("time")).toBeNull();
+
+    // On a phone the row holds a name and two buttons and no more. The 128
+    // the decision keeps left the domain a stub of three or four letters
+    // ("oka…"), which names nobody, so below the column's phone breakpoint
+    // it is not drawn at all. jsdom applies no media query: this holds the
+    // declaration, and `e2e/mail-new-senders.spec.ts` the two widths.
+    const domain = [...row.querySelectorAll("span")].find(
+      (span) => span.textContent === "okafor.example",
+    );
+    expect(domain?.classList.contains("max-md:hidden")).toBe(true);
+    const name = [...row.querySelectorAll("span")].find(
+      (span) => span.textContent === "Lena Okafor",
+    );
+    expect(name?.classList.contains("max-md:hidden")).toBe(false);
   });
 });

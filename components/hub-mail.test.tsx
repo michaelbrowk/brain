@@ -710,6 +710,36 @@ describe("the Mail block on Home", () => {
       }
     });
 
+    it("keeps the block away when an older read answers after a newer one found no account", async () => {
+      // "No account" is an answer that lands, like rows are. The last
+      // mailbox was disconnected while a read was out, the newer read saw
+      // none and took the block away, and the older read's rows must not
+      // draw a Mail block for a mailbox that is no longer connected.
+      const a = account("account-a1", "ada@example.test");
+      let asks = 0;
+      const held: ((value: MailThreadPage) => void)[] = [];
+      await mount({
+        loadAccounts: async () => {
+          asks += 1;
+          return asks === 1 ? [a] : [];
+        },
+        threads: () => new Promise<MailThreadPage>((resolve) => held.push(resolve)),
+      });
+      expect(host.querySelector("[data-hub-mail-pending]")).not.toBeNull();
+
+      await act(async () => mailEvent(synced()));
+      await pass(MAIL_EVENT_DEBOUNCE_MS);
+      expect(asks).toBe(2);
+      expect(host.querySelector("[data-hub-mail]")).toBeNull();
+
+      await act(async () =>
+        held[0](page([thread({ accountId: a.accountId, threadId: "older" })])),
+      );
+      await settle();
+      expect(host.querySelector("[data-hub-mail]")).toBeNull();
+      expect(sessionStorage.getItem("brain-hub-mail-v2")).toBeNull();
+    });
+
     it("keeps the newer read when an older one answers after it", async () => {
       // Events make reads frequent enough to overlap, and a slow first answer
       // landing last would put back the rows the second one had replaced.

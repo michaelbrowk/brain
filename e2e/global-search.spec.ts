@@ -438,3 +438,67 @@ test("@release a letter the palette found outside Inbox opens in the mailbox its
   expect(reads.mailbox).toBeGreaterThanOrEqual(1);
   expect(reads.inbox).toBe(0);
 });
+
+test("@release the palette names a mailbox it could not search, and drops the line once it can", async ({
+  page,
+}) => {
+  test.setTimeout(90_000);
+  await login(page);
+  await installMailRoutes(page);
+  // The first minutes after the mail service restarts: the account answers,
+  // with no rows and the cache's own word for why. Registered after the
+  // shared routes, so this one answers.
+  let synced = false;
+  await page.route("**/api/mail/search/all", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json; charset=utf-8",
+      body: JSON.stringify({
+        apiVersion: 1,
+        threads: synced ? [thread] : [],
+        accounts: [
+          {
+            accountId: account.accountId,
+            emailAddress: account.emailAddress,
+            mailboxId: "all",
+            availability: synced
+              ? {
+                  status: "available",
+                  lastSuccessfulAt: 1_700_000_000_000,
+                  windowTruncated: false,
+                }
+              : {
+                  status: "unavailable",
+                  reason: "global_syncing",
+                  lastSuccessfulAt: null,
+                  windowTruncated: null,
+                },
+            indexStatus: "ready",
+            resultsTruncated: false,
+          },
+        ],
+        indexBuilding: false,
+        truncated: false,
+      }),
+    }),
+  );
+  await page.goto("/");
+
+  await openPalette(page);
+  const palette = page.getByRole("combobox", { name: "Search and commands" });
+  // Nothing else in a fresh notes folder answers this word, so without the
+  // line the palette would say "No results" for a mailbox it never read.
+  await palette.fill("zzquarterly");
+  const mailGroup = page.locator("[cmdk-group]", { has: heading(page, "Mail") });
+  await expect(mailGroup.getByRole("status")).toHaveText(
+    `${account.emailAddress} is still syncing. Some letters may be missing.`,
+  );
+  await expect(page.getByText(/No results for/)).toHaveCount(0);
+
+  // The mailbox finishes, the next ask reads it, and the line is gone.
+  synced = true;
+  await palette.fill("quarterly");
+  await expect(page.getByRole("option", { name: /Quarterly launch review/ })).toBeVisible();
+  await expect(mailGroup.getByRole("status")).toHaveCount(0);
+  await page.keyboard.press("Escape");
+});

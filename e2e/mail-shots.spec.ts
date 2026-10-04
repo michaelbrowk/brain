@@ -2446,13 +2446,62 @@ test.describe("mail nav measurements", () => {
       // The keyboard walk: Down until it stops moving, then read where it
       // stopped and whether that row is on screen. A row focus can reach but
       // the window cannot show is worse than one it cannot reach at all.
+      //
+      // EACH PRESS WAITS FOR THE ONE BEFORE IT TO LAND. The menu moves its
+      // roving focus on a timer after the keydown and reads "next" off the
+      // row that holds focus at that keydown, so a press sent before the
+      // last one landed is the same press again. This walk used to send 24
+      // of them about 2ms apart, which no keyboard does (a held key repeats
+      // about 30ms apart at the fastest system setting), and most of them
+      // collapsed: focus moved four to six rows and the walk reported the
+      // row it happened to be on as one the keyboard "cannot get past".
+      //
+      // Every stop is also measured against the fade it was scrolled in
+      // beside: a row brought in flush to the scroller's edge is on screen
+      // by its box and dissolved by the mask.
       let lastFocus = "";
+      const underFade: string[] = [];
+      const ringClipped: string[] = [];
       for (let press = 0; press < 24; press += 1) {
         await page.keyboard.press("ArrowDown");
-        lastFocus = await page.evaluate(() => {
-          const active = document.activeElement as HTMLElement | null;
-          return active?.querySelector("span")?.textContent?.trim() ?? "";
+        const moved = await page
+          .waitForFunction(
+            (before) =>
+              (document.activeElement?.querySelector("span")?.textContent?.trim() ??
+                "") !== before,
+            lastFocus,
+            { timeout: 500 },
+          )
+          .then(
+            () => true,
+            () => false,
+          );
+        if (!moved) break;
+        const stop = await page.evaluate(() => {
+          const active = document.activeElement as HTMLElement;
+          const scroller = active.closest(".edge-fade") as HTMLElement;
+          const row = active.getBoundingClientRect();
+          const box = scroller.getBoundingClientRect();
+          // The mask is 12px at the top once scrolled and 20px at the bottom
+          // while content continues (`.edge-fade`). The attributes that turn
+          // it on follow an observer; the scroll position says the same now.
+          const top = scroller.scrollTop > 0 ? 12 : 0;
+          const bottom =
+            scroller.scrollTop + scroller.clientHeight < scroller.scrollHeight - 1
+              ? 20
+              : 0;
+          return {
+            label: active.querySelector("span")?.textContent?.trim() ?? "",
+            clear:
+              row.top >= box.top + top - 0.5 &&
+              row.bottom <= box.bottom - bottom + 0.5,
+            // A ring outside the row is outside the scroller, which clips it.
+            ringInside: parseFloat(getComputedStyle(active).outlineOffset) < 0,
+          };
         });
+        lastFocus = stop.label;
+        if (!stop.clear) underFade.push(stop.label);
+        if (!stop.ringInside) ringClipped.push(stop.label);
       }
       const focusVisible = await page.evaluate(() => {
         const active = document.activeElement as HTMLElement | null;
@@ -2493,6 +2542,8 @@ test.describe("mail nav measurements", () => {
       expect(lastFocus, "the keyboard cannot reach the last row").toBe(
         byPointer?.label,
       );
+      expect(underFade, "focus scrolled a row in under the fade").toEqual([]);
+      expect(ringClipped, "the ring stands outside a row the scroller clips").toEqual([]);
 
       NAV_NOTES.push(
         [
@@ -2504,7 +2555,8 @@ test.describe("mail nav measurements", () => {
           `- scroller: ${fit.scroller ? `\`.${fit.scroller.cls}\` ${fit.scroller.client} of ${fit.scroller.scroll}` : "**none**"}`,
           `- rows below the fold at rest: **${fit.offscreen.length}**${fit.offscreen.length > 0 ? ` — ${fit.offscreen.join(", ")}` : ""}`,
           `- rolled to the end, the last row (**${byPointer?.label}**) is on screen: **${byPointer?.onScreen}**`,
-          `- after 24 × Down, focus is on **${lastFocus || "(nothing)"}**, on screen: **${focusVisible}**`,
+          `- Down until it stops, focus is on **${lastFocus || "(nothing)"}**, on screen: **${focusVisible}**`,
+          `- stops scrolled in under the fade: **${underFade.length}**, stops whose ring the scroller clips: **${ringClipped.length}**`,
           "",
         ].join("\n"),
       );

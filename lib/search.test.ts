@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   assertSearchReady,
   buildSearchTextTarget,
+  MAX_LINES_READ,
   MAX_MATCH_LINES,
   rankSearchCandidate,
   runBodySearch,
@@ -260,6 +261,11 @@ describe("the search plan", () => {
 });
 
 describe("bounded ripgrep output", () => {
+  /** One `match` line as `rg --json` prints it. */
+  const matchLine = (text: string) =>
+    '{"type":"match","data":{"path":{"text":"./note/index.md"},' +
+    `"lines":{"text":"${text}"},"line_number":1}}`;
+
   it("answers the first matches it has, stops the process, and logs nothing", async () => {
     const line =
       '{"type":"match","data":{"path":{"text":"./note/index.md"},' +
@@ -303,14 +309,11 @@ describe("bounded ripgrep output", () => {
   it("neither answers nor counts a line the caller refuses", async () => {
     // The cap is on what is answered. A run that drops frontmatter while it
     // reads has to reach three hundred body lines, not three hundred lines.
-    const match = (text: string) =>
-      '{"type":"match","data":{"path":{"text":"./note/index.md"},' +
-      `"lines":{"text":"${text}"},"line_number":1}}`;
     const body = [
       "i=0",
       "while [ $i -lt 400 ]; do",
-      `printf '%s\\n' '${match("created: 15")}'`,
-      `printf '%s\\n' '${match("body 15")}'`,
+      `printf '%s\\n' '${matchLine("created: 15")}'`,
+      `printf '%s\\n' '${matchLine("body 15")}'`,
       "i=$((i+1))",
       "done",
       "sleep 30",
@@ -324,6 +327,97 @@ describe("bounded ripgrep output", () => {
       );
       expect(lines).toHaveLength(MAX_MATCH_LINES);
       expect(lines.every((line) => line.includes("body 15"))).toBe(true);
+    });
+  });
+
+  it("stops reading at ten lines for every one it may answer, kept or not", async () => {
+    // A word in every page's `created` and `updated` and in no body: nothing
+    // is kept, so the cap on answers never fires, and without a second bound
+    // the run read the whole notebook, eighty thousand lines over twenty
+    // thousand pages where it had read six hundred.
+    expect(MAX_LINES_READ).toBe(10 * MAX_MATCH_LINES);
+    const body = [
+      "echo $$ > pid",
+      "i=0",
+      `while [ $i -lt 10000 ]; do printf '%s\\n' '${matchLine("created: 15")}'; i=$((i+1)); done`,
+      "exec sleep 30",
+    ].join("\n");
+
+    await withFakeRipgrep(body, async (cwd) => {
+      let asked = 0;
+      const lines = await runRipgrep(["needle"], cwd, () => {
+        asked += 1;
+        return false;
+      });
+      expect(lines).toEqual([]);
+      expect(asked).toBe(MAX_LINES_READ);
+      const pid = Number((await fs.readFile(path.join(cwd, "pid"), "utf8")).trim());
+      expect(await died(pid)).toBe(true);
+    });
+  });
+
+  it("answers what it kept when the time runs out, and refuses when it kept nothing", async () => {
+    // A run that is slow after its first matches has still found them. One
+    // that is slow before any is a search that did not happen, and saying
+    // "nothing found" for it would be a lie about the notes.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const some = [
+        `printf '%s\\n' '${matchLine("first")}'`,
+        `printf '%s\\n' '${matchLine("second")}'`,
+        "exec sleep 30",
+      ].join("\n");
+      await withFakeRipgrep(some, async (cwd) => {
+        let read = 0;
+        let bothRead: () => void = () => {};
+        const twoLines = new Promise<void>((resolve) => {
+          bothRead = resolve;
+        });
+        const run = runRipgrep(["needle"], cwd, () => {
+          read += 1;
+          if (read === 2) bothRead();
+          return true;
+        });
+        await twoLines;
+        await vi.advanceTimersByTimeAsync(3_000);
+        expect(await run).toHaveLength(2);
+      });
+
+      await withFakeRipgrep("exec sleep 30", async (cwd) => {
+        const run = runRipgrep(["needle"], cwd);
+        const refused = expect(run).rejects.toEqual(
+          expect.objectContaining<SearchBackendError>({
+            name: "SearchBackendError",
+            message: "ripgrep search timed out",
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(3_000);
+        await refused;
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("skips a line past the limit once it has something to answer", async () => {
+    // The fourth match of a page, 600 KB of it. The three before it are an
+    // answer already, and the whole search used to be refused over a line it
+    // was never going to show.
+    const body = [
+      `printf '%s\\n' '${matchLine("one")}'`,
+      `printf '%s\\n' '${matchLine("two")}'`,
+      `printf '%s\\n' '${matchLine("three")}'`,
+      "head -c 600000 /dev/zero | tr '\\0' x",
+      "echo",
+      `printf '%s\\n' '${matchLine("after")}'`,
+      "exit 0",
+    ].join("\n");
+
+    await withFakeRipgrep(body, async (cwd) => {
+      const lines = await runRipgrep(["needle"], cwd);
+      expect(lines).toEqual(
+        ["one", "two", "three", "after"].map((text) => matchLine(text)),
+      );
     });
   });
 
@@ -559,9 +653,28 @@ describe("one search run over a page", () => {
     },
   );
 
+  it.skipIf(!HAS_RIPGREP)(
+    "keeps three lines of a page that holds the word on ten, with ripgrep offering them all",
+    async () => {
+      // No key holds the word here, so the whole budget is body and ripgrep
+      // hands over all ten. The three are this side's to count.
+      const body = Array.from({ length: 10 }, (_unused, n) => `body ${n + 1} ${WORD}`);
+      await withPage(`---\nid: p1\ntitle: Plain\n---\n${body.join("\n")}\n`, async (root) => {
+        expect(texts(await runBodySearch(WORD, root))).toEqual(
+          body.slice(0, 3).map((line) => `${line}\n`),
+        );
+      });
+    },
+  );
+
   it.skipIf(!HAS_RIPGREP)("answers no managed key, whichever one it is", async () => {
     await withPage(`---\n${everyManagedKey}\n---\nnothing here\n`, async (root) => {
       expect(await runBodySearch(WORD, root)).toEqual([]);
+    });
+    // A key whose value is on the lines under it is a line of its own, and a
+    // query for the word the key is spelled with must not be answered by it.
+    await withPage("---\nid: p1\ntags:\n  - work\n---\nnothing here\n", async (root) => {
+      expect(await runBodySearch("tags", root)).toEqual([]);
     });
   });
 

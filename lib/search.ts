@@ -662,6 +662,20 @@ function rgLines(pattern: string, maxCount: number): Promise<string[]> {
  *  anything narrower than the cap. */
 export const MAX_MATCH_LINES = 300;
 
+/** How many lines of ripgrep's output one run reads, answered or not: three
+ *  thousand, ten for every line it may answer.
+ *
+ *  THE CAP ABOVE IS ON ANSWERS, AND A RUN CAN READ FOR A LONG TIME WITHOUT
+ *  ONE. A line the caller refuses is not counted there, so a word that is in
+ *  every page's `created` and `updated` and in nobody's body read the whole
+ *  notebook: eighty thousand lines over twenty thousand pages, where the run
+ *  had read six hundred before the refusing was moved into the reading. This
+ *  is the bound on that. Ten times is the room the per-page budget needs: at
+ *  the worst a page costs a line for each key the store manages and three
+ *  more, about sixty with ripgrep's two of its own, so a run stopped here has
+ *  still read forty-nine such pages, twice `MAX_HITS` and more. */
+export const MAX_LINES_READ = 10 * MAX_MATCH_LINES;
+
 /** The one thing bytes are still counted for: a single line past this cannot
  *  be answered out of half of itself, and nothing downstream will parse it.
  *  Measured in bytes with `Buffer.byteLength`, not in `String.length`, which
@@ -675,7 +689,8 @@ export function runRipgrep(
   args: string[],
   cwd: string = NOTES_ROOT,
   /** Asked of every line as it is read. A line it refuses is not answered
-   *  and is not counted against `MAX_MATCH_LINES`. */
+   *  and is not counted against `MAX_MATCH_LINES`, only against
+   *  `MAX_LINES_READ`. */
   keep: (line: string) => boolean = () => true,
 ): Promise<string[]> {
   return new Promise((resolve, reject) => {
@@ -687,6 +702,8 @@ export function runRipgrep(
     const lines: string[] = [];
     let pending = "";
     let matches = 0;
+    let read = 0;
+    let skippingLine = false;
     let stderr = "";
     let settled = false;
     let exceededOutputLimit = false;
@@ -697,9 +714,19 @@ export function runRipgrep(
       if (error) reject(error);
       else resolve(lines);
     };
+    // WHAT THE RUN HAS IS AN ANSWER, AND NOTHING IS NOT ONE. A run that is
+    // out of time after its first matches found them, and a line too long to
+    // show does not unfind the lines before it, so both end with what was
+    // kept. With nothing kept the same two are a search that did not happen,
+    // and answering "nothing found" for it would be a claim about the notes
+    // that nobody checked. That stays a refusal.
     const timer = setTimeout(() => {
       rg.kill("SIGKILL");
-      finish(new SearchBackendError("ripgrep search timed out"));
+      finish(
+        lines.length > 0
+          ? undefined
+          : new SearchBackendError("ripgrep search timed out"),
+      );
     }, TIMEOUT_MS);
     // Decoded here rather than by concatenating buffers: a multi-byte
     // character split across two chunks is one character again.
@@ -708,18 +735,31 @@ export function runRipgrep(
       // Nothing after the answer or after the guard: a kill is not instant,
       // and a chunk already in flight must not reopen a run that is over.
       if (settled || exceededOutputLimit) return;
+      if (skippingLine) {
+        // The rest of a line that was too long to keep: dropped up to the
+        // newline that ends it, and never held.
+        const end = chunk.indexOf("\n");
+        if (end === -1) return;
+        skippingLine = false;
+        chunk = chunk.slice(end + 1);
+      }
       pending += chunk;
       let newline = pending.indexOf("\n");
       while (newline !== -1) {
         const line = pending.slice(0, newline);
         pending = pending.slice(newline + 1);
-        if (line && keep(line)) {
-          lines.push(line);
-          if (MATCH_LINE.test(line)) matches += 1;
+        if (line) {
+          read += 1;
+          if (keep(line)) {
+            lines.push(line);
+            if (MATCH_LINE.test(line)) matches += 1;
+          }
         }
-        if (matches >= MAX_MATCH_LINES) {
+        if (matches >= MAX_MATCH_LINES || read >= MAX_LINES_READ) {
           // Answered, not refused: these are the first matches, and ripgrep
           // has no more work to do for a caller that keeps twenty of them.
+          // At the second bound the answer may be short or empty, which is
+          // what this run answered before it refused lines as it read them.
           rg.kill("SIGKILL");
           finish();
           return;
@@ -727,8 +767,14 @@ export function runRipgrep(
         newline = pending.indexOf("\n");
       }
       if (Buffer.byteLength(pending) > MAX_LINE_BYTES) {
-        exceededOutputLimit = true;
-        rg.kill("SIGKILL");
+        if (lines.length === 0) {
+          exceededOutputLimit = true;
+          rg.kill("SIGKILL");
+          return;
+        }
+        read += 1;
+        pending = "";
+        skippingLine = true;
       }
     });
     rg.stderr.on("data", (chunk) => {

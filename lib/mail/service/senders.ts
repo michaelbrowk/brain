@@ -1107,6 +1107,31 @@ export interface MailSenderBackfillBatch {
   readonly cacheReady: boolean;
 }
 
+/** Why an account's Sent mailbox was not read: the server lists none, or it
+ *  answered the read-only open with a refusal. */
+export type MailSentScanRefusal = "no_sent_mailbox" | "examine_refused";
+
+/**
+ * One bounded read of the Sent mailbox of an account whose cache holds its
+ * Inbox alone. Addresses and counts only: no name, no subject, no Message-ID
+ * and no Bcc leaves the provider adapter.
+ */
+export type MailSentScanResult =
+  | {
+      readonly status: "scanned";
+      /** Where the next read resumes. Only the provider adapter reads it. */
+      readonly cursor: string;
+      /** Raw To and Cc addresses of the envelopes read. */
+      readonly recipients: readonly string[];
+      /** Raw From addresses of the same envelopes. */
+      readonly senders: readonly string[];
+      readonly envelopeCount: number;
+      /** The stored cursor named another UIDVALIDITY, so the walk began again. */
+      readonly uidValidityChanged: boolean;
+      readonly hasMore: boolean;
+    }
+  | { readonly status: "unavailable"; readonly reason: MailSentScanRefusal };
+
 export interface MailSenderAccount {
   readonly accountId: string;
   readonly address: string;

@@ -14,6 +14,7 @@ import { ImapFlow, type ImapFlowOptions } from "imapflow";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { MailDnsResolverPort, ValidatedMailDialTarget } from "../ports";
+import { ImapMailSyncAdapter } from "../providers/imap/sync-adapter";
 import type { MultiMailAccountStore } from "./account-store";
 import type { StoredImapMailAccount } from "./account-types";
 import { MailImapIdleSupervisor } from "./imap-idle";
@@ -143,6 +144,117 @@ describe("IMAP IDLE against a real ImapFlow session", () => {
     expect(events).toEqual([{ event: "mail_imap_idle_connected", accountId }]);
   });
 });
+
+describe("the Sent-folder scan against a real ImapFlow session", () => {
+  it("examines the Sent mailbox and fetches envelopes only, and nothing that writes", async () => {
+    const commands: string[] = [];
+    const server = createTlsServer(testTls, (socket) => {
+      serveSentImap(socket, commands);
+    });
+    const port = await listen(server);
+    const account = imapAccountFor(port);
+    const adapter = new ImapMailSyncAdapter(
+      account,
+      new ImapFlowReadSessionFactory({
+        dns: { resolve: async () => [targetFor(port, "implicit")] },
+        store: storeFor(account),
+        createClient: (options: ImapFlowOptions) =>
+          new ImapFlow({ ...options, tls: { ...options.tls, ca: testTls.cert } }),
+      }),
+    );
+
+    const result = await adapter.scanSentEnvelopes(
+      { cursor: null },
+      new AbortController().signal,
+    );
+
+    expect(result).toEqual({
+      status: "scanned",
+      cursor: "s1_77_12_0_0_0",
+      recipients: ["lena@example.org", "boss@example.org", "team@example.org"],
+      senders: ["person@example.test", "alias@example.test"],
+      envelopeCount: 2,
+      uidValidityChanged: false,
+      hasMore: false,
+    });
+    const names = commandNames(commands);
+    // LIST and LSUB are how ImapFlow reads the folders; the rest is the scan.
+    expect(
+      names
+        .slice(names.indexOf("LOGIN"))
+        .filter((name) => !["CAPABILITY", "LIST", "LSUB"].includes(name)),
+    ).toEqual(["LOGIN", "EXAMINE", "FETCH"]);
+    expect(commands.find((line) => line.includes("EXAMINE"))).toMatch(/EXAMINE "?Outgoing"?$/);
+    // The whole fetch: two sequence numbers, UID and ENVELOPE. No BODY, no
+    // RFC822, no FLAGS, and no item that could set \Seen.
+    expect(commands.find((line) => line.includes("FETCH"))).toMatch(
+      /^\S+ FETCH 1:2 \(UID ENVELOPE\)$/,
+    );
+  });
+});
+
+function serveSentImap(socket: TLSSocket, commands: string[]): void {
+  socket.once("error", () => undefined);
+  socket.write("* OK fake IMAP ready\r\n");
+  const person = '("Person" NIL "person" "example.test")';
+  const envelope = (from: string, to: string, cc: string, bcc: string, id: string) =>
+    `("Mon, 01 Jan 2024 10:00:00 +0000" "Subject" (${from}) (${from}) (${from}) ${to} ${cc} ${bcc} NIL "<${id}@example.test>")`;
+  attachLineReader(socket, commands, (tag, command) => {
+    if (command === "CAPABILITY") {
+      socket.write(
+        `* CAPABILITY IMAP4rev1 SPECIAL-USE\r\n${tag} OK CAPABILITY completed\r\n`,
+      );
+      return;
+    }
+    if (command === "LOGIN") {
+      socket.write(`${tag} OK LOGIN completed\r\n`);
+      return;
+    }
+    if (command === "LIST" || command === "LSUB") {
+      const line = commands.at(-1) ?? "";
+      const entries = line.includes("*")
+        ? `* ${command} (\\HasNoChildren) "/" INBOX\r\n` +
+          `* ${command} (\\HasNoChildren \\Sent) "/" Outgoing\r\n`
+        : line.includes("Outgoing")
+          ? `* ${command} (\\HasNoChildren \\Sent) "/" Outgoing\r\n`
+          : `* ${command} (\\Noselect) "/" ""\r\n`;
+      socket.write(`${entries}${tag} OK ${command} completed\r\n`);
+      return;
+    }
+    if (command === "EXAMINE") {
+      socket.write(
+        "* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)\r\n" +
+          "* OK [PERMANENTFLAGS ()] No permanent flags permitted\r\n" +
+          "* 2 EXISTS\r\n" +
+          "* OK [UIDVALIDITY 77] UIDs valid\r\n" +
+          "* OK [UIDNEXT 13] Predicted next UID\r\n" +
+          `${tag} OK [READ-ONLY] EXAMINE completed\r\n`,
+      );
+      return;
+    }
+    if (command === "FETCH") {
+      socket.write(
+        `* 1 FETCH (UID 11 ENVELOPE ${envelope(
+          person,
+          '(("Lena" NIL "lena" "example.org"))',
+          '(("Boss" NIL "boss" "example.org"))',
+          '(("Hidden" NIL "hidden" "example.org"))',
+          "sent-11",
+        )})\r\n` +
+          `* 2 FETCH (UID 12 ENVELOPE ${envelope(
+            '("Person" NIL "alias" "example.test")',
+            '(("Team" NIL "team" "example.org") ("Lena" NIL "LENA" "Example.org"))',
+            "NIL",
+            "NIL",
+            "sent-12",
+          )})\r\n` +
+          `${tag} OK FETCH completed\r\n`,
+      );
+      return;
+    }
+    socket.write(`${tag} BAD unsupported test command\r\n`);
+  });
+}
 
 function serveIdleImap(socket: TLSSocket, commands: string[]): void {
   socket.once("error", () => undefined);

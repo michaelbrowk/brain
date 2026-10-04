@@ -37,6 +37,10 @@ import {
   MAX_IMAP_READ_LITERAL_BYTES,
   type ImapSessionClient,
 } from "../../service/imapflow-adapter";
+import type {
+  MailSentScanRefusal,
+  MailSentScanResult,
+} from "../../service/senders";
 
 const MAX_PAGE_ITEMS = 20;
 const MAX_INITIAL_MESSAGES = 200;
@@ -72,6 +76,20 @@ const MAX_TRACKED_RELOCATIONS = 256;
 const MOVE_CAPABILITY = "MOVE";
 /** How long LIST's answer about role folders, and a refused CREATE, are trusted. */
 const ROLE_REFUSAL_TTL_MS = 10 * 60_000;
+/**
+ * Envelopes one Sent-folder scan session asks for. An ENVELOPE is a few
+ * hundred bytes, so a full batch is a response of some hundred kilobytes that
+ * a session reads well inside its ten seconds.
+ */
+export const IMAP_SENT_SCAN_BATCH = 250;
+/**
+ * How far back the first scan of a Sent folder walks, newest first. At one
+ * batch a minute that is twenty minutes of sessions, which a mailbox of any
+ * age finishes the same evening it is connected, and five thousand sent
+ * letters hold the people an owner writes to now. Whoever was last written to
+ * before that waits once in New senders, as everyone did before the scan.
+ */
+export const IMAP_SENT_SCAN_FIRST_RUN_CAP = 5_000;
 
 export interface ImapReadSessions {
   withSession<T>(
@@ -159,6 +177,13 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
    * the service would otherwise refuse until the next restart.
    */
   private mailboxRolesAt = 0;
+  /**
+   * What LIST last said about the Sent mailbox, or the server's refusal to
+   * open it, trusted for ROLE_REFUSAL_TTL_MS like the roles above. It is kept
+   * apart from `mailboxRoles` on purpose: that cache being filled means the
+   * archive's one CREATE has been tried, and a scan must not say so.
+   */
+  private sentMailbox: SentMailboxAnswer | null = null;
   private readonly now: () => number;
 
   constructor(
@@ -418,6 +443,82 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
     signal: AbortSignal,
   ): Promise<void> {
     await this.moveThread(threadId, spam ? "junk" : "inbox", signal);
+  }
+
+  /**
+   * One bounded read of the Sent mailbox for the new-senders screen: whom the
+   * owner wrote to, and which addresses he writes from. The cache holds the
+   * Inbox alone, so a letter sent from another client is seen nowhere else.
+   *
+   * One session a call. The mailbox is examined read-only and the only fetch
+   * is `UID ENVELOPE`: no body, no header block, no flag, and nothing is ever
+   * stored, moved or created. An ENVELOPE carries Bcc on the wire, because
+   * the protocol has no envelope without it; this adapter never reads that
+   * field. Mail that arrived since the cursor is read first, by UID; then the
+   * first walk goes on, newest first. The caller spaces the calls.
+   *
+   * A server with no Sent mailbox, or one that refuses to open it, is an
+   * answer and not a failure, and it is remembered for ROLE_REFUSAL_TTL_MS so
+   * hearing it again costs no session. A connection that drops is a failure.
+   */
+  async scanSentEnvelopes(
+    input: { readonly cursor: string | null },
+    signal: AbortSignal,
+  ): Promise<MailSentScanResult> {
+    const remembered = this.rememberedSentMailbox();
+    if (remembered !== null && remembered.refusal !== null) {
+      return sentScanUnavailable(remembered.refusal);
+    }
+    return this.run(signal, async (client) => {
+      const path = remembered?.path ?? (await this.listSentMailbox(client));
+      if (path === null) return sentScanUnavailable("no_sent_mailbox");
+      let examined = false;
+      try {
+        return await withMailbox(client, path, true, (mailbox) => {
+          examined = true;
+          return readSentEnvelopes(client, mailbox, parseSentScanCursor(input.cursor));
+        });
+      } catch (error) {
+        if (examined || !isServerAnswer(error)) throw error;
+        // A tagged NO to the EXAMINE: the folder LIST named is gone, or an
+        // ACL keeps it shut. LIST is asked again once this answer is old.
+        this.sentMailbox = Object.freeze({
+          path: null,
+          refusal: "examine_refused",
+          at: this.now(),
+        });
+        return sentScanUnavailable("examine_refused");
+      }
+    });
+  }
+
+  private rememberedSentMailbox(): SentMailboxAnswer | null {
+    if (
+      this.sentMailbox !== null &&
+      this.now() - this.sentMailbox.at > ROLE_REFUSAL_TTL_MS
+    ) {
+      this.sentMailbox = null;
+    }
+    return this.sentMailbox;
+  }
+
+  private async listSentMailbox(client: ImapSessionClient): Promise<string | null> {
+    let listed: unknown;
+    try {
+      listed = await client.list();
+    } catch (error) {
+      throw mapImapProviderError(error);
+    }
+    if (!isSupportedMailboxList(listed)) {
+      throw new MailProviderSyncError("mail_provider_response_invalid");
+    }
+    const path = selectImapMailboxPath("sent", listed);
+    this.sentMailbox = Object.freeze({
+      path,
+      refusal: path === null ? "no_sent_mailbox" : null,
+      at: this.now(),
+    });
+    return path;
   }
 
   /** `\Seen` and `\Flagged` are set where the message already is. */
@@ -1084,6 +1185,171 @@ function metadataFetchQuery() {
     // the read-only session stays flag-neutral.
     headers: ["list-id", "list-unsubscribe", "precedence", "auto-submitted"],
   });
+}
+
+interface SentMailboxAnswer {
+  /** The path LIST named, or null with the reason there is none to read. */
+  readonly path: string | null;
+  readonly refusal: MailSentScanRefusal | null;
+  readonly at: number;
+}
+
+/**
+ * Where a Sent-folder scan stands, as the `s1_…` token the caller stores.
+ * `highestUid` is the newest UID already read: every later run fetches only
+ * the UIDs above it. The three walk fields are the first run going down
+ * through what the folder held when it began, and all zero once it is over.
+ */
+interface SentScanCursor {
+  readonly uidValidity: bigint;
+  readonly highestUid: number;
+  /** The sequence number the next walk batch ends at. */
+  readonly walkEndSequence: number;
+  /** Every UID at or above this one has been read by the walk. */
+  readonly walkUpperUid: number;
+  /** Envelopes the walk may still ask for under the first-run cap. */
+  readonly walkRemaining: number;
+}
+
+function sentScanUnavailable(reason: MailSentScanRefusal): MailSentScanResult {
+  return Object.freeze({ status: "unavailable", reason });
+}
+
+/** ENVELOPE, and the UID that says where it stands. Nothing else is fetched. */
+function sentEnvelopeFetchQuery() {
+  return Object.freeze({ uid: true, envelope: true });
+}
+
+/**
+ * One batch of envelopes from the examined Sent mailbox.
+ *
+ * Mail above the cursor is fetched by UID, a range no wider than the batch.
+ * The walk down goes by sequence number under a UID ceiling instead: UIDs in
+ * a folder the owner prunes are sparse, and a UID range there can cost a
+ * session for nothing, while a sequence range always holds as many letters as
+ * it is wide. Sequence numbers move when another client expunges between two
+ * sessions, and only ever down, so an unread letter is never above the stored
+ * end; a read one that slid into the range is recognised by its UID and left
+ * out. The cap counts the range asked for, so the first run never fetches
+ * more envelopes than it.
+ */
+async function readSentEnvelopes(
+  client: ImapSessionClient,
+  mailbox: MailboxObject,
+  stored: SentScanCursor | null,
+): Promise<MailSentScanResult> {
+  const uidValidity = validateUidValidity(mailbox.uidValidity);
+  const uidNext = validateUid(mailbox.uidNext);
+  const exists = validateExists(mailbox.exists);
+  const uidValidityChanged = stored !== null && stored.uidValidity !== uidValidity;
+  let cursor: SentScanCursor =
+    stored === null || uidValidityChanged
+      ? {
+          uidValidity,
+          highestUid: uidNext - 1,
+          walkEndSequence: exists,
+          walkUpperUid: uidNext,
+          walkRemaining: Math.min(exists, IMAP_SENT_SCAN_FIRST_RUN_CAP),
+        }
+      : stored;
+  let messages: readonly FetchMessageObject[] = [];
+  if (uidNext - 1 > cursor.highestUid) {
+    const startUid = cursor.highestUid + 1;
+    const endUid = Math.min(uidNext - 1, cursor.highestUid + IMAP_SENT_SCAN_BATCH);
+    messages = await client.fetchAll(`${startUid}:${endUid}`, sentEnvelopeFetchQuery(), {
+      uid: true,
+    });
+    if (
+      messages.length > endUid - startUid + 1 ||
+      messages.some((message) => validateUid(message.uid) < startUid || message.uid > endUid)
+    ) {
+      throw new MailProviderSyncError("mail_provider_response_invalid");
+    }
+    cursor = { ...cursor, highestUid: endUid };
+  } else {
+    const endSequence = Math.min(cursor.walkEndSequence, exists);
+    const width = Math.min(IMAP_SENT_SCAN_BATCH, cursor.walkRemaining, endSequence);
+    if (width > 0) {
+      const startSequence = endSequence - width + 1;
+      const fetched = await client.fetchAll(
+        `${startSequence}:${endSequence}`,
+        sentEnvelopeFetchQuery(),
+      );
+      if (fetched.length > width) {
+        throw new MailProviderSyncError("mail_provider_response_invalid");
+      }
+      const ceiling = cursor.walkUpperUid;
+      messages = fetched.filter((message) => validateUid(message.uid) < ceiling);
+      cursor = {
+        ...cursor,
+        walkEndSequence: startSequence - 1,
+        walkUpperUid: messages.reduce((lowest, message) => Math.min(lowest, message.uid), ceiling),
+        walkRemaining: cursor.walkRemaining - width,
+      };
+    } else {
+      cursor = { ...cursor, walkEndSequence: 0 };
+    }
+  }
+  if (cursor.walkEndSequence === 0 || cursor.walkRemaining === 0) {
+    cursor = { ...cursor, walkEndSequence: 0, walkUpperUid: 0, walkRemaining: 0 };
+  }
+  const recipients = new Set<string>();
+  const senders = new Set<string>();
+  for (const message of messages) {
+    const envelope = message.envelope;
+    if (envelope === undefined) continue;
+    for (const entry of addresses(envelope.from)) senders.add(entry.address);
+    for (const entry of addresses(envelope.to)) recipients.add(entry.address);
+    for (const entry of addresses(envelope.cc)) recipients.add(entry.address);
+  }
+  return Object.freeze({
+    status: "scanned",
+    cursor: encodeSentScanCursor(cursor),
+    recipients: Object.freeze([...recipients]),
+    senders: Object.freeze([...senders]),
+    envelopeCount: messages.length,
+    uidValidityChanged,
+    hasMore: uidNext - 1 > cursor.highestUid || cursor.walkRemaining > 0,
+  });
+}
+
+function encodeSentScanCursor(cursor: SentScanCursor): string {
+  return [
+    "s1",
+    cursor.uidValidity,
+    cursor.highestUid,
+    cursor.walkEndSequence,
+    cursor.walkUpperUid,
+    cursor.walkRemaining,
+  ].join("_");
+}
+
+/**
+ * Null for no cursor and for one this adapter cannot read: the position such
+ * a token names is nowhere in the folder, so the walk begins again, as it
+ * does for a first run.
+ */
+function parseSentScanCursor(value: string | null): SentScanCursor | null {
+  if (value === null) return null;
+  const match = /^s1_([1-9]\d{0,9})_(\d{1,10})_(\d{1,10})_(\d{1,10})_(\d{1,4})$/.exec(value);
+  if (!match) return null;
+  const cursor: SentScanCursor = {
+    uidValidity: BigInt(match[1]!),
+    highestUid: Number(match[2]),
+    walkEndSequence: Number(match[3]),
+    walkUpperUid: Number(match[4]),
+    walkRemaining: Number(match[5]),
+  };
+  if (
+    cursor.uidValidity > BigInt(MAX_UID_COMPONENT) ||
+    cursor.highestUid > MAX_UID_COMPONENT ||
+    cursor.walkEndSequence > MAX_UID_COMPONENT ||
+    cursor.walkUpperUid > cursor.highestUid + 1 ||
+    cursor.walkRemaining > IMAP_SENT_SCAN_FIRST_RUN_CAP
+  ) {
+    return null;
+  }
+  return cursor;
 }
 
 /**

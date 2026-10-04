@@ -51,6 +51,21 @@ import { ImapFlowReadSessionFactory } from "./imapflow-adapter";
  */
 const DROPPED_PARSE_RETRY_DELAYS_MS = [100, 400] as const;
 
+/**
+ * The one wait more that an owner's letter gets after those two. A displaced
+ * prefetch's worker can outlast both: its client waits two seconds for it to
+ * close the connection (`WORKER_LET_GO_DEADLINE_MS` in the parser client),
+ * then destroys the connection and answers, and the socket goes on counting
+ * the worker until it exits. The coordinator does not retry a parser failure,
+ * so a third drop ended the open of a healthy letter with "couldn't be shown"
+ * half a second after that answer. This wait is longer than the let-go, so
+ * the owner's last try is made three seconds after its first drop and five
+ * after the hang-up. The prefetch has nobody waiting and its letter is left
+ * for an open, so its waits stay the two above. An owner's letter that kills
+ * its worker is therefore parsed four times an open.
+ */
+const OWNER_LAST_DROPPED_PARSE_RETRY_DELAY_MS = 2_500;
+
 export interface MailContentSourceLease {
   readonly source: MailContentSourcePort;
   destroy(): void;
@@ -210,12 +225,22 @@ export class ProductionMailContentWorkRunner implements MailContentWorkRunnerPor
         budget: parserBudget(input.deadlineAt, this.readNow()),
         signal,
       });
-      const wait = DROPPED_PARSE_RETRY_DELAYS_MS[attempt];
       if (
         parsed.kind !== "transient_failure" ||
-        parsed.errorCode !== "mail_mime_worker_dropped" ||
-        wait === undefined
+        parsed.errorCode !== "mail_mime_worker_dropped"
       ) {
+        return parsed;
+      }
+      // The lane is read at the drop, not at the start: a prefetch an owner
+      // has taken over by now is the owner's letter.
+      const wait =
+        DROPPED_PARSE_RETRY_DELAYS_MS[attempt] ??
+        (attempt === DROPPED_PARSE_RETRY_DELAYS_MS.length && !input.lane.background
+          ? OWNER_LAST_DROPPED_PARSE_RETRY_DELAY_MS
+          : undefined);
+      // A wait the lease would not outlive is not taken: the parse after it
+      // would have no time left, and the drop is the truer failure.
+      if (wait === undefined || this.readNow() + wait >= input.deadlineAt) {
         return parsed;
       }
       await delay(wait, undefined, { signal });

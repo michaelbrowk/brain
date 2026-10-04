@@ -195,6 +195,50 @@ describe("the browser's own send route", () => {
       expect(response.status).toBe(413);
       expect(sendMessage).not.toHaveBeenCalled();
     });
+
+    it.each([
+      // Each is a few megabytes of body and hundreds of megabytes parsed.
+      ["a million empty files", () => `{"attachments":[${"{},".repeat(1_000_000)}{}]}`],
+      ["millions of numbers", () => `[${"1,".repeat(3_000_000)}1]`],
+      ["a list nested a hundred thousand deep", () => "[".repeat(100_000)],
+    ])("refuses %s by its structure, before a character of it is parsed", async (_name, make) => {
+      const { POST } = await import("./route");
+      const parse = vi.spyOn(JSON, "parse");
+      let response: Response;
+      let parsed: number;
+      try {
+        response = await POST(
+          new Request("https://brain.test/api/mail/send", {
+            method: "POST",
+            headers: { "content-type": "application/json", origin: "https://brain.test" },
+            body: make(),
+          }),
+        );
+        parsed = parse.mock.calls.length;
+      } finally {
+        parse.mockRestore();
+      }
+
+      expect(parsed).toBe(0);
+      expect(response.status).toBe(400);
+      expect(await refusal(response)).toBe("mail_send_request_invalid");
+      expect(sendMessage).not.toHaveBeenCalled();
+    });
+
+    it("takes a send to a hundred recipients with ten files", async () => {
+      const response = await post(
+        composed({
+          to: Array.from({ length: 100 }, (_, index) => `friend-${index}@example.net`),
+          attachments: Array.from(
+            { length: MAIL_SEND_ATTACHMENT_LIMITS.maxCount },
+            (_, index) => file({ filename: `invoice-${index}.pdf` }),
+          ),
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      expect(sendMessage).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("hands a body that is not an object to the service unchanged", async () => {

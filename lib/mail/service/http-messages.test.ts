@@ -1007,6 +1007,45 @@ describe("brain-mail message HTTP surface", () => {
     });
   });
 
+  it("refuses a send body that is all structure before it parses it", async () => {
+    const send = sendServiceFixture();
+    const socketPath = await startServer(messageServiceFixture(), send);
+
+    // Parsed, these are what the codec refuses as not a send. Refused by
+    // their structure, they are never parsed, and the answer says so.
+    for (const body of [
+      `{"attachments":[${"{},".repeat(1_000_000)}{}]}`,
+      `[${"1,".repeat(3_000_000)}1]`,
+    ]) {
+      await expect(
+        requestJson(socketPath, "POST", "/v1/send", body),
+      ).resolves.toMatchObject({
+        status: 400,
+        body: { error: { code: "json_invalid" } },
+      });
+    }
+    expect(send.send).not.toHaveBeenCalled();
+
+    // A send at the recipient and file caps is not that.
+    await expect(
+      requestJson(
+        socketPath,
+        "POST",
+        "/v1/send",
+        JSON.stringify({
+          ...sendInput(),
+          to: Array.from({ length: 100 }, (_, index) => `to-${index}@example.net`),
+          attachments: Array.from({ length: 10 }, (_, index) => ({
+            filename: `file-${index}.pdf`,
+            mimeType: "application/pdf",
+            dataBase64: "AQID",
+          })),
+        }),
+      ),
+    ).resolves.toMatchObject({ status: 202 });
+    expect(send.send).toHaveBeenCalledTimes(1);
+  });
+
   /** The one thing only the service knows about a failed send: whether the
    *  message was already durable when it failed. A client that reads a bare
    *  503 as "nothing happened" sends the message a second time. */

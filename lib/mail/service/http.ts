@@ -7,6 +7,7 @@ import {
 } from "node:http";
 
 import type {
+  MailSendTransportKind,
   MailServiceHealth,
   MailSystemAdmissionPort,
   MailSystemUsage,
@@ -19,6 +20,10 @@ import {
   validateMailServiceHealth,
   writeMailLogRecord,
 } from "../security";
+import {
+  exceedsMailJsonStructure,
+  MAIL_SEND_BODY_MAX_STRUCTURAL_TOKENS,
+} from "../send-attachment-codec";
 import {
   MAIL_ACCOUNT_CAPABILITIES_CONTRACT_HEADER,
   MAIL_ACCOUNT_CAPABILITIES_CONTRACT_VALUE,
@@ -124,6 +129,9 @@ interface MailServiceHttpOptions {
   readonly syncPause?: MailSyncPausePort;
   readonly senders?: MailSenderScreenService;
   readonly changes?: MailChangeFeed;
+  /** The SMTP runtime's byte transport, for health to name. Absent for a
+   *  service that composed none. */
+  readonly sendTransport?: MailSendTransportKind;
 }
 
 /**
@@ -291,6 +299,7 @@ export function createMailServiceHttpServer(
   const syncPause = options.syncPause;
   const senders = options.senders;
   const changes = options.changes;
+  const sendTransport = options.sendTransport;
   const build = validateBuildIdentity(options.build);
   const server = createServer(
     {
@@ -316,6 +325,7 @@ export function createMailServiceHttpServer(
         syncPause,
         senders,
         changes,
+        sendTransport,
       );
     },
   );
@@ -372,6 +382,7 @@ async function handleRequest(
   syncPause: MailSyncPausePort | undefined,
   senders: MailSenderScreenService | undefined,
   changes: MailChangeFeed | undefined,
+  sendTransport: MailSendTransportKind | undefined,
 ): Promise<void> {
   const requestStartedAt = Date.now();
   const deadlineAt =
@@ -518,6 +529,7 @@ async function handleRequest(
           syncHealth,
           requestStartedAt,
           syncPause?.isPaused() ?? false,
+          sendTransport,
         ),
       );
       return;
@@ -1296,6 +1308,7 @@ function createHealth(
   } | null = null,
   now = Date.now(),
   paused = false,
+  sendTransport?: MailSendTransportKind,
 ): MailServiceHealth {
   const activeAccounts = Math.max(accountCount, usage.accounts);
   const cacheSchemaVersion = messagesConfigured ? 1 : null;
@@ -1354,6 +1367,10 @@ function createHealth(
       lastSuccessfulAt === null ? null : Math.max(0, now - lastSuccessfulAt),
     cachePressure: "normal",
     lastErrorCode,
+    // What the flags composed, whether or not an account can send yet: Brain
+    // sizes a custom-domain account's attachments by it (the relay's tunnel
+    // carries 2 MiB of finished message, a direct session the whole cap).
+    ...(sendTransport === undefined ? {} : { sendTransport }),
   });
 }
 
@@ -1466,6 +1483,17 @@ async function readJsonBody(
   });
 
   try {
+    // A body read past the small cap is a send or a draft. Megabytes of JSON
+    // that are all structure cost hundreds of megabytes parsed, which this
+    // process's memory contract does not have, so such a body is refused by
+    // its structure before it is decoded. Brain's own routes refuse it first;
+    // this is the same rule for whatever reaches the socket another way.
+    if (
+      maxBodyBytes > MAIL_SERVICE_HTTP_LIMITS.maxBodyBytes &&
+      exceedsMailJsonStructure(body, MAIL_SEND_BODY_MAX_STRUCTURAL_TOKENS)
+    ) {
+      throw new MailHttpError(400, "json_invalid", true);
+    }
     const text = new TextDecoder("utf-8", { fatal: true }).decode(body);
     return JSON.parse(text);
   } catch {

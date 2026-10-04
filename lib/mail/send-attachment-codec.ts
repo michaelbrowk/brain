@@ -5,6 +5,8 @@
  * attachments.
  */
 
+import { MAIL_MAX_RECIPIENTS } from "./recipients";
+
 export const MAIL_SEND_ATTACHMENT_LIMITS = Object.freeze({
   maxCount: 10,
   maxFilenameBytes: 255,
@@ -45,6 +47,90 @@ export const MAIL_SEND_ATTACHMENT_LIMITS = Object.freeze({
    */
   maxTotalBytes: 10_485_760,
 });
+
+/**
+ * The most structure a body that carries a send may hold, counted as the
+ * brackets, braces and commas outside its strings. A body is cut off by its
+ * bytes first, and 24 MiB of JSON is still enough to cost hundreds of
+ * megabytes once parsed when it is all structure: a million empty objects, or
+ * twelve million numbers, measured at up to 854 MiB over the process's
+ * resident set, before the codec ever saw the result and refused it. So the
+ * structure is counted before the parse, against what a send can hold.
+ *
+ * The largest send is one object of at most sixteen members, three recipient
+ * lists with `MAIL_MAX_RECIPIENTS` addresses between them, and
+ * `MAIL_SEND_ATTACHMENT_LIMITS.maxCount` files of three members each (two
+ * braces, two commas, and the comma after the file). That is 176, and a send
+ * built at every cap counts 167. A draft and its mutations are flat objects
+ * and hold less. The bound is eight times that: a refusal here is for a body
+ * that is not a send at all, and what a send is stays the codec's to say.
+ */
+export const MAIL_SEND_BODY_MAX_STRUCTURAL_TOKENS =
+  8 *
+  (2 + 16 + 3 * 2 + MAIL_MAX_RECIPIENTS + 2 + MAIL_SEND_ATTACHMENT_LIMITS.maxCount * 5);
+
+const QUOTE = 0x22;
+const BACKSLASH = 0x5c;
+
+/**
+ * Whether UTF-8 JSON text holds more than `maxTokens` brackets, braces and
+ * commas outside its strings. One pass, no allocation, and it stops at the
+ * token that crosses the bound, so the bodies it exists for cost a few
+ * thousand bytes of reading. Every byte it tests for is ASCII, which no
+ * multi-byte UTF-8 sequence contains. It does not say the text is JSON: a
+ * string that never ends hides whatever follows it, and the parser refuses
+ * that body on its own.
+ */
+export function exceedsMailJsonStructure(
+  body: Uint8Array,
+  maxTokens: number,
+): boolean {
+  let tokens = 0;
+  let index = 0;
+  while (index < body.length) {
+    const byte = body[index]!;
+    if (byte === QUOTE) {
+      index = endOfJsonString(body, index + 1);
+      continue;
+    }
+    // , [ ] { }
+    if (
+      byte === 0x2c ||
+      byte === 0x5b ||
+      byte === 0x5d ||
+      byte === 0x7b ||
+      byte === 0x7d
+    ) {
+      tokens += 1;
+      if (tokens > maxTokens) return true;
+    }
+    index += 1;
+  }
+  return false;
+}
+
+/**
+ * The index after the quote that closes a string whose content starts at
+ * `start`, or the end of the body. A quote closes the string unless an odd
+ * run of backslashes stands before it. The search for the quote is the
+ * engine's own, so ten megabytes of base64 are skipped rather than read here.
+ */
+function endOfJsonString(body: Uint8Array, start: number): number {
+  let from = start;
+  for (;;) {
+    const quote = body.indexOf(QUOTE, from);
+    if (quote === -1) return body.length;
+    let backslashes = 0;
+    while (
+      quote - 1 - backslashes >= start &&
+      body[quote - 1 - backslashes] === BACKSLASH
+    ) {
+      backslashes += 1;
+    }
+    if (backslashes % 2 === 0) return quote + 1;
+    from = quote + 1;
+  }
+}
 
 export interface MailSendAttachment {
   readonly filename: string;

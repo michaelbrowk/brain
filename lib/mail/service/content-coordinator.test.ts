@@ -5,7 +5,9 @@ import {
   readdir,
   rename,
   rm,
+  unlink,
 } from "node:fs/promises";
+import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -31,12 +33,17 @@ import {
   type MailContentWorkQueuePort,
   type MailContentWorkRunnerPort,
 } from "./content-coordinator";
-import { ProductionMailContentWorkRunner } from "./content-work-runner";
+import {
+  ProductionMailContentWorkRunner,
+  type MailContentSourceFactoryPort,
+} from "./content-work-runner";
 import {
   type CachedProviderMessage,
   type CachedProviderThread,
   SqliteMailMessageCache,
 } from "./message-cache";
+import { UnixSocketMailMimeParser } from "./mime-parser-client";
+import { runMimeParserWorkerConnection } from "./mime-parser-runtime";
 import {
   RemoteImageFetchError,
   type RemoteImageFetcherPort,
@@ -51,10 +58,13 @@ const roots: string[] = [];
 const messageCaches: SqliteMailMessageCache[] = [];
 const coordinators: MailContentCoordinator[] = [];
 const workQueues: InMemoryMailContentWorkQueue[] = [];
+const parserSockets: (() => Promise<void>)[] = [];
+let parserSocketSequence = 0;
 
 afterEach(async () => {
   await Promise.all(coordinators.splice(0).map((value) => value.close()));
   await Promise.all(workQueues.splice(0).map((value) => value.close()));
+  await Promise.all(parserSockets.splice(0).map((stop) => stop()));
   for (const cache of messageCaches.splice(0)) cache.close();
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
@@ -2147,6 +2157,32 @@ describe("MailContentCoordinator", () => {
     await vi.waitFor(() => expect(origin.urls).toHaveLength(3));
   });
 
+  it("tells the run under way that a letter the owner opened mid-fetch is the owner's", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    const fetched = deferred<void>();
+    const runner = new FakeMailContentWorkRunner([
+      async (input: MailContentWorkInput) => {
+        await fetched.promise;
+        await publish(input, { text: Buffer.from("plain body") });
+      },
+    ]);
+    const coordinator = fixture.coordinator(runner);
+    const input = { accountId: ACCOUNT_ID, messageId: MESSAGE_ID };
+    await coordinator.runBackgroundPrefetchStep(ACCOUNT_ID, new AbortController().signal);
+    await vi.waitFor(() => expect(runner.calls).toHaveLength(1));
+    // The runner reads this when a parse is dropped, to know whether anybody
+    // is waiting for the letter.
+    expect(runner.calls[0]?.lane.background).toBe(true);
+    await coordinator.requestContent(input);
+    expect(runner.calls[0]?.lane.background).toBe(false);
+    fetched.resolve();
+    await vi.waitFor(async () => {
+      await expect(coordinator.getContent(input)).resolves.toMatchObject({
+        state: "ready",
+      });
+    });
+  });
+
   it("never aborts the owner's letter the prefetch was fetching for the owner's next one", async () => {
     const fixture = await createFixture([ACCOUNT_ID]);
     seedInbox(fixture.caches[0]!, ["p1", "p2", "p3", "p4", "p5"]);
@@ -2454,7 +2490,7 @@ describe("MailContentCoordinator", () => {
     await vi.waitFor(async () => {
       await expect(
         coordinator.getContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID }),
-      ).resolves.toMatchObject({ state: "transient" });
+      ).resolves.toMatchObject({ state: "permanent" });
     });
     // One try: one download, parsed three times, and no retry after it.
     await sleep(700);
@@ -2463,12 +2499,165 @@ describe("MailContentCoordinator", () => {
     now += MAIL_RESOURCE_LIMITS.remoteImageTransientRetryMs + 1;
     await expect(step()).resolves.toEqual({ hasMore: false });
     expect(fetches).toHaveLength(1);
-    // The owner's open fetches it again, and tries again after a failure as
-    // any open does.
+    // The owner's open fetches it again.
     await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID });
-    await vi.waitFor(() => expect(fetches.length).toBeGreaterThanOrEqual(3), {
-      timeout: 4_000,
+    await vi.waitFor(() => expect(fetches).toHaveLength(2), { timeout: 4_000 });
+  });
+
+  it("commits an owner's letter whose connection the parser socket drops for as long as a displaced worker can linger", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    // A displaced prefetch's worker that outlasts the two seconds its client
+    // waits for it: the socket still counts it 2.4 s after the hang-up.
+    const parserSocket = await startParserSocket(2_400);
+    const fetches = { count: 0 };
+    const runner = new ProductionMailContentWorkRunner({
+      sourceFactory: countedSource(
+        Buffer.from("From: sender@example.test\r\n\r\nHello"),
+        fetches,
+      ),
+      parser: new UnixSocketMailMimeParser({ socketPath: parserSocket.socketPath }),
     });
+    const coordinator = fixture.coordinator(
+      runner,
+      { nextDelayMs: () => 1 },
+      undefined,
+      Date.now,
+    );
+    const input = { accountId: ACCOUNT_ID, messageId: MESSAGE_ID };
+
+    await expect(coordinator.requestContent(input)).resolves.toMatchObject({
+      state: "fetching",
+    });
+    await vi.waitFor(
+      async () => {
+        await expect(coordinator.getContent(input)).resolves.toMatchObject({
+          state: "ready",
+          textBody: "Hello",
+        });
+      },
+      { timeout: 10_000, interval: 50 },
+    );
+    // One attempt of the queue's: the letter was downloaded once and parsed
+    // again from disk.
+    expect(fetches.count).toBe(1);
+    expect(parserSocket.connections()).toBeGreaterThan(1);
+  }, 20_000);
+
+  it("parses an owner's letter the parser socket keeps dropping four times for an open, and again only for another open", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    // The socket closes every connection unanswered for longer than all the
+    // runner's waits together, which is also how a letter that kills its
+    // worker before it answers reads.
+    const parserSocket = await startParserSocket(60_000);
+    const fetches = { count: 0 };
+    const runner = new ProductionMailContentWorkRunner({
+      sourceFactory: countedSource(
+        Buffer.from("From: sender@example.test\r\n\r\nHello"),
+        fetches,
+      ),
+      parser: new UnixSocketMailMimeParser({ socketPath: parserSocket.socketPath }),
+    });
+    // A retry policy that would take the queue's four attempts at once.
+    const coordinator = fixture.coordinator(
+      runner,
+      { nextDelayMs: () => 1 },
+      undefined,
+      Date.now,
+    );
+    const input = { accountId: ACCOUNT_ID, messageId: MESSAGE_ID };
+    const counts = () => ({
+      fetches: fetches.count,
+      parses: parserSocket.connections(),
+    });
+
+    await expect(coordinator.requestContent(input)).resolves.toMatchObject({
+      state: "fetching",
+    });
+    // The reader is told the letter cannot be shown, so it stops asking: a
+    // `transient` answer is what it asks again on, three times an open.
+    await vi.waitFor(
+      async () => {
+        await expect(coordinator.getContent(input)).resolves.toMatchObject({
+          state: "permanent",
+        });
+      },
+      { timeout: 10_000, interval: 50 },
+    );
+    await sleep(700);
+    expect(counts()).toEqual({ fetches: 1, parses: 4 });
+
+    // Opening it again is the one thing that tries again, once more.
+    await expect(coordinator.requestContent(input)).resolves.toMatchObject({
+      state: "fetching",
+    });
+    await vi.waitFor(() => expect(parserSocket.connections()).toBe(8), {
+      timeout: 10_000,
+      interval: 50,
+    });
+    await sleep(700);
+    expect(counts()).toEqual({ fetches: 2, parses: 8 });
+    await expect(coordinator.getContent(input)).resolves.toMatchObject({
+      state: "permanent",
+    });
+  }, 30_000);
+
+  it.each(["mail_mime_worker_crashed", "mail_mime_worker_timeout"])(
+    "tries an owner's letter whose parse ended in %s once for an open, and tells the reader it cannot be shown",
+    async (errorCode) => {
+      const fixture = await createFixture([ACCOUNT_ID]);
+      let runs = 0;
+      const runner: MailContentWorkRunnerPort = {
+        async run() {
+          runs += 1;
+          throw new MailContentWorkError("transient", errorCode);
+        },
+      };
+      // A retry policy that would take the queue's four attempts at once.
+      const coordinator = fixture.coordinator(runner, { nextDelayMs: () => 1 });
+      const input = { accountId: ACCOUNT_ID, messageId: MESSAGE_ID };
+
+      await coordinator.requestContent(input);
+      await vi.waitFor(async () => {
+        await expect(coordinator.getContent(input)).resolves.toMatchObject({
+          state: "permanent",
+        });
+      });
+      await sleep(300);
+      expect(runs).toBe(1);
+
+      // The row is still a transient failure, so another open claims it.
+      await expect(coordinator.requestContent(input)).resolves.toMatchObject({
+        state: "fetching",
+      });
+      await vi.waitFor(() => expect(runs).toBe(2));
+      await sleep(300);
+      expect(runs).toBe(2);
+    },
+  );
+
+  it("still retries an owner's letter whose fetch failed, and says so", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    let fetches = 0;
+    const runner: MailContentWorkRunnerPort = {
+      async run() {
+        fetches += 1;
+        throw new MailContentWorkError("transient", "mail_content_source_transient");
+      },
+    };
+    const coordinator = fixture.coordinator(runner, {
+      nextDelayMs: () => (fetches < 4 ? 1 : null),
+    });
+    const input = { accountId: ACCOUNT_ID, messageId: MESSAGE_ID };
+    await coordinator.requestContent(input);
+    await vi.waitFor(() => expect(fetches).toBe(4), { timeout: 4_000 });
+    await vi.waitFor(
+      async () => {
+        await expect(coordinator.getContent(input)).resolves.toMatchObject({
+          state: "transient",
+        });
+      },
+      { timeout: 4_000 },
+    );
   });
 
   it("claims nothing at the budget while every body it holds is pinned", async () => {
@@ -2932,6 +3121,7 @@ describe("MailContentCoordinator", () => {
           cache: contentCache,
           blobStore,
           deadlineAt: claim.lease.expiresAt,
+          lane: { background: true },
         },
         { text: Buffer.from(messageId) },
       );
@@ -3763,6 +3953,70 @@ function pngChunk(type: string, data: Buffer): Buffer {
 
 async function* chunks(value: Buffer): AsyncIterable<Uint8Array> {
   yield value;
+}
+
+/** A source that hands the same raw message to every fetch and counts them. */
+function countedSource(
+  raw: Buffer,
+  fetches: { count: number },
+): MailContentSourceFactoryPort {
+  return {
+    async create({ incomingBlobStore }) {
+      return {
+        source: {
+          async fetchRaw() {
+            fetches.count += 1;
+            return {
+              descriptor: await incomingBlobStore.putIncoming(chunks(raw), 1024),
+            };
+          },
+        },
+        destroy() {},
+      };
+    },
+  };
+}
+
+/**
+ * The parser socket as an owner's parse meets it once a prefetch has been
+ * displaced. For `workerCountedForMs` from now it still counts that
+ * prefetch's worker and closes every connection made to it without a word,
+ * which is what it does with one past its limit. After that a connection gets
+ * a worker of its own.
+ */
+async function startParserSocket(workerCountedForMs: number): Promise<{
+  readonly socketPath: string;
+  connections(): number;
+}> {
+  const socketPath = `/tmp/brain-mime-coordinator-${process.pid}-${parserSocketSequence++}.sock`;
+  await unlink(socketPath).catch(() => undefined);
+  const countedUntil = performance.now() + workerCountedForMs;
+  const open = new Set<Socket>();
+  let connections = 0;
+  const server: Server = createServer((socket) => {
+    connections += 1;
+    open.add(socket);
+    socket.once("close", () => open.delete(socket));
+    socket.on("error", () => undefined);
+    if (performance.now() < countedUntil) {
+      socket.destroy();
+      return;
+    }
+    void runMimeParserWorkerConnection(socket);
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  parserSockets.push(async () => {
+    for (const socket of open) socket.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await unlink(socketPath).catch(() => undefined);
+  });
+  return { socketPath, connections: () => connections };
 }
 
 async function collectBytes(source: AsyncIterable<Uint8Array>): Promise<Buffer> {

@@ -11,6 +11,10 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import {
+  MAIL_CHANGED_EVENT,
+  MAIL_EVENT_DEBOUNCE_MS,
+} from "@/lib/mail/mail-events";
 import type {
   MailThreadListItem,
   MailThreadPage,
@@ -412,6 +416,152 @@ describe("the Mail block on Home", () => {
 
       expect(answers).toBe(2);
       expect(host.querySelectorAll("[data-hub-mail-person]")).toHaveLength(2);
+    });
+  });
+
+  describe("the mail events", () => {
+    const EVENT_ACCOUNT = `account-a${"0".repeat(32)}`;
+
+    function mailEvent(detail: unknown) {
+      window.dispatchEvent(new CustomEvent(MAIL_CHANGED_EVENT, { detail }));
+    }
+
+    function synced(mailboxIds: string[] = ["inbox"]) {
+      return { kind: "mail", changeKind: "sync", accountId: EVENT_ACCOUNT, mailboxIds };
+    }
+
+    /** One more row per answer, so the block shows how many times it read. */
+    function countingStub(): { stub: Stub; answers: () => number } {
+      const a = account("account-a1", "ada@example.test");
+      let answers = 0;
+      return {
+        stub: {
+          accounts: [a],
+          threads: () => {
+            answers += 1;
+            return page(
+              Array.from({ length: answers }, () => thread({ accountId: a.accountId })),
+            );
+          },
+        },
+        answers: () => answers,
+      };
+    }
+
+    async function pass(ms: number) {
+      await act(async () => vi.advanceTimersByTime(ms));
+      await settle();
+    }
+
+    beforeEach(() => {
+      // The debounce is a timer, so these cases fake it beside the clock.
+      vi.useFakeTimers({ now: NOW, toFake: ["Date", "setTimeout", "clearTimeout"] });
+    });
+
+    it("reads again once for a burst of events about an inbox", async () => {
+      const { stub, answers } = countingStub();
+      await mount(stub);
+      expect(answers()).toBe(1);
+
+      await act(async () => {
+        mailEvent(synced());
+        mailEvent({ ...synced(["inbox", "all"]), changeKind: "mutation" });
+        mailEvent(synced());
+      });
+      await pass(MAIL_EVENT_DEBOUNCE_MS - 1);
+      // Still inside the burst's quiet window: nothing has been asked.
+      expect(answers()).toBe(1);
+
+      await pass(1);
+      expect(answers()).toBe(2);
+      expect(host.querySelectorAll("[data-hub-mail-person]")).toHaveLength(2);
+    });
+
+    it("reads again on a reset, which names no account", async () => {
+      const { stub, answers } = countingStub();
+      await mount(stub);
+
+      await act(async () => mailEvent({ kind: "mail", changeKind: "reset" }));
+      await pass(MAIL_EVENT_DEBOUNCE_MS);
+      expect(answers()).toBe(2);
+    });
+
+    it("lets pass what cannot change the block", async () => {
+      const { stub, answers } = countingStub();
+      await mount(stub);
+
+      await act(async () => {
+        // A body arriving changes no row, a Sent-only change no unread letter,
+        // and a malformed event is not an event.
+        mailEvent({
+          ...synced(),
+          changeKind: "content_ready",
+          messageIds: ["message-1"],
+        });
+        mailEvent(synced(["sent"]));
+        mailEvent({ kind: "mail", changeKind: "sync" });
+        mailEvent(null);
+      });
+      await pass(MAIL_EVENT_DEBOUNCE_MS);
+      expect(answers()).toBe(1);
+    });
+
+    it("lets an event pass in a hidden tab, which reads on the way back anyway", async () => {
+      const { stub, answers } = countingStub();
+      await mount(stub);
+
+      const visibility = vi
+        .spyOn(document, "visibilityState", "get")
+        .mockReturnValue("hidden");
+      expect(document.visibilityState).toBe("hidden");
+      await act(async () => mailEvent(synced()));
+      await pass(MAIL_EVENT_DEBOUNCE_MS);
+      expect(answers()).toBe(1);
+      visibility.mockRestore();
+    });
+
+    it("asks nothing once Home is gone", async () => {
+      const { stub, answers } = countingStub();
+      await mount(stub);
+
+      await act(async () => mailEvent(synced()));
+      await act(async () => root.render(null));
+      await pass(MAIL_EVENT_DEBOUNCE_MS);
+      expect(answers()).toBe(1);
+
+      // And an event after the unmount finds no listener.
+      await act(async () => mailEvent(synced()));
+      await pass(MAIL_EVENT_DEBOUNCE_MS);
+      expect(answers()).toBe(1);
+    });
+
+    it("keeps the newer read when an older one answers after it", async () => {
+      // Events make reads frequent enough to overlap, and a slow first answer
+      // landing last would put back the rows the second one had replaced.
+      const a = account("account-a1", "ada@example.test");
+      const held: ((value: MailThreadPage) => void)[] = [];
+      await mount({
+        accounts: [a],
+        threads: () => new Promise<MailThreadPage>((resolve) => held.push(resolve)),
+      });
+      await act(async () => mailEvent(synced()));
+      await pass(MAIL_EVENT_DEBOUNCE_MS);
+      expect(held).toHaveLength(2);
+
+      await act(async () =>
+        held[1](page([thread({ accountId: a.accountId, threadId: "newer" })])),
+      );
+      await settle();
+      await act(async () =>
+        held[0](page([thread({ accountId: a.accountId, threadId: "older" })])),
+      );
+      await settle();
+
+      expect(
+        [...host.querySelectorAll("[data-hub-mail-person]")].map((row) =>
+          row.getAttribute("data-hub-mail-person"),
+        ),
+      ).toEqual(["newer"]);
     });
   });
 

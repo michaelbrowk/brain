@@ -206,6 +206,79 @@ describe("multi-account message registry", () => {
     await service.close();
   });
 
+  it("hands the screen's Sent scan to the account's provider, and answers null where the provider has none", async () => {
+    const stateDirectory = await mkdtemp(path.join(tmpdir(), "brain-mail-registry-"));
+    roots.push(stateDirectory);
+    const store = storeFixture();
+    const imap = imapAccountFixture();
+    vi.mocked(store.listAccounts).mockResolvedValue([imap]);
+    vi.mocked(store.readAccount).mockResolvedValue(imap);
+    const answer = { status: "unavailable", reason: "no_sent_mailbox" } as const;
+    const signals: AbortSignal[] = [];
+    const sentScan = {
+      scanSentEnvelopes: vi.fn(
+        async (_input: { readonly cursor: string | null }, signal: AbortSignal) => {
+          signals.push(signal);
+          return answer;
+        },
+      ),
+    };
+    const scanning = new MultiAccountMailMessageService({
+      stateDirectory,
+      store,
+      providerFactory: {
+        create: vi.fn().mockResolvedValue({ provider: providerFixture({}), sentScan }),
+      },
+    });
+    const caller = new AbortController();
+
+    await expect(
+      scanning.scanSentEnvelopes(ACCOUNT_ID, { cursor: "s1_77_12_0_0_0" }, caller.signal),
+    ).resolves.toEqual(answer);
+    expect(sentScan.scanSentEnvelopes).toHaveBeenCalledExactlyOnceWith(
+      { cursor: "s1_77_12_0_0_0" },
+      expect.any(AbortSignal),
+    );
+    // The session it opens ends with the caller's pass and with the account.
+    expect(signals[0]!.aborted).toBe(false);
+    await scanning.invalidateAccount(ACCOUNT_ID);
+    expect(signals[0]!.aborted).toBe(true);
+    await scanning.close();
+
+    // A provider whose Sent mail is in the cache offers no scan.
+    const cached = new MultiAccountMailMessageService({
+      stateDirectory,
+      store: storeFixture(),
+      providerFactory: { create: vi.fn().mockResolvedValue({ provider: providerFixture({}) }) },
+    });
+    await expect(
+      cached.scanSentEnvelopes(ACCOUNT_ID, { cursor: null }, caller.signal),
+    ).resolves.toBeNull();
+    await cached.close();
+  });
+
+  it("offers the Sent scan on the production IMAP adapter", async () => {
+    const account = imapAccountFixture();
+    const imapSessions = {
+      async withSession<T>(
+        _expected: StoredImapMailAccount,
+        _signal: AbortSignal,
+        operation: (value: ImapSessionClient) => Promise<T>,
+      ): Promise<T> {
+        return operation({ list: async () => [] } as unknown as ImapSessionClient);
+      },
+    };
+    const created = await createProductionMailProviderFactory({
+      store: storeFixture(),
+      environment: {},
+      imapSessions,
+    }).create(account);
+
+    await expect(
+      created.sentScan?.scanSentEnvelopes({ cursor: null }, new AbortController().signal),
+    ).resolves.toEqual({ status: "unavailable", reason: "no_sent_mailbox" });
+  });
+
   it("unparks reauth only after the stored credential version changes", async () => {
     const stateDirectory = await mkdtemp(path.join(tmpdir(), "brain-mail-registry-"));
     roots.push(stateDirectory);

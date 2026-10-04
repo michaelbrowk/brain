@@ -323,6 +323,22 @@ const SCHEMA_SQL = `
   ) STRICT;
 `;
 
+/**
+ * Where each account's Sent-folder scan stands. Added after schema 1 shipped
+ * and created on every open rather than under a new `user_version`: the
+ * release before it opens the same file and steps over a table it never
+ * reads, so a rollback keeps the screen. The cursor is the provider adapter's
+ * token and holds positions in a folder, never an address.
+ */
+const SENT_SCAN_SCHEMA_SQL = `
+  CREATE TABLE IF NOT EXISTS sent_scan_progress (
+    account_id TEXT PRIMARY KEY,
+    cursor TEXT NOT NULL CHECK(length(cursor) BETWEEN 1 AND 128),
+    updated_at INTEGER NOT NULL CHECK(updated_at >= 0)
+  ) STRICT;
+`;
+const SENT_SCAN_CURSOR = /^[a-z0-9_]{1,128}$/;
+
 export interface MailSenderFacts {
   readonly known: boolean;
   readonly addressDecision: MailSenderDecisionKind | null;
@@ -538,6 +554,53 @@ export class SqliteMailSenderStore {
   learnKnown(addresses: readonly string[], source: "backfill" | "sent"): void {
     const now = validTimestamp(this.now());
     this.transaction((database) => learnKnownIn(database, addresses, source, now));
+  }
+
+  /** Where the account's Sent-folder scan resumes, or null before its first. */
+  readSentScanCursor(accountId: string): string | null {
+    return this.read((database) => {
+      const row = database
+        .prepare("SELECT cursor FROM sent_scan_progress WHERE account_id = ?")
+        .get(validAccountId(accountId));
+      if (row === undefined) return null;
+      if (typeof row.cursor !== "string" || !SENT_SCAN_CURSOR.test(row.cursor)) {
+        throw new MailSenderError("mail_senders_unavailable");
+      }
+      return row.cursor;
+    });
+  }
+
+  /**
+   * One batch of a Sent-folder scan: the people written to become known, the
+   * addresses written from become the owner's, and the cursor moves, in one
+   * transaction, so a batch is never learned twice over or lost between the
+   * two. The answer counts the rows that were new.
+   */
+  recordSentScan(
+    accountId: string,
+    input: {
+      readonly cursor: string;
+      readonly known: readonly string[];
+      readonly own: readonly string[];
+    },
+  ): { readonly knownAdded: number; readonly ownAdded: number } {
+    const id = validAccountId(accountId);
+    if (!SENT_SCAN_CURSOR.test(input.cursor)) {
+      throw new MailSenderError("mail_senders_unavailable");
+    }
+    const now = validTimestamp(this.now());
+    return this.transaction((database) => {
+      const knownAdded = learnKnownIn(database, input.known, "sent", now);
+      const ownAdded = learnOwnIn(database, input.own, now);
+      database
+        .prepare(
+          `INSERT INTO sent_scan_progress(account_id, cursor, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(account_id) DO UPDATE
+             SET cursor = excluded.cursor, updated_at = excluded.updated_at`,
+        )
+        .run(id, input.cursor, now);
+      return Object.freeze({ knownAdded, ownAdded });
+    });
   }
 
   isKnown(address: string): boolean {
@@ -1176,6 +1239,17 @@ export interface MailSenderMailPort {
     input: MailThreadMutationInput & { readonly threadId: string },
     signal: AbortSignal,
   ): Promise<MailThreadMutationResult>;
+  /**
+   * One bounded read of the account's Sent mailbox at the provider, from the
+   * cursor the last one handed back. Null for a provider whose Sent mail the
+   * cache already holds. It is the one read the screen makes outside the
+   * cache, so the scheduler spaces it.
+   */
+  scanSentEnvelopes(
+    accountId: string,
+    input: { readonly cursor: string | null },
+    signal: AbortSignal,
+  ): Promise<MailSentScanResult | null>;
 }
 
 export interface MailSenderRequestContext {
@@ -1243,6 +1317,9 @@ export class MailSenderScreen implements MailSenderScreenService {
   private readonly onChange: ((change: MailServiceChange) => void) | null;
   private readonly backfillWindow: number;
   private readonly archiveBackoff = new Map<string, number>();
+  /** The last thing the journal was told about each account's Sent scan that
+   *  did not read the folder, so a standing answer is written once. */
+  private readonly sentScanSaid = new Map<string, string>();
   /**
    * One queue for every change a decision makes: recording or removing it,
    * and each single archive or restore. Everything a queued archive depends
@@ -1606,6 +1683,72 @@ export class MailSenderScreen implements MailSenderScreenService {
       hasMore = (await this.archiveBlocked(accountId, signal)) || hasMore;
     }
     return Object.freeze({ hasMore });
+  }
+
+  /**
+   * The scheduler's Sent-folder step for one account whose cache holds its
+   * Inbox alone: one bounded read of the envelopes in its Sent mailbox, so the
+   * people the owner writes to from any client become known and the addresses
+   * he writes from become his own, as the backfill's Sent phase does from
+   * Gmail's cached Sent mail. It runs only while the screen is on. It is a
+   * provider call, which no other step of the screen makes unasked, so the
+   * scheduler decides how often.
+   *
+   * Nothing here fails a sync. A server with no Sent mailbox, one that will
+   * not open it, and a read that failed are each written to the journal once
+   * while the answer stands, and the next window asks again from the cursor
+   * the last good read left. A batch is written with counts: the envelopes
+   * read and the addresses that became known.
+   */
+  async runBackgroundSentScanStep(accountId: string, signal: AbortSignal): Promise<void> {
+    if (!this.store.readState().enabled) return;
+    let result: MailSentScanResult | null;
+    try {
+      result = await this.mail.scanSentEnvelopes(
+        accountId,
+        { cursor: this.store.readSentScanCursor(accountId) },
+        signal,
+      );
+    } catch (error) {
+      if (signal.aborted) throw error;
+      this.saySentScanOnce(accountId, "scan_failed", stableErrorCode(error));
+      return;
+    }
+    if (result === null) return;
+    if (result.status === "unavailable") {
+      this.saySentScanOnce(accountId, result.reason);
+      return;
+    }
+    this.sentScanSaid.delete(accountId);
+    const { knownAdded, ownAdded } = this.store.recordSentScan(accountId, {
+      cursor: result.cursor,
+      known: normalizeAll(result.recipients),
+      own: normalizeAll(result.senders),
+    });
+    if (result.envelopeCount > 0 || result.uidValidityChanged) {
+      this.onEvent({
+        event: "mail_sender_sent_scan",
+        accountId,
+        ...(result.uidValidityChanged ? { reason: "uidvalidity_changed" } : {}),
+        messageCount: result.envelopeCount,
+        recipientCount: knownAdded,
+      });
+    }
+    // A letter waiting from someone the owner has now written to, or from an
+    // address that turned out to be his, reads differently with no thread
+    // having moved.
+    if (knownAdded + ownAdded > 0) await this.recordListsChanged();
+  }
+
+  private saySentScanOnce(accountId: string, reason: string, errorCode?: string): void {
+    if (this.sentScanSaid.get(accountId) === reason) return;
+    this.sentScanSaid.set(accountId, reason);
+    this.onEvent({
+      event: "mail_sender_sent_scan",
+      accountId,
+      reason,
+      ...(errorCode === undefined ? {} : { errorCode }),
+    });
   }
 
   /**
@@ -2203,6 +2346,16 @@ function isPermanentMutationFailure(error: unknown): boolean {
   );
 }
 
+/** The code a typed mail error carries, and one fixed code for anything else:
+ *  an untyped error's text can echo what the server said. */
+function stableErrorCode(error: unknown): string {
+  return error instanceof MailProviderSyncError ||
+    error instanceof MailAccountError ||
+    error instanceof MailSenderError
+    ? error.code
+    : "mail_provider_unavailable";
+}
+
 function initializeSchema(database: DatabaseSync, now: number): void {
   const version = database.prepare("PRAGMA user_version").get()?.user_version;
   if (version === 0) {
@@ -2220,10 +2373,11 @@ function initializeSchema(database: DatabaseSync, now: number): void {
       if (database.isTransaction) database.exec("ROLLBACK");
       throw error;
     }
-    return;
+  } else if (version !== SCHEMA_VERSION) {
+    throw new MailSenderError("mail_senders_unavailable");
   }
-  if (version !== SCHEMA_VERSION) throw new MailSenderError("mail_senders_unavailable");
   readScreenState(database);
+  database.exec(SENT_SCAN_SCHEMA_SQL);
 }
 
 function readScreenState(database: DatabaseSync): {
@@ -2246,31 +2400,37 @@ function readScreenState(database: DatabaseSync): {
   });
 }
 
+/** Answers how many of the addresses were not known before. */
 function learnKnownIn(
   database: DatabaseSync,
   addresses: readonly string[],
   source: "backfill" | "sent",
   now: number,
-): void {
+): number {
   const insert = database.prepare(
     "INSERT OR IGNORE INTO known_senders(address, source, added_at) VALUES (?, ?, ?)",
   );
+  let added = 0;
   for (const address of new Set(addresses)) {
     if (address.length >= 3 && address.length <= MAX_ADDRESS_LENGTH) {
-      insert.run(address, source, now);
+      added += Number(insert.run(address, source, now).changes);
     }
   }
+  return added;
 }
 
-function learnOwnIn(database: DatabaseSync, addresses: readonly string[], now: number): void {
+/** Answers how many of the addresses were not the owner's before. */
+function learnOwnIn(database: DatabaseSync, addresses: readonly string[], now: number): number {
   const insert = database.prepare(
     "INSERT OR IGNORE INTO own_senders(address, added_at) VALUES (?, ?)",
   );
+  let added = 0;
   for (const address of new Set(addresses)) {
     if (address.length >= 3 && address.length <= MAX_ADDRESS_LENGTH) {
-      insert.run(address, now);
+      added += Number(insert.run(address, now).changes);
     }
   }
+  return added;
 }
 
 function decisionKind(value: unknown): MailSenderDecisionKind | null {

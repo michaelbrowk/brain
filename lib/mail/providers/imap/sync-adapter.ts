@@ -93,6 +93,18 @@ export const IMAP_SENT_SCAN_BATCH = 250;
  * before that waits once in New senders, as everyone did before the scan.
  */
 export const IMAP_SENT_SCAN_FIRST_RUN_CAP = 5_000;
+/**
+ * How long a Sent folder is left alone after a scan session found nothing in
+ * it, when no sync session could say whether anything has arrived since.
+ */
+const SENT_SCAN_QUIET_MS = 10 * 60_000;
+/**
+ * How long after the screen last asked for a scan the sync's sessions go on
+ * asking the Sent folder's STATUS. Twice the longest fallback interval the
+ * service accepts, so the STATUS is there for every scan the scheduler asks
+ * for, and stops within two hours of the screen being switched off.
+ */
+const SENT_STATUS_WANTED_MS = 2 * 60 * 60_000;
 
 export interface ImapReadSessions {
   withSession<T>(
@@ -193,6 +205,26 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
    * letter again by the same halving, a few windows later.
    */
   private sentScanRetry: SentScanRetry | null = null;
+  /**
+   * When the screen last asked for a scan. The sync's sessions ask the Sent
+   * folder's STATUS only while it keeps asking, so an account whose screen is
+   * off is not asked a thing about the folder.
+   */
+  private sentScanAskedAt: number | null = null;
+  /**
+   * The Sent folder's UIDVALIDITY and UIDNEXT as a sync session last read
+   * them, until a scan takes them. Each is taken once: an answer is only
+   * news to the scan that follows the sync that brought it.
+   */
+  private sentStatus: { readonly uidValidity: bigint; readonly uidNext: number } | null = null;
+  /** No STATUS on a sync session before this time: the last one failed. */
+  private sentStatusRestUntil = 0;
+  /**
+   * The last scan session that found nothing to read and no walk to go on
+   * with, and the cursor it left. With no STATUS to go by, the folder is left
+   * alone for SENT_SCAN_QUIET_MS after it.
+   */
+  private sentQuiet: { readonly at: number; readonly cursor: string } | null = null;
   private readonly now: () => number;
 
   constructor(
@@ -224,7 +256,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
     const maxItems = validatePageSize(input.maxItems);
     const parsedToken =
       input.pageToken === null ? null : parseInitialPageToken(input.pageToken);
-    return this.run(signal, (client) =>
+    return this.runSync(signal, (client) =>
       withInbox(client, async (mailbox) => {
         const uidValidity = validateUidValidity(mailbox.uidValidity);
         const currentUidNext = validateUid(mailbox.uidNext);
@@ -317,7 +349,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
     const start = parseAnchor(input.startHistoryId);
     const continuation =
       input.pageToken === null ? null : parseChangePageToken(input.pageToken);
-    return this.run(signal, (client) =>
+    return this.runSync(signal, (client) =>
       withInbox(client, async (mailbox) => {
         const current: Omit<ImapAnchor, "cycle"> = Object.freeze({
           uidValidity: validateUidValidity(mailbox.uidValidity),
@@ -480,10 +512,32 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
     input: { readonly cursor: string | null },
     signal: AbortSignal,
   ): Promise<MailSentScanResult> {
+    this.sentScanAskedAt = this.now();
     const remembered = this.rememberedSentMailbox();
     if (remembered !== null && remembered.refusal !== null) {
       return sentScanUnavailable(remembered.refusal);
     }
+    // A scan session is a login, and a quiet folder has nothing to read. The
+    // sync's own session asked the folder's STATUS on its way: when that
+    // names the cursor's UIDVALIDITY and a next UID one past the highest UID
+    // read, and the first walk is over, there is nothing to open a session
+    // for. Without a STATUS (the server refused it, or no sync has run since
+    // the last one was taken) the folder is left alone for a while after a
+    // scan that found it quiet, and asked otherwise.
+    const observed = this.sentStatus;
+    this.sentStatus = null;
+    const stored = parseSentScanCursor(input.cursor);
+    if (stored !== null && stored.walkRemaining === 0) {
+      const nothingNew =
+        observed !== null
+          ? observed.uidValidity === stored.uidValidity &&
+            observed.uidNext - 1 === stored.highestUid
+          : this.sentQuiet !== null &&
+            this.sentQuiet.cursor === input.cursor &&
+            this.now() - this.sentQuiet.at < SENT_SCAN_QUIET_MS;
+      if (nothingNew) return SENT_SCAN_UNCHANGED;
+    }
+    this.sentQuiet = null;
     // Kept outside the session on purpose: a session that runs into its
     // deadline is abandoned in the middle of an await, and what it had asked
     // for is all that is known about it afterwards.
@@ -510,13 +564,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
         try {
           return await withMailbox(client, path, true, (mailbox) => {
             examined = true;
-            return readSentEnvelopes(
-              client,
-              mailbox,
-              parseSentScanCursor(input.cursor),
-              this.sentScanRetry,
-              attempt,
-            );
+            return readSentEnvelopes(client, mailbox, stored, this.sentScanRetry, attempt);
           });
         } catch (error) {
           if (examined || !isServerAnswer(error)) throw error;
@@ -537,6 +585,9 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
       return this.afterUnreadBatch(attempt);
     }
     if (result.status === "scanned") {
+      if (result.envelopeCount === 0 && !result.hasMore) {
+        this.sentQuiet = Object.freeze({ at: this.now(), cursor: result.cursor });
+      }
       // The batch after a narrowed one stays narrow until the range that
       // failed has been gone through: one of its halves holds the letter.
       const left = attempt.left - attempt.asked;
@@ -584,6 +635,44 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
     return attempt.skipped(
       attempt.lineTooLong ? "envelope_line_too_long" : "envelope_unreadable",
     );
+  }
+
+  /**
+   * The Sent folder's STATUS, asked on a sync session that is open anyway,
+   * so that a scan knows whether there is anything to open a session of its
+   * own for. `STATUS (UIDNEXT UIDVALIDITY)` reads two counters and selects
+   * nothing; LIST is asked here too when its ten minutes have run out, so
+   * that refresh costs no login either.
+   *
+   * It never fails the sync it rides on. A server that answers NO, or says
+   * the folder is not there, is not asked again for ROLE_REFUSAL_TTL_MS, and
+   * the scan falls back on its own quiet window meanwhile.
+   */
+  private async observeSentStatus(client: ImapSessionClient): Promise<void> {
+    const now = this.now();
+    if (
+      this.sentScanAskedAt === null ||
+      now - this.sentScanAskedAt > SENT_STATUS_WANTED_MS ||
+      now < this.sentStatusRestUntil
+    ) {
+      return;
+    }
+    try {
+      const remembered = this.rememberedSentMailbox();
+      const path = remembered === null ? await this.listSentMailbox(client) : remembered.path;
+      if (path === null) return;
+      const status = await client.status(path, { uidNext: true, uidValidity: true });
+      if (status === false || status.uidNext === undefined || status.uidValidity === undefined) {
+        throw new MailProviderSyncError("mail_provider_response_invalid");
+      }
+      this.sentStatus = Object.freeze({
+        uidValidity: validateUidValidity(status.uidValidity),
+        uidNext: validateUid(status.uidNext),
+      });
+    } catch {
+      this.sentStatus = null;
+      this.sentStatusRestUntil = this.now() + ROLE_REFUSAL_TTL_MS;
+    }
   }
 
   private rememberedSentMailbox(): SentMailboxAnswer | null {
@@ -932,6 +1021,23 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
       uid === null ? message : { ...message, uid },
       Object.freeze({ threadId, inInbox: isInboxPath(path) }),
     );
+  }
+
+  /**
+   * A sync page's session: the Inbox work, and then, on the same login, the
+   * Sent folder's STATUS for the new-senders scan. The page is complete
+   * before the STATUS is asked and is what the caller gets whatever the
+   * STATUS answers.
+   */
+  private runSync<T>(
+    signal: AbortSignal,
+    operation: (client: ImapSessionClient) => Promise<T>,
+  ): Promise<T> {
+    return this.run(signal, async (client) => {
+      const page = await operation(client);
+      await this.observeSentStatus(client);
+      return page;
+    });
   }
 
   private async run<T>(
@@ -1343,6 +1449,7 @@ interface SentScanAttempt {
 }
 
 const SENT_SCAN_BATCH_FAILED: MailSentScanResult = Object.freeze({ status: "batch_failed" });
+const SENT_SCAN_UNCHANGED: MailSentScanResult = Object.freeze({ status: "unchanged" });
 
 /** ImapFlow's codes for a response line or literal past the session's limit. */
 function isLineLimitError(error: unknown): boolean {

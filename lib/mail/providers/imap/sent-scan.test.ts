@@ -1,7 +1,8 @@
 import type { FetchMessageObject, MailboxObject } from "imapflow";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { StoredImapMailAccount } from "../../service/account-types";
+import { MailBackgroundSyncScheduler } from "../../service/background-sync";
 import type { ImapSessionClient } from "../../service/imapflow-adapter";
 import type { MailSentScanResult } from "../../service/senders";
 import {
@@ -11,6 +12,10 @@ import {
 } from "./sync-adapter";
 
 const ACCOUNT_ID = "account-a11111111111111111111111111111111";
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("the IMAP Sent-folder envelope scan", () => {
   it("examines the Sent mailbox read-only and asks for envelopes and nothing else", async () => {
@@ -556,6 +561,205 @@ describe("a Sent-folder batch that cannot be read", () => {
   });
 });
 
+/*
+  A scan session is a login, and a quiet Sent folder used to cost one a
+  window for nothing: sixty an hour beside the sync's sixty. The sync's own
+  session now asks the folder's STATUS on its way, and a scan opens a session
+  only when that answer differs from its cursor or its first walk is not over.
+*/
+describe("what a quiet Sent folder costs its host", () => {
+  async function syncing(server: ReturnType<typeof serverFixture>, now?: () => number) {
+    const made = providerFor(server, now);
+    const anchor = await made.provider.getSyncAnchor(signal());
+    const pass = () =>
+      made.provider.listChanges(
+        { startHistoryId: anchor, pageToken: null, maxItems: 5 },
+        signal(),
+      );
+    return { ...made, pass };
+  }
+
+  it("opens no session of its own while nothing is sent, and one when something is", async () => {
+    const clock = { now: 1_000_000 };
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
+    const { provider, pass } = await syncing(server, () => clock.now);
+
+    // Nobody has asked for a scan yet, so the sync asks nothing about Sent.
+    await pass();
+    expect(server.statuses).toEqual([]);
+    const first = scanned(await provider.scanSentEnvelopes({ cursor: null }, signal()));
+    expect(server.sessionsOf("Sent")).toBe(1);
+
+    for (let minute = 0; minute < 60; minute += 1) {
+      clock.now += 60_000;
+      await pass();
+      await expect(
+        provider.scanSentEnvelopes({ cursor: first.cursor }, signal()),
+      ).resolves.toEqual({ status: "unchanged" });
+    }
+    // An hour: sixty STATUS answers on the sync's sessions, and the scan's
+    // one session is still the first. LIST was asked again on a sync session
+    // each time its ten minutes ran out, never on a session of the scan's.
+    expect(server.statuses).toEqual(Array.from({ length: 60 }, () => "Sent"));
+    expect(server.sessionsOf("Sent")).toBe(1);
+    expect(server.lists).toBe(6);
+
+    // A letter is sent from the phone: the next sync sees UIDNEXT move, and
+    // the scan after it opens a session and reads it.
+    server.append("Sent", 1);
+    clock.now += 60_000;
+    await pass();
+    const next = scanned(await provider.scanSentEnvelopes({ cursor: first.cursor }, signal()));
+    expect(next).toMatchObject({ envelopeCount: 1, hasMore: false });
+    expect(recipientsOf(next)).toContain("to4@example.org");
+    expect(server.sessionsOf("Sent")).toBe(2);
+  });
+
+  it("goes on walking while the first walk is unfinished, whatever the STATUS says", async () => {
+    const total = IMAP_SENT_SCAN_BATCH + 10;
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, total) } });
+    const { provider, pass } = await syncing(server);
+    const first = scanned(await provider.scanSentEnvelopes({ cursor: null }, signal()));
+    expect(first.hasMore).toBe(true);
+
+    await pass();
+    const second = scanned(await provider.scanSentEnvelopes({ cursor: first.cursor }, signal()));
+
+    expect(second).toMatchObject({ envelopeCount: 10, hasMore: false });
+  });
+
+  it("opens a session when the STATUS names another UIDVALIDITY or a next UID below the cursor", async () => {
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
+    const { provider, pass } = await syncing(server);
+    const first = scanned(await provider.scanSentEnvelopes({ cursor: null }, signal()));
+
+    server.renumber("Sent", BigInt(901), [1, 2, 3]);
+    await pass();
+    const renumbered = scanned(await provider.scanSentEnvelopes({ cursor: first.cursor }, signal()));
+    expect(renumbered.restart).toBe("uidvalidity_changed");
+
+    await pass();
+    const regressed = scanned(
+      await provider.scanSentEnvelopes({ cursor: "s1_901_90_0_0_0" }, signal()),
+    );
+    expect(regressed.restart).toBe("uidnext_regressed");
+  });
+
+  it("takes each STATUS once: a second scan without a sync in between does not trust the old answer", async () => {
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
+    const { provider, pass } = await syncing(server);
+    const first = scanned(await provider.scanSentEnvelopes({ cursor: null }, signal()));
+    await pass();
+    await expect(
+      provider.scanSentEnvelopes({ cursor: first.cursor }, signal()),
+    ).resolves.toEqual({ status: "unchanged" });
+
+    // Sent after that STATUS was taken, and no sync has run since.
+    server.append("Sent", 1);
+    const next = scanned(await provider.scanSentEnvelopes({ cursor: first.cursor }, signal()));
+
+    expect(next.envelopeCount).toBe(1);
+  });
+
+  it("rests a quiet folder ten minutes after an empty scan when the sync's session cannot carry the STATUS", async () => {
+    const clock = { now: 1_000_000 };
+    const server = serverFixture({
+      sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) },
+      refuseStatus: true,
+    });
+    const { provider, pass } = await syncing(server, () => clock.now);
+    const first = scanned(await provider.scanSentEnvelopes({ cursor: null }, signal()));
+
+    // The server answers the STATUS with NO. The sync is not failed by it,
+    // and does not ask again for ten minutes.
+    await pass();
+    await pass();
+    expect(server.statuses).toEqual(["Sent"]);
+
+    // With no STATUS to go by, the scan opens a session, finds nothing, and
+    // then leaves the folder alone for ten minutes.
+    const empty = scanned(await provider.scanSentEnvelopes({ cursor: first.cursor }, signal()));
+    expect(empty).toMatchObject({ envelopeCount: 0, hasMore: false });
+    expect(server.sessionsOf("Sent")).toBe(2);
+    for (let minute = 1; minute <= 9; minute += 1) {
+      clock.now += 60_000;
+      await pass();
+      await expect(
+        provider.scanSentEnvelopes({ cursor: empty.cursor }, signal()),
+      ).resolves.toEqual({ status: "unchanged" });
+    }
+    expect(server.sessionsOf("Sent")).toBe(2);
+
+    server.append("Sent", 1);
+    clock.now += 60_000 + 1;
+    await pass();
+    const late = scanned(await provider.scanSentEnvelopes({ cursor: empty.cursor }, signal()));
+    expect(late.envelopeCount).toBe(1);
+    expect(server.sessionsOf("Sent")).toBe(3);
+  });
+
+  it("never fails a sync over the Sent folder's STATUS", async () => {
+    const server = serverFixture({
+      sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) },
+      statusThrows: true,
+    });
+    const { provider, pass } = await syncing(server);
+    await provider.scanSentEnvelopes({ cursor: null }, signal());
+
+    await expect(pass()).resolves.toMatchObject({ changedThreadIds: [] });
+    expect(server.statuses).toEqual(["Sent"]);
+  });
+
+  it("costs a quiet account its sync's logins and one more in an hour, at the default interval and at the floor", async () => {
+    for (const intervalMs of [60_000, 5_000]) {
+      vi.useFakeTimers({ now: 0 });
+      const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
+      const { provider, pass } = await syncing(server, () => Date.now());
+      let cursor: string | null = null;
+      const scheduler = new MailBackgroundSyncScheduler(
+        {
+          listAccountIds: async () => [ACCOUNT_ID],
+          listSyncAccounts: async () => [{ accountId: ACCOUNT_ID, providerKind: "imap" }],
+          runBackgroundSyncStep: async () => {
+            await pass();
+            return {
+              result: { apiVersion: 1, status: "idle", changedCount: 0, hasMore: false },
+              hasMore: false,
+            };
+          },
+        },
+        {
+          initialDelayMs: 10,
+          intervalMs,
+          gmailIntervalMs: 5_000,
+          senders: {
+            async runBackgroundSenderStep() {
+              return { hasMore: false };
+            },
+            async runBackgroundSentScanStep(_accountId, stop) {
+              const result = await provider.scanSentEnvelopes({ cursor }, stop);
+              if (result.status === "scanned") cursor = result.cursor;
+            },
+          },
+        },
+      );
+      try {
+        scheduler.start();
+        await vi.advanceTimersByTimeAsync(3_600_000);
+      } finally {
+        await scheduler.stop();
+        vi.useRealTimers();
+      }
+
+      // The anchor's session, then one a sync; and the scan's first, which
+      // walked the folder. Before the STATUS rode on the sync it was one
+      // more login a window: 60 an hour here, and 720 at the floor.
+      expect(server.sessionsOf("INBOX")).toBe(1 + 3_600_000 / intervalMs);
+      expect(server.sessionsOf("Sent")).toBe(1);
+    }
+  });
+});
+
 type ScannedResult = Extract<MailSentScanResult, { readonly status: "scanned" }>;
 
 function scanned(result: MailSentScanResult): ScannedResult {
@@ -611,8 +815,14 @@ function serverFixture(options: {
   readonly flagUpdates?: boolean;
   /** What one letter's envelope says instead of the fixture's own, by UID. */
   readonly envelopes?: Readonly<Record<number, Partial<FakeEnvelope>>>;
+  /** STATUS is answered with NO, which ImapFlow hands back as `false`. */
+  readonly refuseStatus?: boolean;
+  /** STATUS throws, as it does for a folder the server says is not there. */
+  readonly statusThrows?: boolean;
 }) {
   const mailboxes = new Map<string, FakeMailbox>();
+  // The Inbox the sync's own sessions examine: empty, and never changing.
+  mailboxes.set("INBOX", { path: "INBOX", uidValidity: BigInt(77), uidNext: 1, uids: [] });
   const addSent = (path: string, uids: readonly number[], specialUse?: string) => {
     mailboxes.set(path, {
       path,
@@ -627,6 +837,7 @@ function serverFixture(options: {
   const locks: { readonly path: string; readonly readOnly: boolean }[] = [];
   const fetches: { readonly range: string; readonly query: unknown; readonly uid: boolean }[] = [];
   const searches: string[] = [];
+  const statuses: string[] = [];
   const forbidden: string[] = [];
   const counters = { bccReads: 0, lists: 0 };
   const errorListeners: Array<(error: unknown) => void> = [];
@@ -783,6 +994,18 @@ function serverFixture(options: {
         subscribed: true,
       }));
     },
+    async status(path: string, query: { readonly uidNext?: boolean; readonly uidValidity?: boolean }) {
+      if (query.uidNext !== true || query.uidValidity !== true || Object.keys(query).length !== 2) {
+        throw new Error("only STATUS (UIDNEXT UIDVALIDITY) is modelled");
+      }
+      statuses.push(path);
+      if (options.statusThrows === true) {
+        throw Object.assign(new Error(`Mailbox doesn't exist: ${path}`), { code: "NotFound" });
+      }
+      const target = mailboxes.get(path);
+      if (options.refuseStatus === true || target === undefined) return false as const;
+      return { path, uidNext: target.uidNext, uidValidity: target.uidValidity };
+    },
     mailboxCreate: forbid("create"),
     mailboxSubscribe: forbid("subscribe"),
     messageFlagsAdd: forbid("store"),
@@ -795,9 +1018,17 @@ function serverFixture(options: {
     locks,
     fetches,
     searches,
+    statuses,
     forbidden,
     get bccReads() {
       return counters.bccReads;
+    },
+    get lists() {
+      return counters.lists;
+    },
+    /** Sessions that examined this mailbox: each is a login on the wire. */
+    sessionsOf(path: string) {
+      return locks.filter((lock) => lock.path === path).length;
     },
     addSent,
     allowExamine() {

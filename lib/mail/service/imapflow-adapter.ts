@@ -98,6 +98,18 @@ export interface ImapReadClient {
     query: FetchQueryObject,
     options?: FetchOptions,
   ): Promise<FetchMessageObject[]>;
+  /**
+   * `STATUS` of a mailbox other than the selected one, which reads its
+   * counters without opening it. ImapFlow answers `false` when the server
+   * says NO, and throws when the server says the mailbox is not there.
+   */
+  status(
+    path: string,
+    query: { readonly uidNext?: boolean; readonly uidValidity?: boolean },
+  ): Promise<
+    | { readonly path: string; readonly uidNext?: number; readonly uidValidity?: bigint }
+    | false
+  >;
 }
 
 /**

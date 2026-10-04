@@ -275,6 +275,52 @@ describe("what the Sent-folder scan survives on a real ImapFlow session", () => 
     ).resolves.toMatchObject({ status: "scanned", envelopeCount: 2, hasMore: false });
   });
 
+  it("asks the Sent folder's STATUS on the sync's own session, and logs in for a scan only when there is something to read", async () => {
+    const options: FakeImapOptions = {
+      capability: "IMAP4rev1 SPECIAL-USE",
+      folders: [{ flags: "\\HasNoChildren \\Sent", path: "Sent" }],
+      uidNext: 13,
+      messages: [letter(11, "a"), letter(12, "b")],
+    };
+    const { adapter, commands } = await sentScanAdapter(options);
+    const signal = new AbortController().signal;
+    const logins = () => commandNames(commands).filter((name) => name === "LOGIN").length;
+    const syncPass = (anchor: string) =>
+      adapter.listChanges({ startHistoryId: anchor, pageToken: null, maxItems: 5 }, signal);
+
+    const anchor = await adapter.getSyncAnchor(signal);
+    const first = await adapter.scanSentEnvelopes({ cursor: null }, signal);
+    if (first.status !== "scanned") throw new Error("the first scan read nothing");
+    expect(logins()).toBe(2);
+
+    // Five windows of a quiet account: five logins, all of them the sync's.
+    for (let window = 0; window < 5; window += 1) {
+      await syncPass(anchor);
+      await expect(
+        adapter.scanSentEnvelopes({ cursor: first.cursor }, signal),
+      ).resolves.toEqual({ status: "unchanged" });
+    }
+    expect(logins()).toBe(7);
+    expect(
+      commands.filter((line) => / STATUS /.test(line)).map((line) => line.replace(/^\S+ /, "")),
+    ).toEqual(Array.from({ length: 5 }, () => "STATUS Sent (UIDNEXT UIDVALIDITY)"));
+    // The folder itself was opened once, by the first scan.
+    expect(commands.filter((line) => / EXAMINE "?Sent"?$/.test(line))).toHaveLength(1);
+
+    // A letter is sent from another client.
+    options.messages = [letter(11, "a"), letter(12, "b"), letter(13, "c")];
+    options.uidNext = 14;
+    await syncPass(anchor);
+    await expect(
+      adapter.scanSentEnvelopes({ cursor: first.cursor }, signal),
+    ).resolves.toMatchObject({
+      status: "scanned",
+      envelopes: [{ from: "person@example.test", recipients: ["c@example.org"] }],
+      cursor: "s1_77_13_0_0_0",
+    });
+    expect(logins()).toBe(9);
+  });
+
   it("asks which UIDs exist before it fetches mail far above the cursor", async () => {
     const { adapter, commands } = await sentScanAdapter({
       capability: "IMAP4rev1 SPECIAL-USE",
@@ -417,11 +463,15 @@ interface FakeImapFolder {
   readonly path: string;
 }
 
+/**
+ * One folder beside an empty INBOX. `uidNext` and `messages` are read at each
+ * command, so a test can let a letter arrive between two sessions.
+ */
 interface FakeImapOptions {
   readonly capability: string;
   readonly folders: readonly FakeImapFolder[];
   readonly exists?: number;
-  readonly uidNext?: number;
+  uidNext?: number;
   readonly uidValidity?: number;
   /** The untagged lines a FETCH or UID FETCH answers with. */
   readonly fetch?: (line: string) => string;
@@ -429,7 +479,7 @@ interface FakeImapOptions {
    * The folder's letters, lowest UID first. A fetch answers the ones its
    * sequence or UID range names, and a UID search the UIDs its range names.
    */
-  readonly messages?: readonly { readonly uid: number; readonly envelope: string }[];
+  messages?: readonly { readonly uid: number; readonly envelope: string }[];
   /** Sent ahead of every fetch answer, as a server reports another client. */
   readonly unsolicited?: string;
 }
@@ -476,9 +526,29 @@ function serveSentImap(socket: TLSSocket, commands: string[], options: FakeImapO
         const hit = options.folders.find((folder) => line.includes(folder.path));
         entries = hit
           ? `* ${command} (${hit.flags}) "/" "${hit.path}"\r\n`
-          : `* ${command} (\\Noselect) "/" ""\r\n`;
+          : line.includes("INBOX")
+            ? `* ${command} (\\HasNoChildren) "/" INBOX\r\n`
+            : `* ${command} (\\Noselect) "/" ""\r\n`;
       }
       socket.write(`${entries}${tag} OK ${command} completed\r\n`);
+      return;
+    }
+    if (command === "EXAMINE" && / EXAMINE "?INBOX"?$/.test(line)) {
+      socket.write(
+        "* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)\r\n" +
+          "* 0 EXISTS\r\n" +
+          "* OK [UIDVALIDITY 55] UIDs valid\r\n" +
+          "* OK [UIDNEXT 1] Predicted next UID\r\n" +
+          `${tag} OK [READ-ONLY] EXAMINE completed\r\n`,
+      );
+      return;
+    }
+    if (command === "STATUS") {
+      socket.write(
+        `* STATUS ${line.split(" ")[2]} (UIDNEXT ${options.uidNext ?? 1} UIDVALIDITY ${
+          options.uidValidity ?? 77
+        })\r\n${tag} OK STATUS completed\r\n`,
+      );
       return;
     }
     if (command === "EXAMINE") {

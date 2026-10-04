@@ -571,27 +571,30 @@ export class SqliteMailSenderStore {
   }
 
   /**
-   * One batch of a Sent-folder scan: the people written to become known, the
-   * addresses written from become the owner's, and the cursor moves, in one
-   * transaction, so a batch is never learned twice over or lost between the
-   * two. The answer counts the rows that were new.
+   * One batch of a Sent-folder scan: the people written to become known and
+   * the cursor moves, in one transaction, so a batch is never learned twice
+   * over or lost between the two. The scan writes no alias: `own_senders` is
+   * not touched here. Like a backfill step it is written only if the screen
+   * is still on from the moment the scan read from, so a scan in flight when
+   * the owner switches the screen off, or off and on, writes nothing and
+   * answers null. Otherwise the answer counts the rows that were new.
    */
   recordSentScan(
     accountId: string,
     input: {
+      readonly enabledAt: number;
       readonly cursor: string;
       readonly known: readonly string[];
-      readonly own: readonly string[];
     },
-  ): { readonly knownAdded: number; readonly ownAdded: number } {
+  ): { readonly knownAdded: number } | null {
     const id = validAccountId(accountId);
     if (!SENT_SCAN_CURSOR.test(input.cursor)) {
       throw new MailSenderError("mail_senders_unavailable");
     }
     const now = validTimestamp(this.now());
     return this.transaction((database) => {
+      if (readScreenState(database).enabledAt !== input.enabledAt) return null;
       const knownAdded = learnKnownIn(database, input.known, "sent", now);
-      const ownAdded = learnOwnIn(database, input.own, now);
       database
         .prepare(
           `INSERT INTO sent_scan_progress(account_id, cursor, updated_at) VALUES (?, ?, ?)
@@ -599,7 +602,7 @@ export class SqliteMailSenderStore {
              SET cursor = excluded.cursor, updated_at = excluded.updated_at`,
         )
         .run(id, input.cursor, now);
-      return Object.freeze({ knownAdded, ownAdded });
+      return Object.freeze({ knownAdded });
     });
   }
 
@@ -1174,6 +1177,26 @@ export interface MailSenderBackfillBatch {
  *  answered the read-only open with a refusal. */
 export type MailSentScanRefusal = "no_sent_mailbox" | "examine_refused";
 
+/** Why a scan began its walk again: the folder was renumbered, or its next
+ *  UID fell below one already read. */
+export type MailSentScanRestart = "uidvalidity_changed" | "uidnext_regressed";
+
+/** Why an envelope was passed over: its line is longer than a session
+ *  accepts, or no session could read it for another reason. */
+export type MailSentScanSkipReason = "envelope_line_too_long" | "envelope_unreadable";
+
+/**
+ * One sent letter as the scan hands it over: who wrote it and to whom, raw
+ * addresses and nothing else. Only an envelope that says plainly who wrote it
+ * is handed over at all: one From address, and a Sender that, when the letter
+ * states one, is that same address.
+ */
+export interface MailSentScanEnvelope {
+  readonly from: string;
+  /** To and Cc. Never Bcc. */
+  readonly recipients: readonly string[];
+}
+
 /**
  * One bounded read of the Sent mailbox of an account whose cache holds its
  * Inbox alone. Addresses and counts only: no name, no subject, no Message-ID
@@ -1184,15 +1207,17 @@ export type MailSentScanResult =
       readonly status: "scanned";
       /** Where the next read resumes. Only the provider adapter reads it. */
       readonly cursor: string;
-      /** Raw To and Cc addresses of the envelopes read. */
-      readonly recipients: readonly string[];
-      /** Raw From addresses of the same envelopes. */
-      readonly senders: readonly string[];
+      readonly envelopes: readonly MailSentScanEnvelope[];
+      /** Every envelope read, whether or not it was handed over. */
       readonly envelopeCount: number;
-      /** The stored cursor named another UIDVALIDITY, so the walk began again. */
-      readonly uidValidityChanged: boolean;
+      /** Messages passed over because no session could read their envelope. */
+      readonly skippedCount: number;
+      readonly skipReason: MailSentScanSkipReason | null;
+      readonly restart: MailSentScanRestart | null;
       readonly hasMore: boolean;
     }
+  /** Nothing has reached the folder since the cursor; no session was opened. */
+  | { readonly status: "unchanged" }
   | { readonly status: "unavailable"; readonly reason: MailSentScanRefusal };
 
 export interface MailSenderAccount {
@@ -1688,20 +1713,30 @@ export class MailSenderScreen implements MailSenderScreenService {
   /**
    * The scheduler's Sent-folder step for one account whose cache holds its
    * Inbox alone: one bounded read of the envelopes in its Sent mailbox, so the
-   * people the owner writes to from any client become known and the addresses
-   * he writes from become his own, as the backfill's Sent phase does from
-   * Gmail's cached Sent mail. It runs only while the screen is on. It is a
-   * provider call, which no other step of the screen makes unasked, so the
-   * scheduler decides how often.
+   * people the owner writes to from any client become known. It runs only
+   * while the screen is on. It is a provider call, which no other step of the
+   * screen makes unasked, so the scheduler decides how often.
+   *
+   * It learns recipients and nothing else. A Sent folder also holds letters
+   * the owner did not write (a meeting forward, a delegate's send-as, a
+   * redirect, a migrated or shared mailbox), so a From found there never
+   * becomes an alias: an alias is the owner for good, and one blocked
+   * sender's letter in Sent would undo his block. And only an envelope
+   * written from an address that is already the owner's teaches its To and
+   * Cc; the adapter has already dropped the ones whose Sender is someone
+   * else. What that leaves out is accepted: the recipients of a letter sent
+   * from an alias nothing has taught yet stay unknown.
    *
    * Nothing here fails a sync. A server with no Sent mailbox, one that will
-   * not open it, and a read that failed are each written to the journal once
-   * while the answer stands, and the next window asks again from the cursor
-   * the last good read left. A batch is written with counts: the envelopes
-   * read and the addresses that became known.
+   * not open it, a read that failed and a folder that began again are each
+   * written to the journal once while the answer stands, and the next window
+   * asks again from the cursor the last good read left. A batch is written
+   * with counts: the envelopes read, the addresses that became known, and
+   * the envelopes no session could read.
    */
   async runBackgroundSentScanStep(accountId: string, signal: AbortSignal): Promise<void> {
-    if (!this.store.readState().enabled) return;
+    const state = this.store.readState();
+    if (!state.enabled || state.enabledAt === null) return;
     let result: MailSentScanResult | null;
     try {
       result = await this.mail.scanSentEnvelopes(
@@ -1711,44 +1746,66 @@ export class MailSenderScreen implements MailSenderScreenService {
       );
     } catch (error) {
       if (signal.aborted) throw error;
-      this.saySentScanOnce(accountId, "scan_failed", stableErrorCode(error));
+      this.saySentScanOnce(accountId, "scan_failed", { errorCode: stableErrorCode(error) });
       return;
     }
     if (result === null) return;
     if (result.status === "unavailable") {
-      this.saySentScanOnce(accountId, result.reason);
+      this.saySentScanOnce(accountId, result.reason, {});
       return;
     }
-    this.sentScanSaid.delete(accountId);
-    const { knownAdded, ownAdded } = this.store.recordSentScan(accountId, {
-      cursor: result.cursor,
-      known: normalizeAll(result.recipients),
-      own: normalizeAll(result.senders),
-    });
-    if (result.envelopeCount > 0 || result.uidValidityChanged) {
-      this.onEvent({
-        event: "mail_sender_sent_scan",
-        accountId,
-        ...(result.uidValidityChanged ? { reason: "uidvalidity_changed" } : {}),
-        messageCount: result.envelopeCount,
-        recipientCount: knownAdded,
-      });
+    if (result.status === "unchanged") {
+      this.sentScanSaid.delete(accountId);
+      return;
     }
-    // A letter waiting from someone the owner has now written to, or from an
-    // address that turned out to be his, reads differently with no thread
-    // having moved.
-    if (knownAdded + ownAdded > 0) await this.recordListsChanged();
+    const own = await this.readOwn();
+    const recorded = this.store.recordSentScan(accountId, {
+      enabledAt: state.enabledAt,
+      cursor: result.cursor,
+      known: normalizeAll(
+        result.envelopes.flatMap((envelope) => {
+          const from = normalizeSenderAddress(envelope.from);
+          return from !== null && own.addresses.has(from) ? envelope.recipients : [];
+        }),
+      ),
+    });
+    // The owner switched the screen off, or off and on, under this scan.
+    if (recorded === null) return;
+    const counts = {
+      ...(result.skippedCount > 0 ? { skippedCount: result.skippedCount } : {}),
+      messageCount: result.envelopeCount,
+      recipientCount: recorded.knownAdded,
+    };
+    if (result.restart !== null) {
+      // A server that renumbers the folder on every session would otherwise
+      // write a line a window.
+      this.saySentScanOnce(accountId, result.restart, counts);
+    } else {
+      this.sentScanSaid.delete(accountId);
+      if (result.skippedCount > 0) {
+        this.onEvent({
+          event: "mail_sender_sent_scan",
+          accountId,
+          reason: result.skipReason ?? "envelope_unreadable",
+          ...counts,
+        });
+      } else if (result.envelopeCount > 0) {
+        this.onEvent({ event: "mail_sender_sent_scan", accountId, ...counts });
+      }
+    }
+    // A letter waiting from someone the owner has now written to reads
+    // differently with no thread having moved.
+    if (recorded.knownAdded > 0) await this.recordListsChanged();
   }
 
-  private saySentScanOnce(accountId: string, reason: string, errorCode?: string): void {
+  private saySentScanOnce(
+    accountId: string,
+    reason: string,
+    fields: Readonly<Record<string, string | number>>,
+  ): void {
     if (this.sentScanSaid.get(accountId) === reason) return;
     this.sentScanSaid.set(accountId, reason);
-    this.onEvent({
-      event: "mail_sender_sent_scan",
-      accountId,
-      reason,
-      ...(errorCode === undefined ? {} : { errorCode }),
-    });
+    this.onEvent({ event: "mail_sender_sent_scan", accountId, reason, ...fields });
   }
 
   /**
@@ -2419,18 +2476,15 @@ function learnKnownIn(
   return added;
 }
 
-/** Answers how many of the addresses were not the owner's before. */
-function learnOwnIn(database: DatabaseSync, addresses: readonly string[], now: number): number {
+function learnOwnIn(database: DatabaseSync, addresses: readonly string[], now: number): void {
   const insert = database.prepare(
     "INSERT OR IGNORE INTO own_senders(address, added_at) VALUES (?, ?)",
   );
-  let added = 0;
   for (const address of new Set(addresses)) {
     if (address.length >= 3 && address.length <= MAX_ADDRESS_LENGTH) {
-      added += Number(insert.run(address, now).changes);
+      insert.run(address, now);
     }
   }
-  return added;
 }
 
 function decisionKind(value: unknown): MailSenderDecisionKind | null {

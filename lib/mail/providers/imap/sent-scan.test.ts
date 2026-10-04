@@ -28,17 +28,51 @@ describe("the IMAP Sent-folder envelope scan", () => {
     expect(server.forbidden).toEqual([]);
   });
 
-  it("hands over To and Cc as recipients and From as a sender, addresses only, and never reads Bcc", async () => {
-    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: [7] } });
+  it("hands over each letter's From with its To and Cc, addresses only, and never reads Bcc", async () => {
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: [7, 8] } });
     const { provider } = providerFor(server);
 
     const result = scanned(await provider.scanSentEnvelopes({ cursor: null }, signal()));
 
-    expect(result.recipients).toEqual(["to7@example.org", "cc7@example.org"]);
-    expect(result.senders).toEqual(["alias7@example.test"]);
+    // One pair a letter, so the caller can ask of each who wrote it.
+    expect(result.envelopes).toEqual([
+      { from: "alias7@example.test", recipients: ["to7@example.org", "cc7@example.org"] },
+      { from: "alias8@example.test", recipients: ["to8@example.org", "cc8@example.org"] },
+    ]);
     expect(JSON.stringify(result)).not.toContain("bcc7");
     expect(JSON.stringify(result)).not.toContain("Display Name");
-    // The envelope's Bcc is an accessor in this fixture: touching it fails.
+    // The envelope's Bcc is an accessor in this fixture: it counts each read.
+    expect(server.bccReads).toBe(0);
+  });
+
+  it("hands over only a letter that says plainly who wrote it", async () => {
+    const me = { name: "Me", address: "Me@Example.test" };
+    const server = serverFixture({
+      sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 6) },
+      envelopes: {
+        // A delegate sent it as the owner: the Sender is somebody else.
+        1: { from: [me], sender: [{ address: "assistant@example.test" }] },
+        // Two authors.
+        2: { from: [me, { address: "other@example.test" }] },
+        // No author at all.
+        3: { from: [] },
+        // The Sender repeats the From, as a server fills it in.
+        4: { from: [me], sender: [{ name: "Me again", address: "me@example.test" }] },
+        // No Sender stated.
+        5: { from: [me], sender: undefined },
+        // Nobody in To or Cc: a Bcc-only letter teaches nothing.
+        6: { from: [me], to: [], cc: [] },
+      },
+    });
+    const { provider } = providerFor(server);
+
+    const result = scanned(await provider.scanSentEnvelopes({ cursor: null }, signal()));
+
+    expect(result.envelopeCount).toBe(6);
+    expect(result.envelopes).toEqual([
+      { from: "me@example.test", recipients: ["to4@example.org", "cc4@example.org"] },
+      { from: "me@example.test", recipients: ["to5@example.org", "cc5@example.org"] },
+    ]);
     expect(server.bccReads).toBe(0);
   });
 
@@ -62,8 +96,8 @@ describe("the IMAP Sent-folder envelope scan", () => {
       100,
     ]);
     expect([first, second, third].map((step) => step.hasMore)).toEqual([true, true, false]);
-    expect(first.recipients).toContain(`to${total}@example.org`);
-    expect(third.recipients).toContain("to1@example.org");
+    expect(recipientsOf(first)).toContain(`to${total}@example.org`);
+    expect(recipientsOf(third)).toContain("to1@example.org");
     // One session a call: the caller's window is what spaces them.
     expect(opened.count).toBe(3);
 
@@ -114,8 +148,8 @@ describe("the IMAP Sent-folder envelope scan", () => {
     ]);
     expect(next).toMatchObject({ envelopeCount: IMAP_SENT_SCAN_BATCH, hasMore: true });
     expect(rest).toMatchObject({ envelopeCount: 2, hasMore: false });
-    expect(next.recipients).toContain("to5@example.org");
-    expect(next.recipients).not.toContain("to4@example.org");
+    expect(recipientsOf(next)).toContain("to5@example.org");
+    expect(recipientsOf(next)).not.toContain("to4@example.org");
   });
 
   it("reads a letter sent while the first walk is still going before it walks on", async () => {
@@ -128,10 +162,13 @@ describe("the IMAP Sent-folder envelope scan", () => {
     const fresh = scanned(await provider.scanSentEnvelopes({ cursor: first.cursor }, signal()));
     const tail = scanned(await provider.scanSentEnvelopes({ cursor: fresh.cursor }, signal()));
 
-    expect(fresh.recipients).toEqual([`to${total + 1}@example.org`, `cc${total + 1}@example.org`]);
+    expect(recipientsOf(fresh)).toEqual([
+      `to${total + 1}@example.org`,
+      `cc${total + 1}@example.org`,
+    ]);
     expect(fresh.hasMore).toBe(true);
     expect(tail).toMatchObject({ envelopeCount: 10, hasMore: false });
-    expect(tail.recipients).toContain("to1@example.org");
+    expect(recipientsOf(tail)).toContain("to1@example.org");
   });
 
   it("misses no unread letter when the folder shrinks between two sessions of the walk", async () => {
@@ -147,9 +184,9 @@ describe("the IMAP Sent-folder envelope scan", () => {
 
     // The ten that are left and unread, and none of the ones already read.
     expect(second.envelopeCount).toBe(10);
-    expect(second.recipients).toContain("to31@example.org");
-    expect(second.recipients).toContain("to40@example.org");
-    expect(second.recipients).not.toContain("to41@example.org");
+    expect(recipientsOf(second)).toContain("to31@example.org");
+    expect(recipientsOf(second)).toContain("to40@example.org");
+    expect(recipientsOf(second)).not.toContain("to41@example.org");
     expect(second.hasMore).toBe(false);
   });
 
@@ -157,18 +194,18 @@ describe("the IMAP Sent-folder envelope scan", () => {
     const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
     const { provider } = providerFor(server);
     const before = scanned(await provider.scanSentEnvelopes({ cursor: null }, signal()));
-    expect(before.uidValidityChanged).toBe(false);
+    expect(before.restart).toBeNull();
 
     server.renumber("Sent", BigInt(901), [50, 51]);
     const after = scanned(await provider.scanSentEnvelopes({ cursor: before.cursor }, signal()));
 
-    expect(after.uidValidityChanged).toBe(true);
+    expect(after.restart).toBe("uidvalidity_changed");
     expect(after.envelopeCount).toBe(2);
-    expect(after.recipients).toContain("to51@example.org");
+    expect(recipientsOf(after)).toContain("to51@example.org");
     expect(after.cursor).not.toBe(before.cursor);
     // The new cursor is the new folder's: nothing more to read.
     const settled = scanned(await provider.scanSentEnvelopes({ cursor: after.cursor }, signal()));
-    expect(settled).toMatchObject({ envelopeCount: 0, uidValidityChanged: false, hasMore: false });
+    expect(settled).toMatchObject({ envelopeCount: 0, restart: null, hasMore: false });
   });
 
   it("begins again from a cursor it cannot read rather than failing", async () => {
@@ -177,7 +214,7 @@ describe("the IMAP Sent-folder envelope scan", () => {
 
     const result = scanned(await provider.scanSentEnvelopes({ cursor: "not-a-cursor" }, signal()));
 
-    expect(result).toMatchObject({ envelopeCount: 1, uidValidityChanged: false });
+    expect(result).toMatchObject({ envelopeCount: 1, restart: null });
   });
 
   it("finds the folder by a localized name when the server states no attribute", async () => {
@@ -265,12 +302,30 @@ describe("the IMAP Sent-folder envelope scan", () => {
 type ScannedResult = Extract<MailSentScanResult, { readonly status: "scanned" }>;
 
 function scanned(result: MailSentScanResult): ScannedResult {
-  if (result.status !== "scanned") throw new Error(`the scan answered ${result.reason}`);
+  if (result.status !== "scanned") {
+    throw new Error(`the scan answered ${JSON.stringify(result)}`);
+  }
   return result;
+}
+
+function recipientsOf(result: ScannedResult): string[] {
+  return result.envelopes.flatMap((envelope) => [...envelope.recipients]);
 }
 
 function range(first: number, last: number): number[] {
   return Array.from({ length: last - first + 1 }, (_value, index) => first + index);
+}
+
+interface FakeAddress {
+  readonly name?: string;
+  readonly address: string;
+}
+
+interface FakeEnvelope {
+  from: FakeAddress[];
+  sender: FakeAddress[] | undefined;
+  to: FakeAddress[];
+  cc: FakeAddress[];
 }
 
 interface FakeMailbox {
@@ -295,6 +350,8 @@ function serverFixture(options: {
   readonly dropOnExamine?: boolean;
   /** Every fetch answers one envelope more than the range holds. */
   readonly overAnswer?: boolean;
+  /** What one letter's envelope says instead of the fixture's own, by UID. */
+  readonly envelopes?: Readonly<Record<number, Partial<FakeEnvelope>>>;
 }) {
   const mailboxes = new Map<string, FakeMailbox>();
   const addSent = (path: string, uids: readonly number[], specialUse?: string) => {
@@ -315,13 +372,17 @@ function serverFixture(options: {
   let selected: FakeMailbox | null = null;
 
   const envelopeOf = (uid: number): FetchMessageObject["envelope"] => {
+    const author = [{ name: "Display Name", address: `Alias${uid}@Example.test` }];
     const envelope = {
       date: new Date(1_700_000_000_000 + uid),
       subject: "Subject",
       messageId: `<sent-${uid}@example.test>`,
-      from: [{ name: "Display Name", address: `Alias${uid}@Example.test` }],
+      from: author,
+      // A server fills Sender in from From when the letter states none.
+      sender: author,
       to: [{ name: "Display Name", address: `to${uid}@example.org` }],
       cc: [{ name: "Display Name", address: `cc${uid}@example.org` }],
+      ...options.envelopes?.[uid],
     };
     Object.defineProperty(envelope, "bcc", {
       enumerable: true,

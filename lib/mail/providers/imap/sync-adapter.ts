@@ -38,6 +38,7 @@ import {
   type ImapSessionClient,
 } from "../../service/imapflow-adapter";
 import type {
+  MailSentScanEnvelope,
   MailSentScanRefusal,
   MailSentScanResult,
 } from "../../service/senders";
@@ -1293,24 +1294,43 @@ async function readSentEnvelopes(
   if (cursor.walkEndSequence === 0 || cursor.walkRemaining === 0) {
     cursor = { ...cursor, walkEndSequence: 0, walkUpperUid: 0, walkRemaining: 0 };
   }
-  const recipients = new Set<string>();
-  const senders = new Set<string>();
-  for (const message of messages) {
-    const envelope = message.envelope;
-    if (envelope === undefined) continue;
-    for (const entry of addresses(envelope.from)) senders.add(entry.address);
-    for (const entry of addresses(envelope.to)) recipients.add(entry.address);
-    for (const entry of addresses(envelope.cc)) recipients.add(entry.address);
-  }
   return Object.freeze({
     status: "scanned",
     cursor: encodeSentScanCursor(cursor),
-    recipients: Object.freeze([...recipients]),
-    senders: Object.freeze([...senders]),
+    envelopes: Object.freeze(messages.flatMap(sentEnvelopeOf)),
     envelopeCount: messages.length,
-    uidValidityChanged,
+    skippedCount: 0,
+    skipReason: null,
+    restart: uidValidityChanged ? "uidvalidity_changed" : null,
     hasMore: uidNext - 1 > cursor.highestUid || cursor.walkRemaining > 0,
   });
+}
+
+/**
+ * Who wrote one sent letter and to whom, or nothing when the envelope does
+ * not say plainly who wrote it. A Sent folder holds letters the owner did not
+ * write, and what is learned from a letter depends on its author being the
+ * owner, so the author has to be one address: exactly one From, and a Sender
+ * that, when the letter states one, is that same address. A delegate's
+ * send-as and a list's resend both carry a Sender of their own. The caller
+ * decides whether the address is the owner's. To and Cc are the recipients;
+ * Bcc is in the envelope and is never read.
+ */
+function sentEnvelopeOf(message: FetchMessageObject): MailSentScanEnvelope[] {
+  const envelope = message.envelope;
+  if (envelope === undefined) return [];
+  const from = addresses(envelope.from);
+  if (from.length !== 1 || envelope.from?.length !== 1) return [];
+  const author = from[0]!.address;
+  if (Array.isArray(envelope.sender) && envelope.sender.length > 0) {
+    const sender = addresses(envelope.sender);
+    if (envelope.sender.length !== 1 || sender[0]?.address !== author) return [];
+  }
+  const recipients = new Set<string>();
+  for (const entry of addresses(envelope.to)) recipients.add(entry.address);
+  for (const entry of addresses(envelope.cc)) recipients.add(entry.address);
+  if (recipients.size === 0) return [];
+  return [Object.freeze({ from: author, recipients: Object.freeze([...recipients]) })];
 }
 
 function encodeSentScanCursor(cursor: SentScanCursor): string {

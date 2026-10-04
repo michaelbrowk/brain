@@ -210,7 +210,11 @@ describe("the senders store", () => {
     await reopened.initialize();
 
     expect(reopened.readSentScanCursor(ACCOUNT_A)).toBeNull();
-    reopened.recordSentScan(ACCOUNT_A, { cursor: "s1_77_12_0_0_0", known: [], own: [] });
+    reopened.recordSentScan(ACCOUNT_A, {
+      enabledAt: ENABLED_AT,
+      cursor: "s1_77_12_0_0_0",
+      known: [],
+    });
     expect(reopened.readSentScanCursor(ACCOUNT_A)).toBe("s1_77_12_0_0_0");
     expect(reopened.readSentScanCursor(ACCOUNT_B)).toBeNull();
     expect(reopened.hasBlockDecisions()).toBe(true);
@@ -225,28 +229,72 @@ describe("the senders store", () => {
     }
   });
 
-  it("counts only the addresses a Sent scan added, and refuses a cursor that is not a token", async () => {
-    const { store } = await createStore(() => ENABLED_AT);
+  it("counts only the addresses a Sent scan added, as recipients of sent mail, and refuses a cursor that is not a token", async () => {
+    const { store, stateDirectory } = await createStore(() => ENABLED_AT);
     store.learnKnown(["old@example.net"], "backfill");
 
     expect(
       store.recordSentScan(ACCOUNT_A, {
+        enabledAt: ENABLED_AT,
         cursor: "s1_77_12_0_0_0",
         known: ["old@example.net", "new@example.net", "new@example.net"],
-        own: ["alias@mine.test"],
       }),
-    ).toEqual({ knownAdded: 1, ownAdded: 1 });
+    ).toEqual({ knownAdded: 1 });
     expect(
       store.recordSentScan(ACCOUNT_A, {
+        enabledAt: ENABLED_AT,
         cursor: "s1_77_13_0_0_0",
         known: ["new@example.net"],
-        own: ["alias@mine.test"],
       }),
-    ).toEqual({ knownAdded: 0, ownAdded: 0 });
+    ).toEqual({ knownAdded: 0 });
     expect(() =>
-      store.recordSentScan(ACCOUNT_A, { cursor: "Lena <lena@example.net>", known: [], own: [] }),
+      store.recordSentScan(ACCOUNT_A, {
+        enabledAt: ENABLED_AT,
+        cursor: "Lena <lena@example.net>",
+        known: [],
+      }),
     ).toThrow(MailSenderError);
     expect(store.readSentScanCursor(ACCOUNT_A)).toBe("s1_77_13_0_0_0");
+    // The scan never writes an alias.
+    expect(store.listOwnAliases()).toEqual([]);
+    store.close();
+    const database = new DatabaseSync(path.join(stateDirectory, "senders.sqlite3"));
+    try {
+      // The same source a send through Brain gives its recipients, so the
+      // two read alike wherever the source is read.
+      expect(
+        database.prepare("SELECT address, source FROM known_senders ORDER BY address").all(),
+      ).toEqual([
+        { address: "new@example.net", source: "sent" },
+        { address: "old@example.net", source: "backfill" },
+      ]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("writes nothing from a scan that began before the screen was switched off, or off and on again", async () => {
+    const clock = { now: ENABLED_AT };
+    const { store } = await createStore(() => clock.now);
+    store.setEnabled(false, LATER);
+
+    expect(
+      store.recordSentScan(ACCOUNT_A, {
+        enabledAt: ENABLED_AT,
+        cursor: "s1_77_12_0_0_0",
+        known: ["late@example.net"],
+      }),
+    ).toBeNull();
+    store.setEnabled(true, LATER + 1);
+    expect(
+      store.recordSentScan(ACCOUNT_A, {
+        enabledAt: ENABLED_AT,
+        cursor: "s1_77_12_0_0_0",
+        known: ["late@example.net"],
+      }),
+    ).toBeNull();
+    expect(store.isKnown("late@example.net")).toBe(false);
+    expect(store.readSentScanCursor(ACCOUNT_A)).toBeNull();
   });
 });
 
@@ -2197,17 +2245,24 @@ describe("the new-senders screen", () => {
 /*
   An IMAP account caches its Inbox alone, so whom the owner wrote to from his
   phone is in a folder the cache never sees. The scan reads that folder's
-  envelopes through the provider and the screen learns from them exactly what
-  it learns from Gmail's cached Sent mail.
+  envelopes through the provider and the screen learns the people the owner
+  wrote to. It learns that and nothing else: a Sent folder also holds letters
+  the owner did not write (a meeting forward, a delegate's send-as, a
+  redirect, a migrated or shared mailbox), so no From there ever becomes an
+  alias, and only a letter written from an address already the owner's
+  teaches its recipients.
 */
 describe("the Sent-folder scan", () => {
-  it("makes To and Cc known and From an own alias, and resumes from the cursor it stored", async () => {
+  it("makes the To and Cc of the owner's own letters known, learns no alias, and resumes from the cursor it stored", async () => {
     const world = await readyWorld();
     world.mail.scanSentEnvelopes.mockResolvedValueOnce(
       sentScanned({
         cursor: "s1_77_12_40_41_4750",
-        recipients: ["Colleague@Corp.test", "boss@corp.test", "not an address"],
-        senders: ["Alias@Mine.test"],
+        envelopes: [
+          { from: "Me@A.test", recipients: ["Colleague@Corp.test", "not an address"] },
+          // The owner's other account, sending through this one.
+          { from: "me@b.test", recipients: ["boss@corp.test"] },
+        ],
         envelopeCount: 2,
         hasMore: true,
       }),
@@ -2222,7 +2277,7 @@ describe("the Sent-folder scan", () => {
     );
     expect(world.store.isKnown("colleague@corp.test")).toBe(true);
     expect(world.store.isKnown("boss@corp.test")).toBe(true);
-    expect(world.store.listOwnAliases()).toEqual(["alias@mine.test"]);
+    expect(world.store.listOwnAliases()).toEqual([]);
     expect(world.store.readSentScanCursor(ACCOUNT_A)).toBe("s1_77_12_40_41_4750");
 
     await sentScan(world, ACCOUNT_A);
@@ -2253,7 +2308,10 @@ describe("the Sent-folder scan", () => {
 
     // The owner answers her from his phone; the reply lands in Sent.
     world.mail.scanSentEnvelopes.mockResolvedValueOnce(
-      sentScanned({ recipients: ["lena@example.net"], envelopeCount: 1 }),
+      sentScanned({
+        envelopes: [{ from: "me@a.test", recipients: ["lena@example.net"] }],
+        envelopeCount: 1,
+      }),
     );
     await sentScan(world, ACCOUNT_A);
 
@@ -2269,35 +2327,104 @@ describe("the Sent-folder scan", () => {
     // A scan that learns nothing new says nothing.
     changes.length = 0;
     world.mail.scanSentEnvelopes.mockResolvedValueOnce(
-      sentScanned({ recipients: ["lena@example.net"], envelopeCount: 1 }),
+      sentScanned({
+        envelopes: [{ from: "me@a.test", recipients: ["lena@example.net"] }],
+        envelopeCount: 1,
+      }),
     );
     await sentScan(world, ACCOUNT_A);
     expect(changes).toEqual([]);
   });
 
-  it("counts an alias the scan learned as the owner's own everywhere", async () => {
+  it("lets one foreign letter in Sent teach nothing: no alias, no known recipient, and a block stays a block", async () => {
     const world = await readyWorld();
-    world.mail.addThread(ACCOUNT_A, {
-      threadId: "from-alias",
-      from: "hello@studio.test",
-      at: LATER + 1,
-    });
-    expect(await newSenders(world, ACCOUNT_A, ["from-alias"])).toEqual([true]);
+    world.mail.addThread(ACCOUNT_A, { threadId: "spam-1", from: "seller@pushy.test", at: LATER + 1 });
+    const blocked = await world.screen.decide(block("seller@pushy.test"), NO_DEADLINE);
+    expect(world.mail.inbox(ACCOUNT_A)).toEqual([]);
 
+    // A redirect, a filed copy: one envelope in Sent that the seller wrote,
+    // to the owner and to the seller's other targets.
     world.mail.scanSentEnvelopes.mockResolvedValueOnce(
-      sentScanned({ senders: ["Hello@Studio.test"], envelopeCount: 1 }),
+      sentScanned({
+        envelopes: [
+          { from: "seller@pushy.test", recipients: ["me@a.test", "accomplice@other.test"] },
+        ],
+        envelopeCount: 1,
+      }),
     );
     await sentScan(world, ACCOUNT_A);
 
-    // Never gated, never decided about, and its domain never offered whole.
-    expect(await newSenders(world, ACCOUNT_A, ["from-alias"])).toEqual([false]);
+    world.mail.addThread(ACCOUNT_A, { threadId: "spam-2", from: "seller@pushy.test", at: LATER + 500 });
+    world.mail.addThread(ACCOUNT_A, {
+      threadId: "accomplice-1",
+      from: "accomplice@other.test",
+      at: LATER + 500,
+    });
+    await step(world, ACCOUNT_A, true);
+
+    // The block still archives, the co-recipient still waits, and the seller
+    // is nobody's alias: he can be blocked again, address or domain.
+    expect(world.mail.inbox(ACCOUNT_A)).toEqual(["accomplice-1"]);
+    expect(await newSenders(world, ACCOUNT_A, ["accomplice-1"])).toEqual([true]);
+    expect(world.store.listOwnAliases()).toEqual([]);
+    expect(world.store.isKnown("accomplice@other.test")).toBe(false);
     await expect(
-      world.screen.decide(block("hello@studio.test"), NO_DEADLINE),
-    ).rejects.toMatchObject({ code: "mail_sender_own_address" });
+      world.screen.decide(block("seller@pushy.test"), NO_DEADLINE),
+    ).resolves.toMatchObject({ decisionId: blocked.decisionId });
     await expect(
-      world.screen.decide(block("press@studio.test", "domain"), NO_DEADLINE),
-    ).rejects.toMatchObject({ code: "mail_sender_own_address" });
-    expect((await world.screen.readState()).domainScopeRefused).toContain("studio.test");
+      world.screen.decide(block("other@pushy.test", "domain"), NO_DEADLINE),
+    ).resolves.toMatchObject({ pending: false });
+    expect((await world.screen.readState()).domainScopeRefused).not.toContain("pushy.test");
+  });
+
+  it("learns from a letter written from an alias the owner is already known to send from", async () => {
+    const world = await createWorld();
+    // Gmail's own sent mark taught this alias; the IMAP account's Sent folder
+    // holds a letter written from it.
+    world.mail.addThread(ACCOUNT_B, {
+      threadId: "sent-b",
+      from: "Studio <hello@studio.test>",
+      to: ["someone@corp.test"],
+      at: 600,
+      inbox: false,
+      sent: true,
+      fromOwner: true,
+    });
+    await finishBackfill(world);
+    expect(world.store.listOwnAliases()).toEqual(["hello@studio.test"]);
+
+    world.mail.scanSentEnvelopes.mockResolvedValueOnce(
+      sentScanned({
+        envelopes: [
+          { from: "Hello@Studio.test", recipients: ["client@corp.test"] },
+          // An alias nobody has taught: its recipients are not learned.
+          { from: "press@studio.test", recipients: ["journalist@paper.test"] },
+        ],
+        envelopeCount: 2,
+      }),
+    );
+    await sentScan(world, ACCOUNT_A);
+
+    expect(world.store.isKnown("client@corp.test")).toBe(true);
+    expect(world.store.isKnown("journalist@paper.test")).toBe(false);
+    expect(world.store.listOwnAliases()).toEqual(["hello@studio.test"]);
+  });
+
+  it("writes nothing from a scan the owner switched the screen off under", async () => {
+    const world = await readyWorld();
+    world.mail.scanSentEnvelopes.mockImplementationOnce(async () => {
+      await world.screen.setEnabled(false);
+      return sentScanned({
+        cursor: "s1_77_12_0_0_0",
+        envelopes: [{ from: "me@a.test", recipients: ["late@known.test"] }],
+        envelopeCount: 1,
+      });
+    });
+
+    await sentScan(world, ACCOUNT_A);
+
+    expect(world.store.isKnown("late@known.test")).toBe(false);
+    expect(world.store.readSentScanCursor(ACCOUNT_A)).toBeNull();
   });
 
   it("asks no provider while the screen is off, and picks up where it stopped when it is on again", async () => {
@@ -2367,13 +2494,19 @@ describe("the Sent-folder scan", () => {
     world.mail.scanSentEnvelopes
       .mockResolvedValueOnce(
         sentScanned({
-          recipients: ["old@corp.test", "new@corp.test", "newer@corp.test"],
-          senders: ["me@a.test"],
+          envelopes: [
+            { from: "me@a.test", recipients: ["old@corp.test", "new@corp.test"] },
+            { from: "me@a.test", recipients: ["newer@corp.test"] },
+            { from: "stranger@elsewhere.test", recipients: ["never@corp.test"] },
+          ],
           envelopeCount: 3,
         }),
       )
-      .mockResolvedValueOnce(sentScanned({ envelopeCount: 0 }));
+      .mockResolvedValueOnce(sentScanned({ envelopeCount: 0 }))
+      // Nothing to read at all, by the provider's own cheap check.
+      .mockResolvedValueOnce({ status: "unchanged" });
 
+    await sentScan(world, ACCOUNT_A);
     await sentScan(world, ACCOUNT_A);
     await sentScan(world, ACCOUNT_A);
 
@@ -2381,6 +2514,50 @@ describe("the Sent-folder scan", () => {
     expect(events).toEqual([
       { event: "mail_sender_sent_scan", accountId: ACCOUNT_A, messageCount: 3, recipientCount: 2 },
     ]);
+  });
+
+  it("says in the journal how many envelopes no session could read, each time one is passed over", async () => {
+    const events: unknown[] = [];
+    const world = await readyWorld({ onEvent: (event) => events.push(event) });
+    world.mail.scanSentEnvelopes
+      .mockResolvedValueOnce(
+        sentScanned({
+          cursor: "s1_77_13_0_0_0",
+          skippedCount: 1,
+          skipReason: "envelope_line_too_long",
+        }),
+      )
+      .mockResolvedValueOnce(
+        sentScanned({
+          cursor: "s1_77_14_0_0_0",
+          skippedCount: 1,
+          skipReason: "envelope_unreadable",
+        }),
+      );
+
+    await sentScan(world, ACCOUNT_A);
+    await sentScan(world, ACCOUNT_A);
+
+    expect(events).toEqual([
+      {
+        event: "mail_sender_sent_scan",
+        accountId: ACCOUNT_A,
+        reason: "envelope_line_too_long",
+        skippedCount: 1,
+        messageCount: 0,
+        recipientCount: 0,
+      },
+      {
+        event: "mail_sender_sent_scan",
+        accountId: ACCOUNT_A,
+        reason: "envelope_unreadable",
+        skippedCount: 1,
+        messageCount: 0,
+        recipientCount: 0,
+      },
+    ]);
+    // The cursor moved past it: the scan is not held by one letter.
+    expect(world.store.readSentScanCursor(ACCOUNT_A)).toBe("s1_77_14_0_0_0");
   });
 
   it("says once that an account has no Sent mailbox or will not open it, and again only when the answer changes", async () => {
@@ -2394,19 +2571,24 @@ describe("the Sent-folder scan", () => {
       .mockResolvedValueOnce(refused)
       .mockResolvedValueOnce(refused)
       .mockResolvedValueOnce(sentScanned({ envelopeCount: 0 }))
-      .mockResolvedValueOnce(none);
+      .mockResolvedValueOnce(refused)
+      .mockResolvedValueOnce({ status: "unchanged" })
+      .mockResolvedValueOnce(refused);
 
-    for (let window = 0; window < 6; window += 1) await sentScan(world, ACCOUNT_A);
+    for (let window = 0; window < 8; window += 1) await sentScan(world, ACCOUNT_A);
 
+    // The same answer after a read that worked is a new standing answer, so
+    // it is written again: the folder was there, and now it is not.
     expect(events).toEqual([
       { event: "mail_sender_sent_scan", accountId: ACCOUNT_A, reason: "no_sent_mailbox" },
       { event: "mail_sender_sent_scan", accountId: ACCOUNT_A, reason: "examine_refused" },
-      { event: "mail_sender_sent_scan", accountId: ACCOUNT_A, reason: "no_sent_mailbox" },
+      { event: "mail_sender_sent_scan", accountId: ACCOUNT_A, reason: "examine_refused" },
+      { event: "mail_sender_sent_scan", accountId: ACCOUNT_A, reason: "examine_refused" },
     ]);
     expect(world.store.readSentScanCursor(ACCOUNT_A)).not.toBeNull();
   });
 
-  it("replaces the cursor when the folder's UIDVALIDITY changed, and says so with counts", async () => {
+  it("replaces the cursor when the folder began again, and says so even when the new folder is empty", async () => {
     const events: unknown[] = [];
     const world = await readyWorld({ onEvent: (event) => events.push(event) });
     world.mail.scanSentEnvelopes
@@ -2414,16 +2596,22 @@ describe("the Sent-folder scan", () => {
       .mockResolvedValueOnce(
         sentScanned({
           cursor: "s1_901_51_0_0_0",
-          recipients: ["again@corp.test"],
+          envelopes: [{ from: "me@a.test", recipients: ["again@corp.test"] }],
           envelopeCount: 2,
-          uidValidityChanged: true,
+          restart: "uidvalidity_changed",
         }),
+      )
+      .mockResolvedValueOnce(sentScanned({ cursor: "s1_901_51_0_0_0" }))
+      .mockResolvedValueOnce(
+        sentScanned({ cursor: "s1_902_0_0_0_0", restart: "uidvalidity_changed" }),
+      )
+      .mockResolvedValueOnce(
+        sentScanned({ cursor: "s1_902_0_0_0_0", restart: "uidnext_regressed" }),
       );
 
-    await sentScan(world, ACCOUNT_A);
-    await sentScan(world, ACCOUNT_A);
+    for (let window = 0; window < 5; window += 1) await sentScan(world, ACCOUNT_A);
 
-    expect(world.store.readSentScanCursor(ACCOUNT_A)).toBe("s1_901_51_0_0_0");
+    expect(world.store.readSentScanCursor(ACCOUNT_A)).toBe("s1_902_0_0_0_0");
     expect(events).toEqual([
       {
         event: "mail_sender_sent_scan",
@@ -2432,7 +2620,33 @@ describe("the Sent-folder scan", () => {
         messageCount: 2,
         recipientCount: 1,
       },
+      {
+        event: "mail_sender_sent_scan",
+        accountId: ACCOUNT_A,
+        reason: "uidvalidity_changed",
+        messageCount: 0,
+        recipientCount: 0,
+      },
+      {
+        event: "mail_sender_sent_scan",
+        accountId: ACCOUNT_A,
+        reason: "uidnext_regressed",
+        messageCount: 0,
+        recipientCount: 0,
+      },
     ]);
+  });
+
+  it("writes one line for a server that renumbers the folder on every session", async () => {
+    const events: unknown[] = [];
+    const world = await readyWorld({ onEvent: (event) => events.push(event) });
+    world.mail.scanSentEnvelopes.mockResolvedValue(
+      sentScanned({ restart: "uidvalidity_changed", envelopeCount: 250, hasMore: true }),
+    );
+
+    for (let window = 0; window < 60; window += 1) await sentScan(world, ACCOUNT_A);
+
+    expect(events).toHaveLength(1);
   });
 
   it("never throws for a scan the provider failed: one line, the cursor kept, and the next window asks again", async () => {
@@ -2440,8 +2654,8 @@ describe("the Sent-folder scan", () => {
     const world = await readyWorld({ onEvent: (event) => events.push(event) });
     world.mail.scanSentEnvelopes
       .mockResolvedValueOnce(sentScanned({ cursor: "s1_77_12_0_0_0" }))
-      .mockRejectedValueOnce(new MailProviderSyncError("mail_provider_unavailable"))
-      .mockRejectedValueOnce(new Error("socket closed with lena@example.net in the text"))
+      .mockRejectedValueOnce(new MailProviderSyncError("mail_provider_response_invalid"))
+      .mockRejectedValueOnce(new MailProviderSyncError("mail_provider_response_invalid"))
       .mockResolvedValueOnce(sentScanned({ cursor: "s1_77_13_0_0_0", envelopeCount: 1 }));
 
     await sentScan(world, ACCOUNT_A);
@@ -2453,12 +2667,31 @@ describe("the Sent-folder scan", () => {
         event: "mail_sender_sent_scan",
         accountId: ACCOUNT_A,
         reason: "scan_failed",
-        errorCode: "mail_provider_unavailable",
+        errorCode: "mail_provider_response_invalid",
       },
     ]);
 
     await sentScan(world, ACCOUNT_A);
     expect(world.store.readSentScanCursor(ACCOUNT_A)).toBe("s1_77_13_0_0_0");
+  });
+
+  it("writes one fixed code for an error that is not a typed mail error, never its text", async () => {
+    const events: unknown[] = [];
+    const world = await readyWorld({ onEvent: (event) => events.push(event) });
+    world.mail.scanSentEnvelopes.mockRejectedValueOnce(
+      new Error("NO [ALERT] lena@example.net over quota"),
+    );
+
+    await sentScan(world, ACCOUNT_A);
+
+    expect(events).toEqual([
+      {
+        event: "mail_sender_sent_scan",
+        accountId: ACCOUNT_A,
+        reason: "scan_failed",
+        errorCode: "mail_provider_unavailable",
+      },
+    ]);
   });
 
   it("hands a stop straight back without a line about it", async () => {
@@ -2483,10 +2716,11 @@ function sentScanned(
   return {
     status: "scanned",
     cursor: "s1_77_1_0_0_0",
-    recipients: [],
-    senders: [],
+    envelopes: [],
     envelopeCount: 0,
-    uidValidityChanged: false,
+    skippedCount: 0,
+    skipReason: null,
+    restart: null,
     hasMore: false,
     ...overrides,
   };

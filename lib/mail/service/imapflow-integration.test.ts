@@ -177,10 +177,14 @@ describe("the Sent-folder scan against a real ImapFlow session", () => {
     expect(result).toEqual({
       status: "scanned",
       cursor: "s1_77_12_0_0_0",
-      recipients: ["lena@example.org", "boss@example.org", "team@example.org"],
-      senders: ["person@example.test", "alias@example.test"],
+      envelopes: [
+        { from: "person@example.test", recipients: ["lena@example.org", "boss@example.org"] },
+        { from: "alias@example.test", recipients: ["team@example.org", "lena@example.org"] },
+      ],
       envelopeCount: 2,
-      uidValidityChanged: false,
+      skippedCount: 0,
+      skipReason: null,
+      restart: null,
       hasMore: false,
     });
     const names = commandNames(commands);

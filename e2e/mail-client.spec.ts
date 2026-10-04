@@ -1128,6 +1128,54 @@ test("@release Mail's nav menu stays reachable in a window shorter than itself",
   }
 });
 
+/* THE RING IN THE MENU BELONGS TO THE KEYS. `html[data-kbd]` is set by an
+   arrow key and cleared only by a pointer down, and Radix focuses the row
+   under the pointer as it moves, so after one arrow key the ring followed the
+   mouse from row to row. The menu says which of the two moved focus last and
+   draws the ring only for the keys, and the row under the keys keeps its own
+   radius instead of the square one the global ring's `inherit` handed it. */
+test("@release Mail's nav menu rings a row for the keys and never for the pointer", async ({
+  page,
+}) => {
+  await login(page);
+  await installMailRoutes(page);
+  await page.goto("/mail");
+  await navTrigger(page).click();
+  const menu = page.locator(".brain-menu");
+  await expect(menu).toBeVisible();
+  const rows = page.getByRole("menuitemradio");
+  const focused = () =>
+    page.evaluate(() => {
+      const style = getComputedStyle(document.activeElement as HTMLElement);
+      return { ring: style.outlineStyle, radius: style.borderTopLeftRadius };
+    });
+  const resting = await rows
+    .nth(5)
+    .evaluate((node) => getComputedStyle(node).borderTopLeftRadius);
+  expect(resting).not.toBe("0px");
+
+  await page.keyboard.press("ArrowDown");
+  await expect(rows.nth(0)).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await expect(rows.nth(1)).toBeFocused();
+  expect(await focused()).toEqual({ ring: "solid", radius: resting });
+
+  // The pointer crosses to another row. Radix hands that row the focus, and
+  // it wears the hover and no ring.
+  const box = await rows.nth(3).boundingBox();
+  if (!box) throw new Error("row not on screen");
+  await page.mouse.move(box.x + 24, box.y + box.height / 2 - 4);
+  await page.mouse.move(box.x + 32, box.y + box.height / 2, { steps: 4 });
+  await expect(rows.nth(3)).toBeFocused();
+  expect((await focused()).ring).toBe("none");
+
+  // And the next key takes the ring back, on the row it moves to.
+  await page.keyboard.press("ArrowDown");
+  await expect(rows.nth(4)).toBeFocused();
+  expect(await focused()).toEqual({ ring: "solid", radius: resting });
+  await page.keyboard.press("Escape");
+});
+
 /* The pane can hold three things, and below the breakpoint only one of them is
    on screen at a time — so the reader, the composer and the keyboard all have
    to hand it back. */

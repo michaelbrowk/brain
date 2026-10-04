@@ -501,4 +501,63 @@ describe("MailNav", () => {
     expect(scroller?.classList.contains("scroll-pt-3")).toBe(true);
     expect(scroller?.classList.contains("scroll-pb-5")).toBe(true);
   });
+
+  /* THE RING BELONGS TO THE KEYS. Radix focuses the row under the pointer,
+     and `html[data-kbd]` clears only on a pointer DOWN, so after one arrow key
+     the ring followed the mouse from row to row: a full inset ring on whatever
+     the pointer was resting on, which says "the keyboard is here" about a row
+     the keyboard is not on. The menu says which of the two moved focus last
+     (`data-key-ring`), and globals.css draws the ring only for the keys. */
+  it("says whether the keys or the pointer moved focus last", async () => {
+    await act(async () => root.render(<MailNav {...defaultProps()} />));
+    await open();
+    const menu = document.body.querySelector<HTMLElement>(".brain-menu");
+    if (!menu) throw new Error("Menu is not open");
+    const press = (key: string) =>
+      act(async () => {
+        rows()[0].dispatchEvent(
+          new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }),
+        );
+      });
+    const move = (clientX: number, clientY: number) =>
+      act(async () => {
+        rows()[1].dispatchEvent(
+          new MouseEvent("pointermove", { bubbles: true, clientX, clientY }),
+        );
+      });
+
+    // Opened by a click: the pointer has it.
+    expect(menu.dataset.keyRing).toBe("pointer");
+
+    // A modifier on its own moves nothing, so it claims nothing.
+    await press("Shift");
+    expect(menu.dataset.keyRing).toBe("pointer");
+    await press("ArrowDown");
+    expect(menu.dataset.keyRing).toBe("keys");
+
+    // An arrow key that scrolls the list slides a row under a resting
+    // pointer, and the browser reports that as a move to where the pointer
+    // already was. Only a move that goes somewhere takes the ring back.
+    await move(40, 80);
+    await move(40, 80);
+    expect(menu.dataset.keyRing).toBe("keys");
+    await move(41, 80);
+    expect(menu.dataset.keyRing).toBe("pointer");
+
+    await press("End");
+    expect(menu.dataset.keyRing).toBe("keys");
+  });
+
+  it("opens on the keys when the keyboard opened it", async () => {
+    document.documentElement.dataset.kbd = "true";
+    try {
+      await act(async () => root.render(<MailNav {...defaultProps()} />));
+      await open();
+      expect(
+        document.body.querySelector<HTMLElement>(".brain-menu")?.dataset.keyRing,
+      ).toBe("keys");
+    } finally {
+      delete document.documentElement.dataset.kbd;
+    }
+  });
 });

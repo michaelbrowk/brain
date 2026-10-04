@@ -3,6 +3,7 @@
 import * as Dropdown from "@radix-ui/react-dropdown-menu";
 import { Button } from "./ui/button";
 import { Icon } from "./ui/icon";
+import { useMenuKeyRing } from "./ui/menu-key-ring";
 import { ScrollEdge } from "./ui/scroll-edge";
 import { ToolbarPill } from "./ui/toolbar-pill";
 import { accountWords as resolveAccountWords } from "./mail-row";
@@ -151,6 +152,7 @@ export function MailNav({
   };
   const hasDestinations = destinations.length > 0 || smartItems.length > 0;
   const accountsBlock = accounts.length > 1;
+  const keyRing = useMenuKeyRing();
 
   return (
     <Dropdown.Root>
@@ -186,6 +188,7 @@ export function MailNav({
           sideOffset={6}
           collisionPadding={8}
           className="brain-menu z-[var(--z-modal)] w-[264px]"
+          {...keyRing}
         >
           {/* THE LIST SCROLLS, NOT THE MATERIAL. Fourteen rows is 534px and
               this menu is the only way out of an account, so a window shorter
@@ -393,7 +396,8 @@ function MenuRow({
       /* `focus-inset`: these rows fill a scroller edge to edge, and the
          global ring stands 2px outside its element, which here is outside
          the scroller. It drew as one bar above or below the row and nothing
-         at the sides. Inside the row nothing clips it. */
+         at the sides. Inside the row nothing clips it. It is drawn for the
+         keys only (`useMenuKeyRing` on the content). */
       className="brain-menu-item focus-inset"
       aria-label={ariaLabel}
       title={title}

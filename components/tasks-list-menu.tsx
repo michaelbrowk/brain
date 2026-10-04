@@ -9,6 +9,7 @@ import type { TasksListState } from "./shell/helpers";
 import { dayLabel, type TasksView } from "./tasks-lists";
 import { Button } from "./ui/button";
 import { Icon } from "./ui/icon";
+import { useMenuKeyRing } from "./ui/menu-key-ring";
 import { ScrollEdge } from "./ui/scroll-edge";
 import { ToolbarPill } from "./ui/toolbar-pill";
 
@@ -196,6 +197,7 @@ function TasksListMenuBody({
     }
     onSelect(next as ListName);
   };
+  const keyRing = useMenuKeyRing();
 
   return (
     <Dropdown.Portal>
@@ -205,13 +207,20 @@ function TasksListMenuBody({
         sideOffset={6}
         collisionPadding={8}
         className="brain-menu z-[var(--z-modal)] w-[264px]"
+        {...keyRing}
       >
         {/* THE LIST SCROLLS, NOT THE MATERIAL, for the reason `MailNav` gives
             at its own menu: a reader with many categories on a short window
-            would otherwise have rows below the fold with nothing to move. */}
+            would otherwise have rows below the fold with nothing to move.
+            And the three things a scroller needs for a keyboard come with it,
+            for the reasons given there too: scroll padding of the fade's two
+            sizes so a row the arrow keys bring in stops clear of the mask,
+            `focus-inset` on the rows because the scroller clips a ring that
+            stands outside them, and the ring drawn for the keys only
+            (`useMenuKeyRing`). */}
         <ScrollEdge
           variant="fade"
-          className="max-h-[calc(var(--radix-dropdown-menu-content-available-height,100vh)-12px)] overscroll-contain"
+          className="max-h-[calc(var(--radix-dropdown-menu-content-available-height,100vh)-12px)] scroll-pt-3 scroll-pb-5 overscroll-contain"
           scrollerProps={{ role: "none" }}
         >
           <Dropdown.RadioGroup value={value} onValueChange={goTo}>
@@ -219,7 +228,7 @@ function TasksListMenuBody({
               <Dropdown.RadioItem
                 key={entry.list}
                 value={entry.list}
-                className="brain-menu-item"
+                className="brain-menu-item focus-inset"
               >
                 <Icon name={entry.icon} size={16} className="brain-menu-icon" />
                 <span className="min-w-0 flex-1 truncate">{entry.label}</span>
@@ -238,7 +247,7 @@ function TasksListMenuBody({
                     <Dropdown.RadioItem
                       key={key}
                       value={key}
-                      className="brain-menu-item"
+                      className="brain-menu-item focus-inset"
                     >
                       <span className="min-w-0 flex-1 truncate">{entry.category}</span>
                       <span className="tree-row-count">{entry.open}</span>

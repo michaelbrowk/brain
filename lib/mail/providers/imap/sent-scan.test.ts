@@ -640,6 +640,83 @@ describe("a Sent-folder batch that cannot be read", () => {
     expect(next).toMatchObject({ envelopeCount: IMAP_SENT_SCAN_BATCH, hasMore: true });
   });
 
+  it("goes on by UID range after a search it could not read, and does not ask it again a batch", async () => {
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 4) } });
+    const { provider } = providerFor(server);
+    const done = scanned(await provider.scanSentEnvelopes({ cursor: null }, signal()));
+    // Two thousand letters are new, and the answer naming them never fits.
+    server.append("Sent", 2_000);
+    server.failSearch();
+
+    let cursor = done.cursor;
+    const windows: string[] = [];
+    for (let window = 0; window < 40; window += 1) {
+      const result = await provider.scanSentEnvelopes({ cursor }, signal());
+      windows.push(result.status === "scanned" ? `read ${result.envelopeCount}` : result.status);
+      if (result.status !== "scanned") continue;
+      cursor = result.cursor;
+      if (!result.hasMore) break;
+    }
+
+    // One window lost to the search, and then a batch a window: the search
+    // used to be asked again before every batch, and to fail every time.
+    expect(windows).toEqual(["batch_failed", ...Array.from({ length: 8 }, () => "read 250")]);
+    expect(server.searches).toEqual(["5:*"]);
+  });
+
+  it("asks the search again once a range read that way held nothing", async () => {
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 4) } });
+    const { provider } = providerFor(server);
+    const done = scanned(await provider.scanSentEnvelopes({ cursor: null }, signal()));
+    server.fetches.length = 0;
+    // Six hundred UIDs above the cursor and four letters at the top of them:
+    // here the search failed for the connection's sake, not for its length.
+    server.append("Sent", 600);
+    server.expunge("Sent", range(5, 600));
+    server.failSearch();
+    await expect(
+      provider.scanSentEnvelopes({ cursor: done.cursor }, signal()),
+    ).resolves.toEqual({ status: "batch_failed" });
+    server.failSearch(false);
+
+    const empty = scanned(await provider.scanSentEnvelopes({ cursor: done.cursor }, signal()));
+    const read = scanned(await provider.scanSentEnvelopes({ cursor: empty.cursor }, signal()));
+
+    expect(empty).toMatchObject({ envelopeCount: 0, hasMore: true });
+    expect(read).toMatchObject({ envelopeCount: 4, hasMore: false });
+    expect(server.searches).toEqual(["5:*", "255:*"]);
+    expect(server.fetches.map((fetch) => fetch.range)).toEqual(["5:254", "601:604"]);
+  });
+
+  it("passes over one letter and no more when the search named fewer letters than there are", async () => {
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 4) } });
+    const { provider } = providerFor(server);
+    const done = scanned(await provider.scanSentEnvelopes({ cursor: null }, signal()));
+    server.fetches.length = 0;
+    // Three hundred letters are new. The server's search names one of them,
+    // and that one is past the session's line limit.
+    server.append("Sent", 300);
+    server.searchAnswers([5]);
+    server.failFetchOf(5, { code: "LineTooLarge" });
+
+    const skipped = scanned(await provider.scanSentEnvelopes({ cursor: done.cursor }, signal()));
+
+    // The fetch asks for the letter the search named and nothing beside it,
+    // and passing it over moves the cursor past that one UID: it used to go
+    // to the folder's end, and 299 letters nobody had tried went with it.
+    expect(server.fetches.map((fetch) => fetch.range)).toEqual(["5:5"]);
+    expect(skipped).toMatchObject({
+      envelopeCount: 0,
+      skippedCount: 1,
+      cursor: "s1_500_5_0_0_0",
+      hasMore: true,
+    });
+    server.searchAnswers(null);
+    const next = scanned(await provider.scanSentEnvelopes({ cursor: skipped.cursor }, signal()));
+    expect(next.envelopeCount).toBe(IMAP_SENT_SCAN_BATCH);
+    expect(recipientsOf(next)).toContain("to6@example.org");
+  });
+
   it("does not narrow for a stop, or for a session that failed before it asked for anything", async () => {
     const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 300) } });
     const { provider } = providerFor(server);
@@ -936,6 +1013,119 @@ describe("what a quiet Sent folder costs its host", () => {
     expect(server.statuses).toEqual(["Sent"]);
   });
 
+  it("takes a mailbox list too long to read as an answer, and opens no session a window to hear it again", async () => {
+    const clock = { now: 1_000_000 };
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
+    server.crowd(300);
+    const { provider, pass, opened } = await syncing(server, () => clock.now);
+    const before = opened.count;
+
+    const answers: MailSentScanResult[] = [];
+    for (let minute = 0; minute < 10; minute += 1) {
+      await pass();
+      answers.push(await provider.scanSentEnvelopes({ cursor: null }, signal()));
+      clock.now += 60_000;
+    }
+
+    expect(new Set(answers.map((answer) => JSON.stringify(answer)))).toEqual(
+      new Set([JSON.stringify({ status: "unavailable", reason: "mailbox_list_unsupported" })]),
+    );
+    // Ten syncs, and one session of the scan's to hear the answer.
+    expect(opened.count - before).toBe(11);
+    expect(server.lists).toBe(1);
+    expect(server.sessionsOf("Sent")).toBe(0);
+
+    // When the answer is old, LIST is asked again on a session of the
+    // sync's. The owner has tidied his folders meanwhile, and the scan reads.
+    server.crowd(10);
+    clock.now += 60_000;
+    await pass();
+    expect(server.lists).toBe(2);
+    expect(
+      scanned(await provider.scanSentEnvelopes({ cursor: null }, signal())).envelopeCount,
+    ).toBe(3);
+  });
+
+  it("opens one session every six hours whatever the STATUS says, for a server whose STATUS is stale", async () => {
+    const clock = { now: 1_000_000 };
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
+    const { provider, pass } = await syncing(server, () => clock.now);
+    const first = scanned(await provider.scanSentEnvelopes({ cursor: null }, signal()));
+
+    // This server's STATUS answers from a cache it does not refresh: a
+    // letter is sent, and UIDNEXT stays where it was.
+    server.freezeStatus("Sent");
+    server.append("Sent", 1);
+    for (let minute = 1; minute < 6 * 60; minute += 1) {
+      clock.now += 60_000;
+      await pass();
+      await expect(
+        provider.scanSentEnvelopes({ cursor: first.cursor }, signal()),
+      ).resolves.toEqual({ status: "unchanged" });
+    }
+    expect(server.sessionsOf("Sent")).toBe(1);
+
+    clock.now += 60_000;
+    await pass();
+    const net = scanned(await provider.scanSentEnvelopes({ cursor: first.cursor }, signal()));
+    expect(net).toMatchObject({ envelopeCount: 1, hasMore: false });
+    expect(recipientsOf(net)).toContain("to4@example.org");
+    expect(server.sessionsOf("Sent")).toBe(2);
+
+    // The STATUS still says what it said, and against the new cursor that
+    // reads as a change. The session it sends the scan into finds the folder
+    // where the cursor left it, so the STATUS is rested: a stale answer
+    // costs a session in ten minutes, not one a window.
+    const asked = server.statuses.length;
+    for (let minute = 0; minute < 10; minute += 1) {
+      clock.now += 60_000;
+      await pass();
+      await provider.scanSentEnvelopes({ cursor: net.cursor }, signal());
+    }
+    expect(server.sessionsOf("Sent")).toBe(3);
+    expect(server.statuses.length).toBe(asked + 1);
+  });
+
+  it("goes back to the STATUS after its six-hourly session, and holds nothing against a STATUS that was right", async () => {
+    const clock = { now: 1_000_000 };
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
+    const { provider, pass } = await syncing(server, () => clock.now);
+    const first = scanned(await provider.scanSentEnvelopes({ cursor: null }, signal()));
+
+    // An hour at a time, so the screen never stops asking; the last step
+    // ends a millisecond short of the six hours.
+    const hour = 60 * 60_000;
+    for (const step of [hour, hour, hour, hour, hour, hour - 1]) {
+      clock.now += step;
+      await pass();
+      await expect(
+        provider.scanSentEnvelopes({ cursor: first.cursor }, signal()),
+      ).resolves.toEqual({ status: "unchanged" });
+    }
+    clock.now += 1;
+    await pass();
+    const net = scanned(await provider.scanSentEnvelopes({ cursor: first.cursor }, signal()));
+    expect(net).toMatchObject({ envelopeCount: 0, hasMore: false });
+    expect(server.sessionsOf("Sent")).toBe(2);
+
+    // The six hours begin again from that session, and the sync goes on
+    // asking the STATUS: a letter sent a minute later is read a window later.
+    const asked = server.statuses.length;
+    server.append("Sent", 1);
+    clock.now += 60_000;
+    await pass();
+    expect(server.statuses.length).toBe(asked + 1);
+    expect(
+      scanned(await provider.scanSentEnvelopes({ cursor: net.cursor }, signal())).envelopeCount,
+    ).toBe(1);
+    clock.now += 60_000;
+    await pass();
+    await expect(
+      provider.scanSentEnvelopes({ cursor: "s1_500_4_0_0_0" }, signal()),
+    ).resolves.toEqual({ status: "unchanged" });
+    expect(server.sessionsOf("Sent")).toBe(3);
+  });
+
   it("costs a quiet account its sync's logins and one more in an hour, at the default interval and at the floor", async () => {
     for (const intervalMs of [60_000, 5_000]) {
       vi.useFakeTimers({ now: 0 });
@@ -1075,6 +1265,12 @@ function serverFixture(options: {
   let selected: FakeMailbox | null = null;
   let dropNextExamine = false;
   let searchFails = false;
+  /** What every search answers instead of what the folder holds. */
+  let searchAnswer: readonly number[] | null = null;
+  /** Folders with no role that LIST names beside the real ones. */
+  let crowd = 0;
+  /** What STATUS goes on answering for a folder whatever reaches it. */
+  const staleStatus = new Map<string, { readonly uidNext: number; readonly uidValidity: bigint }>();
   /** The letter no session can fetch, and what the session says as it dies. */
   let unreadable: {
     readonly uid: number;
@@ -1204,6 +1400,7 @@ function serverFixture(options: {
       }
       searches.push(query.uid);
       if (searchFails) throw connectionLost();
+      if (searchAnswer !== null) return [...searchAnswer];
       const from = Number(query.uid.split(":")[0]);
       const uids = [...selected.uids].sort((left, right) => left - right);
       const above = uids.filter((uid) => uid >= from);
@@ -1214,7 +1411,14 @@ function serverFixture(options: {
       counters.lists += 1;
       wire.push("list");
       if (listHangs) return never();
-      return [...mailboxes.values()].map((entry) => ({
+      const listed = [
+        ...mailboxes.values(),
+        ...Array.from({ length: crowd }, (_value, index) => ({
+          path: `Folder ${index}`,
+          specialUse: undefined,
+        })),
+      ];
+      return listed.map((entry) => ({
         path: entry.path,
         pathAsListed: entry.path,
         name: entry.path,
@@ -1240,6 +1444,8 @@ function serverFixture(options: {
       }
       const target = mailboxes.get(path);
       if (options.refuseStatus === true || target === undefined) return false as const;
+      const stale = staleStatus.get(path);
+      if (stale !== undefined) return { path, ...stale };
       return { path, uidNext: target.uidNext, uidValidity: target.uidValidity };
     },
     mailboxCreate: forbid("create"),
@@ -1290,8 +1496,21 @@ function serverFixture(options: {
     ) {
       unreadable = uid === null ? null : { uid, ...how };
     },
-    failSearch() {
-      searchFails = true;
+    failSearch(fails = true) {
+      searchFails = fails;
+    },
+    /** Every search answers these UIDs, whatever the folder holds. */
+    searchAnswers(uids: readonly number[] | null) {
+      searchAnswer = uids;
+    },
+    /** LIST names this many folders more, none of them with a role. */
+    crowd(count: number) {
+      crowd = count;
+    },
+    /** From now on STATUS answers what the folder holds at this moment. */
+    freezeStatus(path: string) {
+      const mailbox = mailboxes.get(path)!;
+      staleStatus.set(path, { uidNext: mailbox.uidNext, uidValidity: mailbox.uidValidity });
     },
     /** Another client sends `count` more letters. */
     append(path: string, count: number) {

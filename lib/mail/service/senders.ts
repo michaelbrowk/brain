@@ -1178,9 +1178,13 @@ export interface MailSenderBackfillBatch {
   readonly cacheReady: boolean;
 }
 
-/** Why an account's Sent mailbox was not read: the server lists none, or it
- *  answered the read-only open with a refusal. */
-export type MailSentScanRefusal = "no_sent_mailbox" | "examine_refused";
+/** Why an account's Sent mailbox was not read: the server lists none, it
+ *  answered the read-only open with a refusal, or it lists more folders than
+ *  the adapter reads a list of. */
+export type MailSentScanRefusal =
+  | "no_sent_mailbox"
+  | "examine_refused"
+  | "mailbox_list_unsupported";
 
 /** Why a scan began its walk again: the folder was renumbered, or its next
  *  UID fell below one already read. */

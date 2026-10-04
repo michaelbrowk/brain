@@ -106,6 +106,13 @@ const IMAP_SENT_SCAN_STRIKES = 3;
  */
 const SENT_SCAN_QUIET_MS = 10 * 60_000;
 /**
+ * How long a scan goes without a session of its own on the STATUS's word. A
+ * server may answer STATUS from a cache it does not refresh, and a folder
+ * that never looks changed would never be read: once in this long the scan
+ * opens the folder and sees for itself. Four logins a day.
+ */
+const SENT_SCAN_SAFETY_NET_MS = 6 * 60 * 60_000;
+/**
  * How long after the screen last asked for a scan the sync's sessions go on
  * asking the Sent folder's STATUS. Twice the longest fallback interval the
  * service accepts, so the STATUS is there for every scan the scheduler asks
@@ -246,6 +253,8 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
    * alone for SENT_SCAN_QUIET_MS after it.
    */
   private sentQuiet: { readonly at: number; readonly cursor: string } | null = null;
+  /** When a scan session last read the folder, for SENT_SCAN_SAFETY_NET_MS. */
+  private sentScanReadAt: number | null = null;
   private readonly now: () => number;
 
   constructor(
@@ -544,10 +553,12 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
     // read, and the first walk is over, there is nothing to open a session
     // for. Without a STATUS (the server refused it, or no sync has run since
     // the last one was taken) the folder is left alone for a while after a
-    // scan that found it quiet, and asked otherwise.
+    // scan that found it quiet, and asked otherwise. And whatever the STATUS
+    // says, the folder is opened once in SENT_SCAN_SAFETY_NET_MS.
     const observed = this.sentStatus;
     this.sentStatus = null;
     const stored = parseSentScanCursor(input.cursor);
+    let sentHereByStatus = false;
     if (stored !== null && stored.walkRemaining === 0) {
       const nothingNew =
         observed !== null
@@ -556,7 +567,11 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
           : this.sentQuiet !== null &&
             this.sentQuiet.cursor === input.cursor &&
             this.now() - this.sentQuiet.at < SENT_SCAN_QUIET_MS;
-      if (nothingNew) return SENT_SCAN_UNCHANGED;
+      const readLately =
+        this.sentScanReadAt !== null &&
+        this.now() - this.sentScanReadAt < SENT_SCAN_SAFETY_NET_MS;
+      if (nothingNew && readLately) return SENT_SCAN_UNCHANGED;
+      sentHereByStatus = observed !== null && !nothingNew;
     }
     this.sentQuiet = null;
     // Kept outside the session on purpose: a session that runs into its
@@ -571,13 +586,15 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
       left: 0,
       strikes: 0,
       skipped: null,
+      moreAbove: false,
       lineTooLong: false,
     };
     let result: MailSentScanResult;
     try {
       result = await this.run(signal, async (client) => {
-        const path = remembered?.path ?? (await this.listSentMailbox(client));
-        if (path === null) return sentScanUnavailable("no_sent_mailbox");
+        const listed = remembered ?? (await this.listSentMailbox(client));
+        const path = listed.path;
+        if (path === null) return sentScanUnavailable(listed.refusal ?? "no_sent_mailbox");
         // ImapFlow says what killed a stream on this event and nowhere else.
         client.on("error", (error) => {
           if (isLineLimitError(error)) attempt.lineTooLong = true;
@@ -607,19 +624,33 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
       return this.afterUnreadBatch(attempt);
     }
     if (result.status === "scanned") {
+      this.sentScanReadAt = this.now();
       if (result.envelopeCount === 0 && !result.hasMore) {
         this.sentQuiet = Object.freeze({ at: this.now(), cursor: result.cursor });
+        // The STATUS said the folder had changed, and the folder, opened,
+        // stands where the cursor left it: this server's STATUS does not say
+        // what its EXAMINE says. It is rested like one that refused, so a
+        // stale answer costs a session in ten minutes and not one a window.
+        if (sentHereByStatus && result.cursor === input.cursor) {
+          this.sentStatusRestUntil = this.now() + ROLE_REFUSAL_TTL_MS;
+        }
       }
       // The batch after a narrowed one stays narrow until the range that
       // failed has been gone through: one of its halves holds the letter.
       const left = attempt.left - attempt.asked;
+      // And new mail goes on by plain UID range after a search that failed,
+      // for as long as the ranges hold letters: a search too long for a line
+      // is too long again a batch later. A range that held nothing says the
+      // UIDs are sparse here, and the search is asked once more.
+      const crawl =
+        attempt.crawl && (left > 0 || (attempt.moreAbove && result.envelopeCount > 0));
       this.sentScanRetry =
-        left > 0
+        left > 0 || crawl
           ? Object.freeze({
               cursor: result.cursor,
-              width: Math.min(attempt.width, left),
-              crawl: attempt.crawl,
-              left,
+              width: left > 0 ? Math.min(attempt.width, left) : IMAP_SENT_SCAN_BATCH,
+              crawl,
+              left: Math.max(0, left),
               strikes: 0,
             })
           : null;
@@ -719,8 +750,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
     // that has been closed since, and is not kept.
     let abandoned = false;
     const asked = (async () => {
-      const remembered = this.rememberedSentMailbox();
-      const path = remembered === null ? await this.listSentMailbox(client) : remembered.path;
+      const path = (this.rememberedSentMailbox() ?? (await this.listSentMailbox(client))).path;
       if (path === null || abandoned) return;
       const status = await client.status(path, { uidNext: true, uidValidity: true });
       if (abandoned) return;
@@ -761,23 +791,30 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
     return this.sentMailbox;
   }
 
-  private async listSentMailbox(client: ImapSessionClient): Promise<string | null> {
+  /**
+   * LIST, and what it says about the Sent mailbox, remembered. A list longer
+   * than this adapter reads is an answer like the others: thrown, it was
+   * remembered by nobody, and the scan logged in every window to hear it.
+   */
+  private async listSentMailbox(client: ImapSessionClient): Promise<SentMailboxAnswer> {
     let listed: unknown;
     try {
       listed = await client.list();
     } catch (error) {
       throw mapImapProviderError(error);
     }
-    if (!isSupportedMailboxList(listed)) {
-      throw new MailProviderSyncError("mail_provider_response_invalid");
-    }
-    const path = selectImapMailboxPath("sent", listed);
+    const path = isSupportedMailboxList(listed) ? selectImapMailboxPath("sent", listed) : null;
     this.sentMailbox = Object.freeze({
       path,
-      refusal: path === null ? "no_sent_mailbox" : null,
+      refusal:
+        path !== null
+          ? null
+          : isSupportedMailboxList(listed)
+            ? "no_sent_mailbox"
+            : "mailbox_list_unsupported",
       at: this.now(),
     });
-    return path;
+    return this.sentMailbox;
   }
 
   /** `\Seen` and `\Flagged` are set where the message already is. */
@@ -1525,6 +1562,8 @@ interface SentScanAttempt {
   strikes: number;
   /** The answer if the one message asked for is passed over. */
   skipped: ((reason: MailSentScanSkipReason) => MailSentScanResult) | null;
+  /** Mail above the cursor is left for the batch after this one. */
+  moreAbove: boolean;
   lineTooLong: boolean;
 }
 
@@ -1626,6 +1665,8 @@ async function readSentEnvelopes(
     let startUid = cursor.highestUid + 1;
     let endUid = Math.min(lastUid, cursor.highestUid + width);
     let asked = endUid - startUid + 1;
+    // Where the cursor stands once the batch is read.
+    let readUid = endUid;
     if (lastUid - startUid + 1 > width && !attempt.crawl) {
       attempt.stage = "search";
       const found = await client.search({ uid: `${startUid}:*` }, { uid: true });
@@ -1636,14 +1677,21 @@ async function readSentEnvelopes(
           .filter((uid) => Number.isSafeInteger(uid) && uid >= startUid && uid <= lastUid)
           .sort((left, right) => left - right);
         if (uids.length === 0) return answer({ ...cursor, highestUid: lastUid }, [], null);
-        startUid = uids[0]!;
-        endUid = uids.length > width ? uids[width - 1]! : lastUid;
+        // The fetch asks for the letters the search named and no UID beyond
+        // them. When they are all it named, reading them is reading the
+        // folder to its end. Passing one over is not: that moves the cursor
+        // past the one UID, so a search that named too few cannot take the
+        // letters nobody tried along with the one that failed.
         asked = Math.min(uids.length, width);
+        startUid = uids[0]!;
+        endUid = uids[asked - 1]!;
+        readUid = uids.length > width ? endUid : lastUid;
       }
     }
-    const next: SentScanCursor = { ...cursor, highestUid: endUid };
+    const next: SentScanCursor = { ...cursor, highestUid: readUid };
     attempt.asked = asked;
-    attempt.skipped = (reason) => answer(next, [], reason);
+    attempt.moreAbove = lastUid > readUid;
+    attempt.skipped = (reason) => answer({ ...cursor, highestUid: endUid }, [], reason);
     attempt.stage = "fetch";
     const messages = withEnvelope(
       await client.fetchAll(`${startUid}:${endUid}`, sentEnvelopeFetchQuery(), { uid: true }),

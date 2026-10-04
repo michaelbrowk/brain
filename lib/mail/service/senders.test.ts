@@ -9,6 +9,7 @@ import type {
   MailThreadListItem,
   MailThreadMutationInput,
 } from "../message-types";
+import { MailBackgroundSyncScheduler } from "./background-sync";
 import {
   isMailSenderGated,
   MailSenderError,
@@ -2316,6 +2317,36 @@ describe("the Sent-folder scan", () => {
       { cursor: "s1_77_12_0_0_0" },
       expect.any(AbortSignal),
     );
+  });
+
+  it("reaches no provider through the scheduler while the screen is off, and one scan a window once it is on", async () => {
+    const world = await readyWorld();
+    world.mail.scanSentEnvelopes.mockResolvedValue(sentScanned());
+    await world.screen.setEnabled(false);
+    vi.useFakeTimers({ now: 0 });
+    const scheduler = new MailBackgroundSyncScheduler(
+      {
+        listAccountIds: async () => [ACCOUNT_A],
+        listSyncAccounts: async () => [{ accountId: ACCOUNT_A, providerKind: "imap" }],
+        runBackgroundSyncStep: async () => ({
+          result: { apiVersion: 1, status: "idle", changedCount: 0, hasMore: false },
+          hasMore: false,
+        }),
+      },
+      { initialDelayMs: 10, intervalMs: 60_000, senders: world.screen },
+    );
+    try {
+      scheduler.start();
+      await vi.advanceTimersByTimeAsync(180_010);
+      expect(world.mail.scanSentEnvelopes).not.toHaveBeenCalled();
+
+      await world.screen.setEnabled(true);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(world.mail.scanSentEnvelopes).toHaveBeenCalledTimes(2);
+    } finally {
+      await scheduler.stop();
+      vi.useRealTimers();
+    }
   });
 
   it("leaves an account whose provider has no such scan alone", async () => {

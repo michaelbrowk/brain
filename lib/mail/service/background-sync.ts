@@ -75,6 +75,12 @@ export interface MailBackgroundSenderPort {
     input: { readonly syncSucceeded: boolean },
     signal: AbortSignal,
   ): Promise<{ readonly hasMore: boolean }>;
+  /**
+   * The screen's read of an IMAP account's Sent folder. Unlike the step
+   * above it opens a session at the provider, so the scheduler runs it on
+   * the fallback cadence and not on every visit.
+   */
+  runBackgroundSentScanStep?(accountId: string, signal: AbortSignal): Promise<void>;
 }
 
 /**
@@ -104,6 +110,12 @@ export interface MailBackgroundIdlePort {
  * an owner reading mail and a cohort of bodies downloading cost the provider
  * nothing beyond the cadence. The scheduler is one loop, so no account ever
  * has two passes in flight.
+ *
+ * One step beside the sync does reach a provider: the senders screen's scan
+ * of an IMAP account's Sent folder. It has a window of its own, `intervalMs`
+ * from the start of one scan to the start of the next, so an IMAP account
+ * costs its host at most one more session per fallback interval than its
+ * sync does, however often IDLE or a kick brings the scheduler round.
  */
 export class MailBackgroundSyncScheduler {
   private readonly port: MailBackgroundSyncPort;
@@ -130,6 +142,8 @@ export class MailBackgroundSyncScheduler {
   private readonly requested = new Set<string>();
   /** Accounts whose last provider sync came back healthy. */
   private readonly syncHealthy = new Set<string>();
+  /** When each IMAP account's Sent-folder scan may next start; absent means now. */
+  private readonly sentScanDueAt = new Map<string, number>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private timerDueAt = 0;
   private controller: AbortController | null = null;
@@ -218,6 +232,7 @@ export class MailBackgroundSyncScheduler {
     this.providers.clear();
     this.requested.clear();
     this.syncHealthy.clear();
+    this.sentScanDueAt.clear();
     this.visitAll = false;
   }
 
@@ -389,6 +404,7 @@ export class MailBackgroundSyncScheduler {
       this.idleRequested,
       this.lastIdlePassAt,
       this.syncHealthy,
+      this.sentScanDueAt,
     ]) {
       for (const accountId of state.keys()) {
         if (!active.has(accountId)) state.delete(accountId);
@@ -456,6 +472,29 @@ export class MailBackgroundSyncScheduler {
         }
       } else {
         syncSucceeded = this.syncHealthy.has(accountId);
+      }
+      if (signal.aborted) return false;
+      // The Sent-folder scan is a provider session, so it is not a cache step
+      // that runs on every visit: at most one start per fallback interval,
+      // only for an IMAP account, and only while its sync is healthy, so a
+      // host that is refusing the sync is not asked a second question. It
+      // sits straight after the sync because the window is measured from the
+      // scan's own start: the next sync is due an interval after this one
+      // ended and takes a session of its own, so the visit that runs it
+      // finds the window passed, and the two keep one rhythm. What the scan
+      // has left to read waits for the next window, never for a continuation.
+      if (
+        this.senders?.runBackgroundSentScanStep !== undefined &&
+        syncSucceeded &&
+        this.providers.get(accountId) === "imap" &&
+        (this.sentScanDueAt.get(accountId) ?? 0) <= monotonicNow()
+      ) {
+        this.sentScanDueAt.set(accountId, monotonicNow() + this.intervalMs);
+        try {
+          await this.senders.runBackgroundSentScanStep(accountId, signal);
+        } catch {
+          if (signal.aborted) return false;
+        }
       }
       if (signal.aborted) return false;
       let privacyHasMore = false;

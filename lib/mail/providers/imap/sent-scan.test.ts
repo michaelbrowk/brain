@@ -193,14 +193,24 @@ describe("the IMAP Sent-folder envelope scan", () => {
     server.fetches.length = 0;
 
     // A server that numbers UIDs across the whole account, or a long pause.
+    // The newest letter of all came and went, so the folder's next UID is
+    // past the last letter it holds.
     server.addSent("Sent", [1, 2, 3, 4, 200_000, 200_007], "\\Sent");
+    server.append("Sent", 1);
+    server.expunge("Sent", [200_008]);
     const next = scanned(await provider.scanSentEnvelopes({ cursor: done.cursor }, signal()));
 
     expect(server.searches).toEqual(["5:*"]);
+    // The fetch names the letters the search found and no UID beyond them,
+    // and having read all the search named is having read to the end.
     expect(server.fetches).toEqual([
       { range: "200000:200007", query: { uid: true, envelope: true }, uid: true },
     ]);
-    expect(next).toMatchObject({ envelopeCount: 2, hasMore: false });
+    expect(next).toMatchObject({
+      envelopeCount: 2,
+      hasMore: false,
+      cursor: "s1_500_200008_0_0_0",
+    });
     expect(recipientsOf(next)).toContain("to200007@example.org");
     expect(opened.count).toBe(2);
     // The cursor stands at the folder's end, so the next call has nothing.

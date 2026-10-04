@@ -212,10 +212,17 @@ export function MailNav({
               lists. This menu is all list and no chrome, so the scroller
               wraps its whole body — the same rule, one level up. The fade is
               a mask, not a backdrop layer, so the head's budget stays where
-              it was measured. */}
+              it was measured.
+
+              THE KEYBOARD'S ROW STAYS CLEAR OF THE FADE. Focus scrolls a row
+              in to the nearest edge of the scroller, and that edge is where
+              the mask is: an arrow key into the fold left the row it landed
+              on with its lower 20px dissolved, and coming back up, its top
+              12. The scroll padding is those two sizes, so the browser stops
+              the row where the fade ends. */}
           <ScrollEdge
             variant="fade"
-            className="max-h-[calc(var(--radix-dropdown-menu-content-available-height,100vh)-12px)] overscroll-contain"
+            className="max-h-[calc(var(--radix-dropdown-menu-content-available-height,100vh)-12px)] scroll-pt-3 scroll-pb-5 overscroll-contain"
             scrollerProps={{ role: "none" }}
           >
           {/* Both blocks are ONE group: they name destinations, and only one
@@ -383,7 +390,11 @@ function MenuRow({
   return (
     <Dropdown.RadioItem
       value={value}
-      className="brain-menu-item"
+      /* `focus-inset`: these rows fill a scroller edge to edge, and the
+         global ring stands 2px outside its element, which here is outside
+         the scroller. It drew as one bar above or below the row and nothing
+         at the sides. Inside the row nothing clips it. */
+      className="brain-menu-item focus-inset"
       aria-label={ariaLabel}
       title={title}
     >

@@ -597,6 +597,24 @@ own rounded corner and would roll the pickers' chrome away with their lists.
 This menu is all list and no chrome, so the scroller wraps its whole body. The
 fade is a mask, not a backdrop layer, so the 7 of 8 above is unchanged.
 
+**The keyboard's row stays whole inside that scroller.** Two things a scroller
+does to a focused row, both measured at 1024×420. Focus scrolls a row in to the
+nearest edge, and the edge is where the mask is: Down into the fold left People
+at 374–406 in a scroller that ends at 406, its lower 20px dissolved, and Up left
+Starred with its top 12 under the other fade. The scroller takes
+`scroll-padding` of the fade's own two sizes (12 above, 20 below), so the same
+two rows stop at 354–386 and 72–104. And the global ring stands 2px outside its
+element, which for a row that fills the scroller edge to edge is outside the
+scroller: it drew as one bar across the row and nothing at the sides. The rows
+take `focus-inset`, §8's ring for anything that would clip on its panel.
+`e2e/mail-client.spec.ts` walks every row at both heights and holds both. The
+stand's own walk used to report that the keyboard "cannot reach the last row",
+which was the walk: it sent 24 presses about 2ms apart, and Radix moves the
+roving focus on a timer and reads "next" off the row that holds focus at the
+keydown, so presses faster than the timer are the same press again. A held key
+repeats about 30ms apart at the fastest system setting, an order slower. The
+walk waits for each press to land now.
+
 **Backdrop budget: 7 of §7's 8, counted rather than added up.** Sidebar, nav
 pill, search capsule, toolbar pill, the reader's pill, the scroll edge, and the
 menu — measured on the surface that carries the most of them (one account, a

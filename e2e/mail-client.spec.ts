@@ -1083,6 +1083,46 @@ test("@release Mail's nav menu stays reachable in a window shorter than itself",
     );
     expect(focused?.onScreen, `focus is off screen at ${height}`).toBe(true);
 
+    // Row by row as well. An arrow key scrolls the next row in to the nearest
+    // edge of the scroller, which is where the fade is, and the scroller
+    // clips whatever a row draws outside itself. So every stop has to stand
+    // clear of the mask with its ring inside the row. The menu moves focus on
+    // a timer after the keydown, so each press waits for the one before it.
+    await page.keyboard.press("Home");
+    await page.waitForFunction(
+      () => document.activeElement === document.querySelector('[role="menuitemradio"]'),
+    );
+    const total = await page.getByRole("menuitemradio").count();
+    for (let step = 1; step < total; step += 1) {
+      await page.keyboard.press("ArrowDown");
+      await page.waitForFunction(
+        (index) =>
+          document.activeElement ===
+          document.querySelectorAll('[role="menuitemradio"]')[index],
+        step,
+      );
+      const stop = await page.evaluate(() => {
+        const active = document.activeElement as HTMLElement;
+        const scroller = active.closest(".edge-fade") as HTMLElement;
+        const row = active.getBoundingClientRect();
+        const box = scroller.getBoundingClientRect();
+        // 12px of mask at the top once scrolled, 20px at the bottom while
+        // content continues (`.edge-fade` in globals.css).
+        const top = scroller.scrollTop > 0 ? 12 : 0;
+        const bottom =
+          scroller.scrollTop + scroller.clientHeight < scroller.scrollHeight - 1 ? 20 : 0;
+        return {
+          label: active.textContent?.trim() ?? "",
+          clear: row.top >= box.top + top - 0.5 && row.bottom <= box.bottom - bottom + 0.5,
+          ringInside: parseFloat(getComputedStyle(active).outlineOffset) < 0,
+        };
+      });
+      expect(stop.clear, `${stop.label} sits under the fade at ${height}`).toBe(true);
+      expect(stop.ringInside, `the scroller clips ${stop.label}'s ring at ${height}`).toBe(
+        true,
+      );
+    }
+
     await page.keyboard.press("Escape");
     await expect(menu).toHaveCount(0);
   }

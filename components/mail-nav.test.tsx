@@ -473,4 +473,32 @@ describe("MailNav", () => {
     expect(trigger().className).toContain("btn-quiet");
     expect(document.body.querySelectorAll(".toolbar-pill")).toHaveLength(1);
   });
+
+  /* THE ROWS LIVE IN A SCROLLER, and a scroller clips. In a short window the
+     arrow keys walk rows the browser has to scroll to, and two things went
+     wrong with the row it brought in. The global ring stands 2px outside its
+     element, which is outside the scroller, so it drew as one bar across the
+     row's top or bottom. And the row was scrolled flush to the scroller's
+     edge, which is where the fade is: 20px of a 32px row dissolved at the
+     bottom, 12px at the top. jsdom measures neither, so this holds the two
+     declarations that fix them, and `e2e/mail-shots.spec.ts` measures the
+     result in a 1024x420 and an 844x390 window. */
+  it("keeps the keyboard's row whole inside the scroller", async () => {
+    await act(async () =>
+      root.render(
+        <MailNav {...defaultProps()} accounts={[gmailAccount, imapAccount]} />,
+      ),
+    );
+    await open();
+
+    expect(rows()).toHaveLength(14);
+    for (const item of rows()) {
+      // the ring inside the row, where nothing clips it
+      expect(item.classList.contains("focus-inset")).toBe(true);
+    }
+    const scroller = rows()[0].closest(".edge-fade");
+    // the fade's own two sizes, kept clear when focus scrolls a row in
+    expect(scroller?.classList.contains("scroll-pt-3")).toBe(true);
+    expect(scroller?.classList.contains("scroll-pb-5")).toBe(true);
+  });
 });

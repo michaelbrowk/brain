@@ -385,7 +385,7 @@ and `fetching` both mean the body is not there yet and the caller should call
 again, `transient` means the fetch failed and may succeed later, `permanent`
 means it will not, and `ready` carries `text` and `attachments`. A letter that
 brings the parser down or runs it out of time also answers `permanent`: the
-service parses it three times at most for one call and does not retry on its
+service parses it four times at most for one call and does not retry on its
 own, so only another call tries again.
 
 ## Mail, triage

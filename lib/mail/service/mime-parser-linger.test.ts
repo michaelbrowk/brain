@@ -288,6 +288,7 @@ function workInput(
     providerMessageId: messageId,
     lease: { token: `lease-${messageId}` },
     deadlineAt: Date.now() + 60_000,
+    lane: { background: messageId === "prefetch" },
     cache: {
       incomingBlobStore: () => ({}),
       stageBlob: async () => undefined,

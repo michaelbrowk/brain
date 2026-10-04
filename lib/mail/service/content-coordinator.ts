@@ -96,6 +96,11 @@ export interface MailContentWorkInput {
   readonly cache: SqliteMailContentCache;
   readonly blobStore: AtomicMailBlobStore;
   readonly deadlineAt: number;
+  /**
+   * Whose work this is: the prefetch's, or an owner's who is waiting for it.
+   * Read when asked, since an owner can take a prefetch over while it runs.
+   */
+  readonly lane: { readonly background: boolean };
 }
 
 /**
@@ -1545,6 +1550,7 @@ export class MailContentCoordinator
               cache: entry.cache,
               blobStore: entry.blobStore,
               deadlineAt: lease.expiresAt,
+              lane: input.lane,
             },
             input.signal,
           );
@@ -1602,9 +1608,10 @@ export class MailContentCoordinator
           // A letter that brought the parser down may do so every time, so
           // nobody's attempt at it is retried: the prefetch leaves it for an
           // open, and an open leaves it for the next open. The runner has
-          // already parsed it up to three times in this one attempt. The
-          // queue's four attempts made that twelve parser processes an ask,
-          // and the reader asks three times an open.
+          // already parsed it in this one attempt up to three times for the
+          // prefetch and four for an owner. The queue's four attempts made
+          // the three of that time twelve parser processes an ask, and the
+          // reader asks three times an open.
           if (MAIL_PARSER_FAILURE_CODES.includes(failure.errorCode)) {
             return complete();
           }

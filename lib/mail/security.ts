@@ -1607,6 +1607,9 @@ const MAIL_LOG_NUMERIC_FIELDS = Object.freeze([
   // IMAP IDLE's failures in a row for one account. The journal is the only
   // place the count lives, which is how a reconnect storm would show itself.
   "failureCount",
+  // Sent-folder envelopes the new-senders scan passed over because no
+  // session could read them. A count: no UID, no address.
+  "skippedCount",
 ] as const);
 
 export type MailLogRecord = Readonly<Record<string, string | number>> & {

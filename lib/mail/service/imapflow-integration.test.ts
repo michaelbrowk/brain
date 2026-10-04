@@ -20,6 +20,7 @@ import {
 } from "../providers/imap/sync-adapter";
 import type { MultiMailAccountStore } from "./account-store";
 import type { StoredImapMailAccount } from "./account-types";
+import type { MailSentScanResult } from "./senders";
 import { MailImapIdleSupervisor } from "./imap-idle";
 import {
   ImapFlowCredentialVerifier,
@@ -203,6 +204,109 @@ describe("the Sent-folder scan against a real ImapFlow session", () => {
   });
 });
 
+describe("what the Sent-folder scan survives on a real ImapFlow session", () => {
+  const person = imapAddress("Person", "person", "example.test");
+  const letter = (uid: number, to: string, bcc?: string) => ({
+    uid,
+    envelope: imapEnvelope({
+      from: person,
+      to: imapAddress("To", to, "example.org"),
+      ...(bcc === undefined ? {} : { bcc }),
+    }),
+  });
+
+  it("passes over a letter whose envelope is longer than the session's line limit, and reads the others", async () => {
+    // A Bcc blast: the adapter never reads Bcc, and the server sends it all
+    // the same, 2,600 addresses on one line past the session's 64 KiB.
+    const blast = Array.from({ length: 2_600 }, (_value, index) =>
+      imapAddress("X", `recipient${index}`, "example.org"),
+    ).join(" ");
+    const { adapter, commands } = await sentScanAdapter({
+      capability: "IMAP4rev1 SPECIAL-USE",
+      folders: [{ flags: "\\HasNoChildren \\Sent", path: "Sent" }],
+      uidNext: 14,
+      messages: [letter(11, "a"), letter(12, "b", blast), letter(13, "c")],
+    });
+
+    const outcomes: MailSentScanResult[] = [];
+    let cursor: string | null = null;
+    for (let window = 0; window < 8; window += 1) {
+      const result = await adapter.scanSentEnvelopes({ cursor }, new AbortController().signal);
+      outcomes.push(result);
+      if (result.status !== "scanned") continue;
+      cursor = result.cursor;
+      if (!result.hasMore) break;
+    }
+
+    // The batch of three fails and is asked for again a letter at a time,
+    // newest first: the third is read, the second is the one, the first is read.
+    expect(outcomes.map((outcome) => outcome.status)).toEqual([
+      "batch_failed",
+      "scanned",
+      "scanned",
+      "scanned",
+    ]);
+    const read = outcomes.flatMap((outcome) =>
+      outcome.status === "scanned" ? outcome.envelopes.flatMap((entry) => entry.recipients) : [],
+    );
+    expect(read.sort()).toEqual(["a@example.org", "c@example.org"]);
+    expect(outcomes[2]).toMatchObject({
+      skippedCount: 1,
+      skipReason: "envelope_line_too_long",
+      envelopeCount: 0,
+    });
+    expect(cursor).toBe("s1_77_13_0_0_0");
+    // No range was asked for twice.
+    const fetches = commands.filter((line) => / FETCH /.test(line)).map((line) => line.split(" ")[2]);
+    expect(fetches).toEqual(["1:3", "3:3", "2:2", "1:1"]);
+  });
+
+  it("steps over a FETCH the server sends about another client's flag change", async () => {
+    const { adapter } = await sentScanAdapter({
+      capability: "IMAP4rev1 SPECIAL-USE",
+      folders: [{ flags: "\\HasNoChildren \\Sent", path: "Sent" }],
+      uidNext: 13,
+      messages: [letter(11, "a"), letter(12, "b")],
+      unsolicited: "* 2 FETCH (FLAGS (\\Seen))\r\n",
+    });
+
+    await expect(
+      adapter.scanSentEnvelopes({ cursor: null }, new AbortController().signal),
+    ).resolves.toMatchObject({ status: "scanned", envelopeCount: 2, hasMore: false });
+  });
+
+  it("asks which UIDs exist before it fetches mail far above the cursor", async () => {
+    const { adapter, commands } = await sentScanAdapter({
+      capability: "IMAP4rev1 SPECIAL-USE",
+      folders: [{ flags: "\\HasNoChildren \\Sent", path: "Sent" }],
+      uidNext: 200_001,
+      messages: [letter(11, "a"), letter(12, "b"), letter(200_000, "c")],
+    });
+
+    const result = await adapter.scanSentEnvelopes(
+      { cursor: "s1_77_12_0_0_0" },
+      new AbortController().signal,
+    );
+
+    expect(result).toMatchObject({
+      status: "scanned",
+      cursor: "s1_77_200000_0_0_0",
+      envelopes: [{ from: "person@example.test", recipients: ["c@example.org"] }],
+      hasMore: false,
+    });
+    const names = commandNames(commands);
+    expect(
+      names
+        .slice(names.indexOf("LOGIN"))
+        .filter((name) => !["CAPABILITY", "LIST", "LSUB"].includes(name)),
+    ).toEqual(["LOGIN", "EXAMINE", "UID", "UID"]);
+    expect(commands.filter((line) => / UID /.test(line)).map((line) => line.replace(/^\S+ /, ""))).toEqual([
+      "UID SEARCH UID 13:*",
+      "UID FETCH 200000:200000 (UID ENVELOPE)",
+    ]);
+  });
+});
+
 /*
   ImapFlow's LIST hands back a `specialUse` it guessed from the folder's leaf
   name when no folder carries the flag. These run its real `list()` against a
@@ -321,6 +425,13 @@ interface FakeImapOptions {
   readonly uidValidity?: number;
   /** The untagged lines a FETCH or UID FETCH answers with. */
   readonly fetch?: (line: string) => string;
+  /**
+   * The folder's letters, lowest UID first. A fetch answers the ones its
+   * sequence or UID range names, and a UID search the UIDs its range names.
+   */
+  readonly messages?: readonly { readonly uid: number; readonly envelope: string }[];
+  /** Sent ahead of every fetch answer, as a server reports another client. */
+  readonly unsolicited?: string;
 }
 
 const imapAddress = (name: string, local: string, domain: string) =>
@@ -374,15 +485,39 @@ function serveSentImap(socket: TLSSocket, commands: string[], options: FakeImapO
       socket.write(
         "* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)\r\n" +
           "* OK [PERMANENTFLAGS ()] No permanent flags permitted\r\n" +
-          `* ${options.exists ?? 0} EXISTS\r\n` +
+          `* ${options.exists ?? options.messages?.length ?? 0} EXISTS\r\n` +
           `* OK [UIDVALIDITY ${options.uidValidity ?? 77}] UIDs valid\r\n` +
           `* OK [UIDNEXT ${options.uidNext ?? 1}] Predicted next UID\r\n` +
           `${tag} OK [READ-ONLY] EXAMINE completed\r\n`,
       );
       return;
     }
-    if (command === "FETCH" || (command === "UID" && / UID FETCH /i.test(line))) {
-      socket.write(`${options.fetch?.(line) ?? ""}${tag} OK FETCH completed\r\n`);
+    const byUid = command === "UID";
+    const messages = options.messages ?? [];
+    // `a:b`, `a` or `a:*`, against sequence numbers or UIDs.
+    const named = (set: string) => {
+      const [low, high = low] = set.split(":");
+      const from = Number(low);
+      const to = high === "*" ? Number.MAX_SAFE_INTEGER : Number(high);
+      return messages
+        .map((message, index) => ({ ...message, seq: index + 1 }))
+        .filter((message) => {
+          const position = byUid ? message.uid : message.seq;
+          return position >= from && position <= to;
+        });
+    };
+    if (byUid && / UID SEARCH UID /i.test(line)) {
+      const hits = named(line.split(" ").at(-1)!).map((message) => message.uid);
+      socket.write(`* SEARCH ${hits.join(" ")}\r\n${tag} OK SEARCH completed\r\n`);
+      return;
+    }
+    if (command === "FETCH" || (byUid && / UID FETCH /i.test(line))) {
+      const answer =
+        options.fetch?.(line) ??
+        named(line.split(" ")[byUid ? 3 : 2]!)
+          .map((message) => `* ${message.seq} FETCH (UID ${message.uid} ENVELOPE ${message.envelope})\r\n`)
+          .join("");
+      socket.write(`${options.unsolicited ?? ""}${answer}${tag} OK FETCH completed\r\n`);
       return;
     }
     socket.write(`${tag} BAD unsupported test command\r\n`);

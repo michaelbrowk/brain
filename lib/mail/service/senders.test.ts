@@ -2516,6 +2516,23 @@ describe("the Sent-folder scan", () => {
     ]);
   });
 
+  it("says once that a batch could not be read while the scan narrows it, and keeps the cursor", async () => {
+    const events: unknown[] = [];
+    const world = await readyWorld({ onEvent: (event) => events.push(event) });
+    world.mail.scanSentEnvelopes
+      .mockResolvedValueOnce(sentScanned({ cursor: "s1_77_12_0_0_0" }))
+      .mockResolvedValueOnce({ status: "batch_failed" })
+      .mockResolvedValueOnce({ status: "batch_failed" })
+      .mockResolvedValueOnce({ status: "batch_failed" });
+
+    for (let window = 0; window < 4; window += 1) await sentScan(world, ACCOUNT_A);
+
+    expect(events).toEqual([
+      { event: "mail_sender_sent_scan", accountId: ACCOUNT_A, reason: "batch_failed" },
+    ]);
+    expect(world.store.readSentScanCursor(ACCOUNT_A)).toBe("s1_77_12_0_0_0");
+  });
+
   it("says in the journal how many envelopes no session could read, each time one is passed over", async () => {
     const events: unknown[] = [];
     const world = await readyWorld({ onEvent: (event) => events.push(event) });

@@ -146,6 +146,9 @@ describe("the IMAP Sent-folder envelope scan", () => {
       `uid 5:${4 + IMAP_SENT_SCAN_BATCH}`,
       `uid ${5 + IMAP_SENT_SCAN_BATCH}:${6 + IMAP_SENT_SCAN_BATCH}`,
     ]);
+    // More than a batch is new, so the first asks which UIDs exist; the two
+    // that are left fit a batch and are fetched by their range outright.
+    expect(server.searches).toEqual(["5:*"]);
     expect(next).toMatchObject({ envelopeCount: IMAP_SENT_SCAN_BATCH, hasMore: true });
     expect(rest).toMatchObject({ envelopeCount: 2, hasMore: false });
     expect(recipientsOf(next)).toContain("to5@example.org");
@@ -169,6 +172,49 @@ describe("the IMAP Sent-folder envelope scan", () => {
     expect(fresh.hasMore).toBe(true);
     expect(tail).toMatchObject({ envelopeCount: 10, hasMore: false });
     expect(recipientsOf(tail)).toContain("to1@example.org");
+    // One new UID is a range of one: nothing to search for.
+    expect(server.searches).toEqual([]);
+  });
+
+  it("reads a letter whose UID is far above the cursor in one session, not a window per 250 UIDs", async () => {
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 4) } });
+    const { provider, opened } = providerFor(server);
+    const done = scanned(await provider.scanSentEnvelopes({ cursor: null }, signal()));
+    server.fetches.length = 0;
+
+    // A server that numbers UIDs across the whole account, or a long pause.
+    server.addSent("Sent", [1, 2, 3, 4, 200_000, 200_007], "\\Sent");
+    const next = scanned(await provider.scanSentEnvelopes({ cursor: done.cursor }, signal()));
+
+    expect(server.searches).toEqual(["5:*"]);
+    expect(server.fetches).toEqual([
+      { range: "200000:200007", query: { uid: true, envelope: true }, uid: true },
+    ]);
+    expect(next).toMatchObject({ envelopeCount: 2, hasMore: false });
+    expect(recipientsOf(next)).toContain("to200007@example.org");
+    expect(opened.count).toBe(2);
+    // The cursor stands at the folder's end, so the next call has nothing.
+    const idle = scanned(await provider.scanSentEnvelopes({ cursor: next.cursor }, signal()));
+    expect(idle).toMatchObject({ envelopeCount: 0, hasMore: false });
+    expect(server.fetches).toHaveLength(1);
+  });
+
+  it("steps over a UID range that holds nothing, when a letter came and went above the cursor", async () => {
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 4) } });
+    const { provider } = providerFor(server);
+    const done = scanned(await provider.scanSentEnvelopes({ cursor: null }, signal()));
+    server.fetches.length = 0;
+
+    // A thousand letters were appended and deleted again in another client:
+    // UIDNEXT moved, and nothing is there. SEARCH n:* answers the newest
+    // letter the folder has, which is below n and is not new.
+    server.append("Sent", 1_000);
+    server.expunge("Sent", range(5, 1_004));
+    const next = scanned(await provider.scanSentEnvelopes({ cursor: done.cursor }, signal()));
+
+    expect(server.searches).toEqual(["5:*"]);
+    expect(server.fetches).toEqual([]);
+    expect(next).toMatchObject({ envelopeCount: 0, hasMore: false, cursor: "s1_500_1004_0_0_0" });
   });
 
   it("misses no unread letter when the folder shrinks between two sessions of the walk", async () => {
@@ -286,16 +332,227 @@ describe("the IMAP Sent-folder envelope scan", () => {
     expect(opened.count).toBe(2);
   });
 
-  it("refuses a page with more envelopes than it asked for", async () => {
+  it("keeps to the budget section 11 of the architecture states", () => {
+    expect(IMAP_SENT_SCAN_BATCH).toBe(250);
+    expect(IMAP_SENT_SCAN_FIRST_RUN_CAP).toBe(5_000);
+  });
+
+  it("counts the cap by the envelopes asked for, so letters that slid back into the walk do not stretch it", async () => {
+    const total = IMAP_SENT_SCAN_FIRST_RUN_CAP + 300;
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, total) } });
+    const { provider } = providerFor(server);
+    const first = scanned(await provider.scanSentEnvelopes({ cursor: null }, signal()));
+
+    // A hundred of the oldest go, so the next range holds a hundred letters
+    // the walk has read already and only 150 it has not.
+    server.expunge("Sent", range(1, 100));
+    let cursor = first.cursor;
+    let steps = 1;
+    for (;;) {
+      const result: ScannedResult = scanned(await provider.scanSentEnvelopes({ cursor }, signal()));
+      cursor = result.cursor;
+      steps += 1;
+      if (!result.hasMore) break;
+      expect(steps).toBeLessThan(100);
+    }
+
+    const asked = server.fetches.reduce((sum, fetch) => {
+      const [low, high] = fetch.range.split(":").map(Number) as [number, number];
+      return sum + high - low + 1;
+    }, 0);
+    expect(asked).toBe(IMAP_SENT_SCAN_FIRST_RUN_CAP);
+    expect(steps).toBe(IMAP_SENT_SCAN_FIRST_RUN_CAP / IMAP_SENT_SCAN_BATCH);
+  });
+
+  it("begins again from a cursor whose walk claims more than the cursor has read", async () => {
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
+    const { provider } = providerFor(server);
+
+    // The walk's ceiling is above the highest UID read plus one: no scan of
+    // this folder wrote that. Taken at its word it would walk two letters.
+    const result = scanned(await provider.scanSentEnvelopes({ cursor: "s1_500_3_2_10_2" }, signal()));
+
+    expect(result).toMatchObject({ envelopeCount: 3, restart: null, cursor: "s1_500_3_0_0_0" });
+  });
+
+  it("begins again when the folder's next UID is below one the cursor has read", async () => {
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
+    const { provider } = providerFor(server);
+
+    // A restored mailbox under the same UIDVALIDITY: the cursor stands at
+    // UID 90 and the folder's next UID is 4, so nothing above the cursor
+    // would ever be read.
+    const result = scanned(await provider.scanSentEnvelopes({ cursor: "s1_500_90_0_0_0" }, signal()));
+
+    expect(result).toMatchObject({
+      envelopeCount: 3,
+      restart: "uidnext_regressed",
+      cursor: "s1_500_3_0_0_0",
+    });
+    // A cursor that stands exactly at the end is not a regression.
+    const settled = scanned(await provider.scanSentEnvelopes({ cursor: result.cursor }, signal()));
+    expect(settled).toMatchObject({ envelopeCount: 0, restart: null });
+  });
+
+  it("steps over a FETCH response that carries no envelope", async () => {
+    // Another client set a flag while the fetch ran, and the server told this
+    // session so in the middle of the answer.
     const server = serverFixture({
       sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) },
-      overAnswer: true,
+      flagUpdates: true,
     });
     const { provider } = providerFor(server);
 
-    await expect(provider.scanSentEnvelopes({ cursor: null }, signal())).rejects.toMatchObject({
-      code: "mail_provider_response_invalid",
+    const walked = scanned(await provider.scanSentEnvelopes({ cursor: null }, signal()));
+    server.append("Sent", 1);
+    const fresh = scanned(await provider.scanSentEnvelopes({ cursor: walked.cursor }, signal()));
+
+    expect(walked).toMatchObject({ envelopeCount: 3, hasMore: false });
+    expect(fresh).toMatchObject({ envelopeCount: 1, hasMore: false });
+  });
+});
+
+/*
+  One envelope a session cannot read (a line past the session's 64 KiB limit,
+  which a Bcc blast reaches without the adapter ever reading Bcc, or a server
+  too slow for the deadline) used to hold the scan at its batch for good, and
+  every later letter with it. A batch that fails is asked for again at half
+  its width, down to one message, and that one is passed over and counted.
+*/
+describe("a Sent-folder batch that cannot be read", () => {
+  it("narrows the walk to the one letter, passes it over, and reads every other", async () => {
+    const total = 600;
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, total) } });
+    const { provider } = providerFor(server);
+    server.failFetchOf(420);
+
+    const read = new Set<string>();
+    const outcomes: string[] = [];
+    let skipped = 0;
+    let cursor: string | null = null;
+    for (let window = 0; window < 40; window += 1) {
+      const result = await provider.scanSentEnvelopes({ cursor }, signal());
+      outcomes.push(result.status);
+      if (result.status !== "scanned") continue;
+      cursor = result.cursor;
+      skipped += result.skippedCount;
+      for (const address of recipientsOf(result)) read.add(address);
+      if (result.skippedCount > 0) expect(result.skipReason).toBe("envelope_unreadable");
+      if (!result.hasMore) break;
+    }
+
+    expect(outcomes.at(-1)).toBe("scanned");
+    expect(skipped).toBe(1);
+    expect(read.has("to420@example.org")).toBe(false);
+    for (const uid of [1, 419, 421, 600]) expect(read.has(`to${uid}@example.org`)).toBe(true);
+    expect(read.size).toBe((total - 1) * 2);
+    // Halving finds it in a few windows, not in one a letter.
+    expect(outcomes.filter((status) => status === "batch_failed").length).toBeLessThanOrEqual(8);
+    expect(outcomes.length).toBeLessThanOrEqual(16);
+    // The failed batch was asked for again at half its width, never whole.
+    expect(server.fetches.filter((fetch) => fetch.range === "351:600")).toHaveLength(1);
+  });
+
+  it("does the same above the cursor: one fat new letter does not hold the ones sent after it", async () => {
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
+    const { provider } = providerFor(server);
+    const done = scanned(await provider.scanSentEnvelopes({ cursor: null }, signal()));
+    server.append("Sent", 6);
+    server.failFetchOf(4);
+
+    let cursor = done.cursor;
+    let learned = 0;
+    let skipped = 0;
+    let windows = 0;
+    for (; windows < 12; windows += 1) {
+      const result = await provider.scanSentEnvelopes({ cursor }, signal());
+      if (result.status !== "scanned") continue;
+      cursor = result.cursor;
+      learned += result.envelopeCount;
+      skipped += result.skippedCount;
+      if (!result.hasMore) break;
+    }
+
+    expect(learned).toBe(5);
+    expect(skipped).toBe(1);
+    expect(cursor).toBe("s1_500_9_0_0_0");
+    expect(windows).toBeLessThanOrEqual(6);
+  });
+
+  it("names the session's line limit when that is what the letter ran into", async () => {
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: [1] } });
+    const { provider } = providerFor(server);
+    server.failFetchOf(1, { code: "LineTooLarge" });
+
+    const result = scanned(await provider.scanSentEnvelopes({ cursor: null }, signal()));
+
+    // One letter in the folder is a batch of one: passed over at once.
+    expect(result).toMatchObject({
+      envelopeCount: 0,
+      skippedCount: 1,
+      skipReason: "envelope_line_too_long",
+      hasMore: false,
+      cursor: "s1_500_1_0_0_0",
     });
+  });
+
+  it("takes a page with more envelopes than it asked for as a batch it could not read, on the walk and above the cursor", async () => {
+    const walking = serverFixture({
+      sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) },
+      overAnswer: true,
+    });
+    await expect(
+      providerFor(walking).provider.scanSentEnvelopes({ cursor: null }, signal()),
+    ).resolves.toEqual({ status: "batch_failed" });
+
+    const above = serverFixture({
+      sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 5) },
+      overAnswer: true,
+    });
+    await expect(
+      providerFor(above).provider.scanSentEnvelopes({ cursor: "s1_500_3_0_0_0" }, signal()),
+    ).resolves.toEqual({ status: "batch_failed" });
+    expect(above.fetches.at(-1)).toMatchObject({ range: "4:5", uid: true });
+  });
+
+  it("reads new mail by plain UID range once the search for it could not be read", async () => {
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 4) } });
+    const { provider } = providerFor(server);
+    const done = scanned(await provider.scanSentEnvelopes({ cursor: null }, signal()));
+    server.fetches.length = 0;
+    server.append("Sent", IMAP_SENT_SCAN_BATCH + 2);
+    server.failSearch();
+
+    await expect(
+      provider.scanSentEnvelopes({ cursor: done.cursor }, signal()),
+    ).resolves.toEqual({ status: "batch_failed" });
+    const next = scanned(await provider.scanSentEnvelopes({ cursor: done.cursor }, signal()));
+
+    // A search answer too long for a line means thousands of letters are
+    // new, and then their UIDs are dense: a range a batch wide is as good.
+    expect(server.searches).toEqual(["5:*"]);
+    expect(server.fetches).toEqual([
+      { range: `5:${4 + IMAP_SENT_SCAN_BATCH}`, query: { uid: true, envelope: true }, uid: true },
+    ]);
+    expect(next).toMatchObject({ envelopeCount: IMAP_SENT_SCAN_BATCH, hasMore: true });
+  });
+
+  it("does not narrow for a stop, or for a session that failed before it asked for anything", async () => {
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 300) } });
+    const { provider } = providerFor(server);
+    const stop = new AbortController();
+    server.failFetchOf(300, { before: () => stop.abort() });
+
+    await expect(provider.scanSentEnvelopes({ cursor: null }, stop.signal)).rejects.toBeDefined();
+    server.failFetchOf(null);
+    server.dropNextExamine();
+    await expect(provider.scanSentEnvelopes({ cursor: null }, signal())).rejects.toMatchObject({
+      code: "mail_provider_unavailable",
+    });
+    const result = scanned(await provider.scanSentEnvelopes({ cursor: null }, signal()));
+
+    expect(result.envelopeCount).toBe(IMAP_SENT_SCAN_BATCH);
+    expect(server.fetches.map((fetch) => fetch.range)).toEqual(["51:300", "51:300"]);
   });
 });
 
@@ -337,10 +594,10 @@ interface FakeMailbox {
 }
 
 /**
- * A stand-in for `ImapSessionClient` that holds one Sent mailbox, answers the
- * three things the scan issues (LIST, a mailbox lock, a fetch by sequence or by
- * UID) and records each, so a test can assert the wire shape. Everything that
- * would write is recorded as forbidden. Like the fixture beside it, it is
+ * A stand-in for `ImapSessionClient` that holds one Sent mailbox, answers what
+ * the scan issues (LIST, a mailbox lock, a fetch by sequence or by UID, a UID
+ * search) and records each, so a test can assert the wire shape. Everything
+ * that would write is recorded as forbidden. Like the fixture beside it, it is
  * written from the adapter's own reading of the protocol and proves nothing
  * about a real server; `imapflow-integration.test.ts` does that part.
  */
@@ -348,8 +605,10 @@ function serverFixture(options: {
   readonly sent: { readonly path: string; readonly specialUse?: string; readonly uids: readonly number[] } | null;
   readonly refuseExamine?: boolean;
   readonly dropOnExamine?: boolean;
-  /** Every fetch answers one envelope more than the range holds. */
+  /** Every fetch answers its last envelope twice: one more than the range holds. */
   readonly overAnswer?: boolean;
+  /** Every fetch also answers a flags-only FETCH response, with no envelope. */
+  readonly flagUpdates?: boolean;
   /** What one letter's envelope says instead of the fixture's own, by UID. */
   readonly envelopes?: Readonly<Record<number, Partial<FakeEnvelope>>>;
 }) {
@@ -367,9 +626,21 @@ function serverFixture(options: {
   let refuseExamine = options.refuseExamine === true;
   const locks: { readonly path: string; readonly readOnly: boolean }[] = [];
   const fetches: { readonly range: string; readonly query: unknown; readonly uid: boolean }[] = [];
+  const searches: string[] = [];
   const forbidden: string[] = [];
   const counters = { bccReads: 0, lists: 0 };
+  const errorListeners: Array<(error: unknown) => void> = [];
   let selected: FakeMailbox | null = null;
+  let dropNextExamine = false;
+  let searchFails = false;
+  /** The letter no session can fetch, and what the session says as it dies. */
+  let unreadable: {
+    readonly uid: number;
+    readonly code?: string;
+    readonly before?: () => void;
+  } | null = null;
+  const connectionLost = () =>
+    Object.assign(new Error("Connection not available"), { code: "NoConnection" });
 
   const envelopeOf = (uid: number): FetchMessageObject["envelope"] => {
     const author = [{ name: "Display Name", address: `Alias${uid}@Example.test` }];
@@ -416,13 +687,17 @@ function serverFixture(options: {
     },
     connect: async () => undefined,
     close: () => undefined,
-    on: () => client,
+    on: (_event: "error", listener: (error: unknown) => void) => {
+      errorListeners.push(listener);
+      return client;
+    },
     unbind: () => {
       throw new Error("not used");
     },
     async getMailboxLock(path: string, lockOptions?: { readonly readOnly?: boolean }) {
-      if (options.dropOnExamine === true) {
-        throw Object.assign(new Error("Connection not available"), { code: "NoConnection" });
+      if (options.dropOnExamine === true || dropNextExamine) {
+        dropNextExamine = false;
+        throw connectionLost();
       }
       if (refuseExamine) {
         throw Object.assign(new Error("Command failed"), {
@@ -458,9 +733,39 @@ function serverFixture(options: {
           ? [{ seq: index + 1, uid, envelope: envelopeOf(uid) } as FetchMessageObject]
           : [];
       });
-      return options.overAnswer === true
-        ? [...answered, { seq: 0, uid: 1, envelope: envelopeOf(1) } as FetchMessageObject]
-        : answered;
+      const fatal = unreadable;
+      if (fatal !== null && answered.some((message) => message.uid === fatal.uid)) {
+        fatal.before?.();
+        // ImapFlow reports what killed the stream on the client's error
+        // event; the fetch itself only learns that the connection is gone.
+        if (fatal.code !== undefined) {
+          for (const listener of errorListeners) {
+            listener(Object.assign(new Error("stream error"), { code: fatal.code }));
+          }
+        }
+        throw connectionLost();
+      }
+      const noise =
+        options.flagUpdates === true
+          ? [{ seq: 1, flags: new Set(["\\Seen"]) } as unknown as FetchMessageObject]
+          : [];
+      const repeated = answered.at(-1);
+      return options.overAnswer === true && repeated !== undefined
+        ? [...noise, ...answered, repeated]
+        : [...noise, ...answered];
+    },
+    async search(query: { readonly uid?: string }, searchOptions?: { readonly uid?: boolean }) {
+      if (selected === null) throw new Error("no mailbox selected");
+      if (searchOptions?.uid !== true || typeof query.uid !== "string") {
+        throw new Error("only a UID search by UID range is modelled");
+      }
+      searches.push(query.uid);
+      if (searchFails) throw connectionLost();
+      const from = Number(query.uid.split(":")[0]);
+      const uids = [...selected.uids].sort((left, right) => left - right);
+      const above = uids.filter((uid) => uid >= from);
+      // RFC 3501: `n:*` always names the newest message, even one below n.
+      return above.length > 0 || uids.length === 0 ? above : [uids.at(-1)!];
     },
     async list() {
       counters.lists += 1;
@@ -480,7 +785,6 @@ function serverFixture(options: {
     },
     mailboxCreate: forbid("create"),
     mailboxSubscribe: forbid("subscribe"),
-    search: forbid("search"),
     messageFlagsAdd: forbid("store"),
     messageFlagsRemove: forbid("store"),
     messageMove: forbid("move"),
@@ -490,6 +794,7 @@ function serverFixture(options: {
     client: client as unknown as ImapSessionClient,
     locks,
     fetches,
+    searches,
     forbidden,
     get bccReads() {
       return counters.bccReads;
@@ -497,6 +802,20 @@ function serverFixture(options: {
     addSent,
     allowExamine() {
       refuseExamine = false;
+    },
+    /** The next lock finds the connection gone; the one after it does not. */
+    dropNextExamine() {
+      dropNextExamine = true;
+    },
+    /** Every fetch whose answer would hold this letter kills its session. */
+    failFetchOf(
+      uid: number | null,
+      how: { readonly code?: string; readonly before?: () => void } = {},
+    ) {
+      unreadable = uid === null ? null : { uid, ...how };
+    },
+    failSearch() {
+      searchFails = true;
     },
     /** Another client sends `count` more letters. */
     append(path: string, count: number) {

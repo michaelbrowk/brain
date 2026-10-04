@@ -40,7 +40,9 @@ import {
 import type {
   MailSentScanEnvelope,
   MailSentScanRefusal,
+  MailSentScanRestart,
   MailSentScanResult,
+  MailSentScanSkipReason,
 } from "../../service/senders";
 
 const MAX_PAGE_ITEMS = 20;
@@ -185,6 +187,12 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
    * archive's one CREATE has been tried, and a scan must not say so.
    */
   private sentMailbox: SentMailboxAnswer | null = null;
+  /**
+   * A Sent-folder batch that could not be read, and how the next call at its
+   * cursor asks. In memory only: after a restart the scan finds the same
+   * letter again by the same halving, a few windows later.
+   */
+  private sentScanRetry: SentScanRetry | null = null;
   private readonly now: () => number;
 
   constructor(
@@ -447,20 +455,26 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
   }
 
   /**
-   * One bounded read of the Sent mailbox for the new-senders screen: whom the
-   * owner wrote to, and which addresses he writes from. The cache holds the
-   * Inbox alone, so a letter sent from another client is seen nowhere else.
+   * One bounded read of the Sent mailbox for the new-senders screen: who
+   * wrote each sent letter and to whom. The cache holds the Inbox alone, so a
+   * letter sent from another client is seen nowhere else.
    *
    * One session a call. The mailbox is examined read-only and the only fetch
    * asks for UID and ENVELOPE: no body, no header block, no flag, and nothing
    * is ever stored, moved or created. An ENVELOPE carries Bcc on the wire,
    * because the protocol has no envelope without it; this adapter never reads
-   * that field. Mail that arrived since the cursor is read first, by UID;
-   * then the first walk goes on, newest first. The caller spaces the calls.
+   * that field. Mail that arrived since the cursor is read first; then the
+   * first walk goes on, newest first. The caller spaces the calls.
    *
    * A server with no Sent mailbox, or one that refuses to open it, is an
    * answer and not a failure, and it is remembered for ROLE_REFUSAL_TTL_MS so
-   * hearing it again costs no session. A connection that drops is a failure.
+   * hearing it again costs no session. A connection that drops before
+   * anything was asked for is a failure. A batch that was asked for and could
+   * not be read is neither: it answers `batch_failed`, and the next call at
+   * the same cursor asks for half as much, down to one message, which is then
+   * passed over and counted. So one envelope a session cannot read (a line
+   * past the session's limit, a server too slow for the deadline) never holds
+   * the scan, or the letters after it.
    */
   async scanSentEnvelopes(
     input: { readonly cursor: string | null },
@@ -470,27 +484,106 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
     if (remembered !== null && remembered.refusal !== null) {
       return sentScanUnavailable(remembered.refusal);
     }
-    return this.run(signal, async (client) => {
-      const path = remembered?.path ?? (await this.listSentMailbox(client));
-      if (path === null) return sentScanUnavailable("no_sent_mailbox");
-      let examined = false;
-      try {
-        return await withMailbox(client, path, true, (mailbox) => {
-          examined = true;
-          return readSentEnvelopes(client, mailbox, parseSentScanCursor(input.cursor));
+    // Kept outside the session on purpose: a session that runs into its
+    // deadline is abandoned in the middle of an await, and what it had asked
+    // for is all that is known about it afterwards.
+    const attempt: SentScanAttempt = {
+      stage: null,
+      cursor: null,
+      asked: 0,
+      width: IMAP_SENT_SCAN_BATCH,
+      crawl: false,
+      left: 0,
+      skipped: null,
+      lineTooLong: false,
+    };
+    let result: MailSentScanResult;
+    try {
+      result = await this.run(signal, async (client) => {
+        const path = remembered?.path ?? (await this.listSentMailbox(client));
+        if (path === null) return sentScanUnavailable("no_sent_mailbox");
+        // ImapFlow says what killed a stream on this event and nowhere else.
+        client.on("error", (error) => {
+          if (isLineLimitError(error)) attempt.lineTooLong = true;
         });
-      } catch (error) {
-        if (examined || !isServerAnswer(error)) throw error;
-        // A tagged NO to the EXAMINE: the folder LIST named is gone, or an
-        // ACL keeps it shut. LIST is asked again once this answer is old.
-        this.sentMailbox = Object.freeze({
-          path: null,
-          refusal: "examine_refused",
-          at: this.now(),
-        });
-        return sentScanUnavailable("examine_refused");
-      }
-    });
+        let examined = false;
+        try {
+          return await withMailbox(client, path, true, (mailbox) => {
+            examined = true;
+            return readSentEnvelopes(
+              client,
+              mailbox,
+              parseSentScanCursor(input.cursor),
+              this.sentScanRetry,
+              attempt,
+            );
+          });
+        } catch (error) {
+          if (examined || !isServerAnswer(error)) throw error;
+          // A tagged NO to the EXAMINE: the folder LIST named is gone, or an
+          // ACL keeps it shut. LIST is asked again once this answer is old.
+          this.sentMailbox = Object.freeze({
+            path: null,
+            refusal: "examine_refused",
+            at: this.now(),
+          });
+          return sentScanUnavailable("examine_refused");
+        }
+      });
+    } catch (error) {
+      // A stop is not the server's doing, and a session that failed before
+      // it asked for a batch says nothing about one.
+      if (attempt.stage === null || attempt.cursor === null || signal.aborted) throw error;
+      return this.afterUnreadBatch(attempt);
+    }
+    if (result.status === "scanned") {
+      // The batch after a narrowed one stays narrow until the range that
+      // failed has been gone through: one of its halves holds the letter.
+      const left = attempt.left - attempt.asked;
+      this.sentScanRetry =
+        left > 0
+          ? Object.freeze({
+              cursor: result.cursor,
+              width: Math.min(attempt.width, left),
+              crawl: attempt.crawl,
+              left,
+            })
+          : null;
+    }
+    return result;
+  }
+
+  /**
+   * What a batch that was asked for and not read turns into. A search that
+   * failed is answered by reading new mail by plain UID range from then on. A
+   * fetch of several messages is asked for again at half its width. A fetch
+   * of one message is that message being unreadable: it is passed over.
+   */
+  private afterUnreadBatch(attempt: SentScanAttempt): MailSentScanResult {
+    const cursor = attempt.cursor!;
+    if (attempt.stage === "search") {
+      this.sentScanRetry = Object.freeze({
+        cursor,
+        width: attempt.width,
+        crawl: true,
+        left: attempt.left,
+      });
+      return SENT_SCAN_BATCH_FAILED;
+    }
+    if (attempt.asked > 1 || attempt.skipped === null) {
+      this.sentScanRetry = Object.freeze({
+        cursor,
+        width: Math.max(1, Math.floor(attempt.asked / 2)),
+        crawl: attempt.crawl,
+        left: attempt.asked,
+      });
+      return SENT_SCAN_BATCH_FAILED;
+    }
+    // The letter is found, so the next batch is a whole one again.
+    this.sentScanRetry = null;
+    return attempt.skipped(
+      attempt.lineTooLong ? "envelope_line_too_long" : "envelope_unreadable",
+    );
   }
 
   private rememberedSentMailbox(): SentMailboxAnswer | null {
@@ -1221,30 +1314,89 @@ function sentEnvelopeFetchQuery() {
   return Object.freeze({ uid: true, envelope: true });
 }
 
+/** A batch that could not be read, and how the next call at its cursor asks. */
+interface SentScanRetry {
+  /** The token of the cursor the next batch starts from. */
+  readonly cursor: string;
+  /** Messages the next batch may ask for. */
+  readonly width: number;
+  /** The search for what is new failed here, so new mail goes by UID range. */
+  readonly crawl: boolean;
+  /** Messages of the batch that failed that have not been gone through yet. */
+  readonly left: number;
+}
+
+/** What one scan session got as far as, written as it goes. */
+interface SentScanAttempt {
+  /** What is on the wire and unanswered: the batch has been asked for. */
+  stage: "search" | "fetch" | null;
+  /** The token of the cursor the batch starts from. */
+  cursor: string | null;
+  /** Messages the fetch asked for. */
+  asked: number;
+  width: number;
+  crawl: boolean;
+  left: number;
+  /** The answer if the one message asked for is passed over. */
+  skipped: ((reason: MailSentScanSkipReason) => MailSentScanResult) | null;
+  lineTooLong: boolean;
+}
+
+const SENT_SCAN_BATCH_FAILED: MailSentScanResult = Object.freeze({ status: "batch_failed" });
+
+/** ImapFlow's codes for a response line or literal past the session's limit. */
+function isLineLimitError(error: unknown): boolean {
+  if (error === null || typeof error !== "object") return false;
+  const code = (error as { readonly code?: unknown }).code;
+  return code === "LineTooLarge" || code === "LiteralTooLarge";
+}
+
 /**
  * One batch of envelopes from the examined Sent mailbox.
  *
- * Mail above the cursor is fetched by UID, a range no wider than the batch.
+ * Mail above the cursor is read lowest UID first. When what is new fits a
+ * batch by its UID span it is fetched by that range outright. Otherwise the
+ * server is asked which UIDs exist above the cursor and the lowest batch of
+ * them is fetched, so a letter a hundred thousand UIDs up (a server that
+ * numbers across the whole account, a long pause) is one session away and not
+ * a window for every 250 UIDs in between.
+ *
  * The walk down goes by sequence number under a UID ceiling instead: UIDs in
- * a folder the owner prunes are sparse, and a UID range there can cost a
- * session for nothing, while a sequence range always holds as many letters as
- * it is wide. Sequence numbers move when another client expunges between two
- * sessions, and only ever down, so an unread letter is never above the stored
- * end; a read one that slid into the range is recognised by its UID and left
- * out. The cap counts the range asked for, so the first run never fetches
- * more envelopes than it.
+ * a folder the owner prunes are sparse, while a sequence range always holds
+ * as many letters as it is wide. Sequence numbers move when another client
+ * expunges between two sessions, and only ever down, so an unread letter is
+ * never above the stored end; a read one that slid into the range is
+ * recognised by its UID and left out. The cap counts the range asked for, so
+ * the first run never fetches more envelopes than it.
+ *
+ * A FETCH response without an envelope is not one of the answers: a server
+ * reports another client's flag change in the middle of this fetch, and it
+ * is stepped over.
  */
 async function readSentEnvelopes(
   client: ImapSessionClient,
   mailbox: MailboxObject,
   stored: SentScanCursor | null,
+  retry: SentScanRetry | null,
+  attempt: SentScanAttempt,
 ): Promise<MailSentScanResult> {
   const uidValidity = validateUidValidity(mailbox.uidValidity);
   const uidNext = validateUid(mailbox.uidNext);
   const exists = validateExists(mailbox.exists);
-  const uidValidityChanged = stored !== null && stored.uidValidity !== uidValidity;
-  let cursor: SentScanCursor =
-    stored === null || uidValidityChanged
+  // A cursor at or past the folder's next UID has read letters this folder
+  // does not hold: a mailbox restored under its old UIDVALIDITY. Nothing above
+  // such a cursor would ever be read, so the walk begins again, as it does
+  // under a new UIDVALIDITY.
+  const restart: MailSentScanRestart | null =
+    stored === null
+      ? null
+      : stored.uidValidity !== uidValidity
+        ? "uidvalidity_changed"
+        : stored.highestUid >= uidNext
+          ? "uidnext_regressed"
+          : null;
+  const cursor: SentScanCursor =
+    stored === null || restart !== null
       ? {
           uidValidity,
           highestUid: uidNext - 1,
@@ -1253,57 +1405,107 @@ async function readSentEnvelopes(
           walkRemaining: Math.min(exists, IMAP_SENT_SCAN_FIRST_RUN_CAP),
         }
       : stored;
-  let messages: readonly FetchMessageObject[] = [];
-  if (uidNext - 1 > cursor.highestUid) {
-    const startUid = cursor.highestUid + 1;
-    const endUid = Math.min(uidNext - 1, cursor.highestUid + IMAP_SENT_SCAN_BATCH);
-    messages = await client.fetchAll(`${startUid}:${endUid}`, sentEnvelopeFetchQuery(), {
-      uid: true,
+  const token = encodeSentScanCursor(cursor);
+  const plan = retry !== null && retry.cursor === token ? retry : null;
+  const width = plan?.width ?? IMAP_SENT_SCAN_BATCH;
+  attempt.cursor = token;
+  attempt.width = width;
+  attempt.crawl = plan?.crawl ?? false;
+  attempt.left = plan?.left ?? 0;
+  const answer = (
+    next: SentScanCursor,
+    messages: readonly FetchMessageObject[],
+    skipReason: MailSentScanSkipReason | null,
+  ): MailSentScanResult => {
+    const settled: SentScanCursor =
+      next.walkEndSequence === 0 || next.walkRemaining === 0
+        ? { ...next, walkEndSequence: 0, walkUpperUid: 0, walkRemaining: 0 }
+        : next;
+    return Object.freeze({
+      status: "scanned",
+      cursor: encodeSentScanCursor(settled),
+      envelopes: Object.freeze(messages.flatMap(sentEnvelopeOf)),
+      envelopeCount: messages.length,
+      skippedCount: skipReason === null ? 0 : 1,
+      skipReason,
+      restart,
+      hasMore: uidNext - 1 > settled.highestUid || settled.walkRemaining > 0,
     });
+  };
+
+  const lastUid = uidNext - 1;
+  if (lastUid > cursor.highestUid) {
+    let startUid = cursor.highestUid + 1;
+    let endUid = Math.min(lastUid, cursor.highestUid + width);
+    let asked = endUid - startUid + 1;
+    if (lastUid - startUid + 1 > width && !attempt.crawl) {
+      attempt.stage = "search";
+      const found = await client.search({ uid: `${startUid}:*` }, { uid: true });
+      attempt.stage = null;
+      if (found !== false) {
+        // `n:*` always names the newest message, even one below n.
+        const uids = [...new Set(found)]
+          .filter((uid) => Number.isSafeInteger(uid) && uid >= startUid && uid <= lastUid)
+          .sort((left, right) => left - right);
+        if (uids.length === 0) return answer({ ...cursor, highestUid: lastUid }, [], null);
+        startUid = uids[0]!;
+        endUid = uids.length > width ? uids[width - 1]! : lastUid;
+        asked = Math.min(uids.length, width);
+      }
+    }
+    const next: SentScanCursor = { ...cursor, highestUid: endUid };
+    attempt.asked = asked;
+    attempt.skipped = (reason) => answer(next, [], reason);
+    attempt.stage = "fetch";
+    const messages = withEnvelope(
+      await client.fetchAll(`${startUid}:${endUid}`, sentEnvelopeFetchQuery(), { uid: true }),
+    );
     if (
-      messages.length > endUid - startUid + 1 ||
-      messages.some((message) => validateUid(message.uid) < startUid || message.uid > endUid)
+      messages.length > asked ||
+      messages.some((message) => message.uid < startUid || message.uid > endUid)
     ) {
       throw new MailProviderSyncError("mail_provider_response_invalid");
     }
-    cursor = { ...cursor, highestUid: endUid };
-  } else {
-    const endSequence = Math.min(cursor.walkEndSequence, exists);
-    const width = Math.min(IMAP_SENT_SCAN_BATCH, cursor.walkRemaining, endSequence);
-    if (width > 0) {
-      const startSequence = endSequence - width + 1;
-      const fetched = await client.fetchAll(
-        `${startSequence}:${endSequence}`,
-        sentEnvelopeFetchQuery(),
-      );
-      if (fetched.length > width) {
-        throw new MailProviderSyncError("mail_provider_response_invalid");
-      }
-      const ceiling = cursor.walkUpperUid;
-      messages = fetched.filter((message) => validateUid(message.uid) < ceiling);
-      cursor = {
-        ...cursor,
-        walkEndSequence: startSequence - 1,
-        walkUpperUid: messages.reduce((lowest, message) => Math.min(lowest, message.uid), ceiling),
-        walkRemaining: cursor.walkRemaining - width,
-      };
-    } else {
-      cursor = { ...cursor, walkEndSequence: 0 };
-    }
+    attempt.stage = null;
+    return answer(next, messages, null);
   }
-  if (cursor.walkEndSequence === 0 || cursor.walkRemaining === 0) {
-    cursor = { ...cursor, walkEndSequence: 0, walkUpperUid: 0, walkRemaining: 0 };
+
+  const endSequence = Math.min(cursor.walkEndSequence, exists);
+  const asked = Math.min(width, cursor.walkRemaining, endSequence);
+  if (asked === 0) return answer({ ...cursor, walkEndSequence: 0 }, [], null);
+  const startSequence = endSequence - asked + 1;
+  const passed: SentScanCursor = {
+    ...cursor,
+    walkEndSequence: startSequence - 1,
+    walkRemaining: cursor.walkRemaining - asked,
+  };
+  attempt.asked = asked;
+  attempt.skipped = (reason) => answer(passed, [], reason);
+  attempt.stage = "fetch";
+  const fetched = withEnvelope(
+    await client.fetchAll(`${startSequence}:${endSequence}`, sentEnvelopeFetchQuery()),
+  );
+  if (fetched.length > asked) {
+    throw new MailProviderSyncError("mail_provider_response_invalid");
   }
-  return Object.freeze({
-    status: "scanned",
-    cursor: encodeSentScanCursor(cursor),
-    envelopes: Object.freeze(messages.flatMap(sentEnvelopeOf)),
-    envelopeCount: messages.length,
-    skippedCount: 0,
-    skipReason: null,
-    restart: uidValidityChanged ? "uidvalidity_changed" : null,
-    hasMore: uidNext - 1 > cursor.highestUid || cursor.walkRemaining > 0,
-  });
+  attempt.stage = null;
+  const ceiling = cursor.walkUpperUid;
+  const messages = fetched.filter((message) => message.uid < ceiling);
+  return answer(
+    {
+      ...passed,
+      walkUpperUid: messages.reduce((lowest, message) => Math.min(lowest, message.uid), ceiling),
+    },
+    messages,
+    null,
+  );
+}
+
+/** The fetch answers that are envelopes, each under a UID that can be one. */
+function withEnvelope(messages: readonly FetchMessageObject[]): FetchMessageObject[] {
+  const answers = messages.filter((message) => message.envelope !== undefined);
+  for (const message of answers) validateUid(message.uid);
+  return answers;
 }
 
 /**

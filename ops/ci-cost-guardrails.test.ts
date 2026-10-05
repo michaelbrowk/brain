@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
+import matter from "gray-matter";
 import { describe, expect, it } from "vitest";
 
 const workflow = readFileSync(
@@ -24,8 +25,46 @@ const criticalFlows = readFileSync(
 );
 
 describe("CI cost guardrails", () => {
-  it("cancels superseded runs and keeps hosted CI on main only", () => {
-    expect(workflow).toContain("cancel-in-progress: true\n");
+  it("cancels a superseded pull request run and never a run on main", () => {
+    // The build and both smokes run only on a push to main. Cancelling there
+    // meant a second merge stopped the first one's run before it reached
+    // them, so a merged change could go unbuilt, and one did: the standalone
+    // smoke broke on main and was first seen at a release gate. A pull
+    // request's superseded run is still worth nothing and is still stopped.
+    //
+    // Read as YAML, not as text: the same two lines behind a `#` are text
+    // that is still there and a setting that is gone, and a search for the
+    // text passed with the whole block commented out.
+    const parsed = matter(`---\n${workflow}\n---\n`).data as {
+      concurrency?: Record<string, unknown>;
+      jobs?: Record<string, { concurrency?: unknown }>;
+    };
+    expect(parsed.concurrency).toEqual({
+      // Never displaced while it waits either: a group keeps one run and one
+      // pending, so a commit on main is a group of its own.
+      group:
+        "ci-${{ github.workflow }}-${{ github.ref }}-" +
+        "${{ github.ref == 'refs/heads/main' && github.sha || 'latest' }}",
+      "cancel-in-progress": "${{ github.ref != 'refs/heads/main' }}",
+    });
+    // And no job says otherwise for itself.
+    expect(Object.keys(parsed.jobs ?? {})).toEqual(["check"]);
+    expect(parsed.jobs?.check?.concurrency).toBeUndefined();
+    // The release gate reads that run, so the checklist has to ask for it,
+    // and for the commit being released rather than for whichever is newest.
+    const checklist = readFileSync(
+      path.join(process.cwd(), "docs", "release-checklist.md"),
+      "utf8",
+    );
+    expect(checklist).toContain(
+      "The `CI` run for the commit being released is green: completed, not cancelled",
+    );
+    expect(checklist).toContain(
+      "`gh run list --workflow CI --event push --commit <sha>`",
+    );
+  });
+
+  it("keeps hosted CI on main only and every expensive step push-only", () => {
     expect(workflow).toContain("push:\n    branches: [main]\n");
     // PRs may run the cheap gate, but every expensive step must stay
     // push-only so a pull request never packages or boots a browser.

@@ -43,6 +43,7 @@ import {
 } from "./tasks-lists";
 import { TasksRepeatMenu } from "./tasks-repeat-menu";
 import { TasksWhenPicker, type WhenValue } from "./tasks-when-picker";
+import { surfaceTakesKeys } from "./shell/surface-keys";
 import { Icon } from "./ui/icon";
 import { LAYER_IN_DOCUMENT, useLayerSignal } from "./use-layer-signal";
 
@@ -454,6 +455,7 @@ export function TasksRow({
   );
 
   useRowShortcuts({
+    element: wrapRef,
     selected,
     expanded,
     completeNow,
@@ -1229,6 +1231,7 @@ function useCursorFocus({
  *  reader typing the word "tomorrow", not asking for Today.
  */
 function useRowShortcuts({
+  element,
   selected,
   expanded,
   completeNow,
@@ -1239,6 +1242,9 @@ function useRowShortcuts({
   inert,
   task,
 }: {
+  /** The row itself, asked on every key whether the surface it stands in is
+   *  still the one on screen (`surfaceTakesKeys`). */
+  element: React.RefObject<HTMLElement | null>;
   selected: boolean;
   expanded: boolean;
   completeNow: () => void;
@@ -1258,6 +1264,7 @@ function useRowShortcuts({
     if (!selected || inert) return;
     const onKey = (event: KeyboardEvent) => {
       if (isTyping(event.target)) return;
+      if (!surfaceTakesKeys(element.current)) return;
       const meta = event.metaKey || event.ctrlKey;
       if (event.key === "Enter" && meta) {
         event.preventDefault();
@@ -1288,7 +1295,7 @@ function useRowShortcuts({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [completeNow, expanded, inert, leaveDown, onExpand, rowKey, selected, task, today]);
+  }, [completeNow, element, expanded, inert, leaveDown, onExpand, rowKey, selected, task, today]);
 }
 
 /** The two the palette carries too, so a key and a palette row never disagree

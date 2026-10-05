@@ -8216,6 +8216,64 @@ describe("MailSurface", () => {
       ).toBeNull();
     });
 
+    /* The shell keeps the leaving canvas mounted through its exit and makes it
+       inert (`shell/canvas-presence.tsx`). That takes the focus out of Mail
+       and leaves its window listener bound, so an `e` pressed as Mail left
+       archived the open letter from a surface nobody could see any more.
+       `host` stands in for the canvas: the attribute is all Mail reads. */
+    it("takes no key while the surface is leaving", async () => {
+      const client = keyboardClient();
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+
+      await pressKey("j");
+      await nextFrame();
+      expect(client.readThread).toHaveBeenCalledTimes(1);
+      vi.mocked(client.updateThread).mockClear();
+
+      host.setAttribute("inert", "");
+      for (const key of ["e", "u", "s", "j", "c"]) await pressKey(key);
+      expect(client.updateThread).not.toHaveBeenCalled();
+      expect(client.readThread).toHaveBeenCalledTimes(1);
+      expect(
+        document.body.querySelector('[role="dialog"][aria-label="New message"]'),
+      ).toBeNull();
+
+      // And the guard lets go with the attribute: `e` archives again.
+      host.removeAttribute("inert");
+      await pressKey("e");
+      expect(client.updateThread).toHaveBeenLastCalledWith({
+        accountId: accountA.accountId,
+        threadId: thread.threadId,
+        archive: true,
+      });
+    });
+
+    /* The one inert Mail causes itself: the shell goes inert under the
+       compose sheet, and the sheet's Escape is still Mail's to answer. */
+    it("still closes a composer with Escape while the shell under it is inert", async () => {
+      const client = keyboardClient();
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+
+      await pressKey("c");
+      expect(
+        document.body.querySelector('[role="dialog"][aria-label="New message"]'),
+      ).not.toBeNull();
+
+      host.setAttribute("inert", "");
+      await pressKey("Escape");
+      expect(
+        document.body.querySelector('[role="dialog"][aria-label="New message"]'),
+      ).toBeNull();
+    });
+
     it("leaves the reader alone when a layer above has already answered Escape", async () => {
       // One pane: the panes do not fit, so Escape's next branch would close
       // the reader.

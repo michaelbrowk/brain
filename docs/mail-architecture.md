@@ -144,11 +144,12 @@ without the moved message.
 
 Each mutation opens its own bounded session, so a section Done over N threads
 is 2N sequential connect-and-authenticate cycles (archive, then mark read) and
-takes as long as those logins take. The surface's undo window is a flat ten
-seconds that starts when the run settles rather than when the button was
-pressed because of it, and the first refusal on an account stops the loop for
-that account instead of spending a login per thread on an answer that cannot
-change. It is correct and
+takes as long as those logins take. Nothing is sent until the press's nine
+second undo window has closed, and then the run goes out in the background,
+under no lock; a thread whose mutation answer shows new mail costs one or two
+more cycles to take the archive (and the read flag) back. The first refusal on
+an account stops the loop for that account instead of spending a login per
+thread on an answer that cannot change. It is correct and
 serialized, but it is the first thing to watch on a server that throttles
 logins; a pooled session is the fix if it bites.
 

@@ -6,6 +6,7 @@ import type {
   MailEndpoint,
   ValidatedMailDialTarget,
 } from "../ports";
+import { resolveImapMailboxRole } from "../providers/imap/sync-adapter";
 import { createVerificationOptions } from "./imapflow-adapter";
 import type {
   MailSentCopyAppendRequest,
@@ -28,7 +29,14 @@ interface SentCopyImapClient {
   close(): void;
   on(event: "error", listener: (error: unknown) => void): this;
   list(): Promise<
-    readonly { readonly path: string; readonly specialUse?: string }[]
+    readonly {
+      readonly path: string;
+      readonly name?: string;
+      readonly delimiter?: string;
+      readonly flags?: Iterable<string>;
+      /** ImapFlow's reading: the stated flag, or its guess from the name. */
+      readonly specialUse?: string;
+    }[]
   >;
   mailboxOpen(
     path: string,
@@ -209,17 +217,27 @@ export class ImapFlowSentCopyAdapter implements MailSentCopyPort {
     if (!Array.isArray(mailboxes) || mailboxes.length > MAX_SENT_MAILBOXES) {
       throw new SentCopyUnavailableError("sent_mailbox_list_invalid");
     }
-    const specialUse = mailboxes.find(
-      (entry) => entry.specialUse === "\\Sent",
-    );
-    const named = mailboxes.find(
-      (entry) => typeof entry.path === "string" && entry.path === "Sent",
-    );
-    const chosen = specialUse ?? named;
-    if (!chosen || typeof chosen.path !== "string" || chosen.path.length === 0) {
+    // The reading the Sent scan uses: the `\Sent` attribute the server itself
+    // lists, then a name a mail client gives the folder, at the root or
+    // directly under the Inbox and only when exactly one folder answers.
+    // ImapFlow's `specialUse` is not read on its own. Where no folder carries
+    // the flag it is a guess from the leaf name at any depth, and it once
+    // sent the owner's copy into a project folder called Sent. It settles a
+    // tie alone: when two folders where a mail client puts Sent answer to a
+    // Sent name, the copy goes where ImapFlow, and so 0.20.2, put it, if
+    // that is one of the two. The scan reads neither. A folder literally
+    // named Sent at the root stays the last resort it has always been.
+    const resolved = resolveImapMailboxRole("sent", mailboxes);
+    const path =
+      resolved.path ??
+      resolved.tied.find((entry) => entry.specialUse === "\\Sent")?.path ??
+      mailboxes.find(
+        (entry) => typeof entry.path === "string" && entry.path === "Sent",
+      )?.path;
+    if (typeof path !== "string" || path.length === 0) {
       throw new SentCopyUnavailableError("sent_mailbox_missing");
     }
-    return chosen.path;
+    return path;
   }
 
   private async withClient<T>(

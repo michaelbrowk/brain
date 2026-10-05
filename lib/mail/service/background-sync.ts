@@ -15,6 +15,12 @@ const MAX_PROVIDER_PAGES_PER_BURST = 6;
  * a second; hints inside the window fold into the one pass at its end.
  */
 const IDLE_PASS_FLOOR_MS = 5_000;
+/**
+ * The least time between two Sent-folder scans of one account. The fallback
+ * interval may be set as low as five seconds, and a scan that finds new mail
+ * is a login: that rate is the sync's to choose, not the scan's.
+ */
+const SENT_SCAN_MIN_WINDOW_MS = 60_000;
 const SAFE_ACCOUNT_ID = /^account-a[0-9a-f]{32}$/;
 
 /**
@@ -75,6 +81,12 @@ export interface MailBackgroundSenderPort {
     input: { readonly syncSucceeded: boolean },
     signal: AbortSignal,
   ): Promise<{ readonly hasMore: boolean }>;
+  /**
+   * The screen's read of an IMAP account's Sent folder. Unlike the step
+   * above it may open a session at the provider, so the scheduler runs it
+   * once a window and not on every visit.
+   */
+  runBackgroundSentScanStep?(accountId: string, signal: AbortSignal): Promise<void>;
 }
 
 /**
@@ -104,6 +116,14 @@ export interface MailBackgroundIdlePort {
  * an owner reading mail and a cohort of bodies downloading cost the provider
  * nothing beyond the cadence. The scheduler is one loop, so no account ever
  * has two passes in flight.
+ *
+ * One step beside the sync may reach a provider: the senders screen's scan
+ * of an IMAP account's Sent folder. It has a window of its own, `intervalMs`
+ * and never less than a minute from the start of one scan to the start of
+ * the next, however often IDLE or a kick brings the scheduler round. Inside
+ * a window the scan opens a session only when the folder has something to
+ * read: the sync's own session asks the folder's STATUS on its way, so a
+ * quiet folder costs its host no login beyond the sync's.
  */
 export class MailBackgroundSyncScheduler {
   private readonly port: MailBackgroundSyncPort;
@@ -130,6 +150,8 @@ export class MailBackgroundSyncScheduler {
   private readonly requested = new Set<string>();
   /** Accounts whose last provider sync came back healthy. */
   private readonly syncHealthy = new Set<string>();
+  /** When each IMAP account's Sent-folder scan may next start; absent means now. */
+  private readonly sentScanDueAt = new Map<string, number>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private timerDueAt = 0;
   private controller: AbortController | null = null;
@@ -218,6 +240,7 @@ export class MailBackgroundSyncScheduler {
     this.providers.clear();
     this.requested.clear();
     this.syncHealthy.clear();
+    this.sentScanDueAt.clear();
     this.visitAll = false;
   }
 
@@ -389,6 +412,7 @@ export class MailBackgroundSyncScheduler {
       this.idleRequested,
       this.lastIdlePassAt,
       this.syncHealthy,
+      this.sentScanDueAt,
     ]) {
       for (const accountId of state.keys()) {
         if (!active.has(accountId)) state.delete(accountId);
@@ -499,6 +523,33 @@ export class MailBackgroundSyncScheduler {
               signal,
             ),
           ).hasMore;
+        } catch {
+          if (signal.aborted) return false;
+        }
+      }
+      if (signal.aborted) return false;
+      // The Sent-folder scan may open a provider session, so it is not a
+      // cache step that runs on every visit: at most one start per window,
+      // only for an IMAP account, and only while its sync is healthy, so a
+      // host that is refusing the sync is not asked a second question. The
+      // window is measured from one scan's start to the next and is the
+      // fallback interval, never less than a minute however short that is
+      // set. It comes after the cache steps because a scan can hold its
+      // session to the deadline, and the bodies, the index and the archiver
+      // of this visit should not wait behind it. What a scan leaves to read
+      // waits for the next window, never for a continuation.
+      if (
+        this.senders?.runBackgroundSentScanStep !== undefined &&
+        syncSucceeded &&
+        this.providers.get(accountId) === "imap" &&
+        (this.sentScanDueAt.get(accountId) ?? 0) <= monotonicNow()
+      ) {
+        this.sentScanDueAt.set(
+          accountId,
+          monotonicNow() + Math.max(this.intervalMs, SENT_SCAN_MIN_WINDOW_MS),
+        );
+        try {
+          await this.senders.runBackgroundSentScanStep(accountId, signal);
         } catch {
           if (signal.aborted) return false;
         }

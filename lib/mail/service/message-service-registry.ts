@@ -5,6 +5,8 @@ import type {
   MailSearchThreadPage,
   MailSyncResult,
   MailSystemMailbox,
+  MailThreadBatchInput,
+  MailThreadBatchResult,
   MailThreadDetail,
   MailThreadMutationInput,
   MailThreadMutationResult,
@@ -266,6 +268,15 @@ export class MultiAccountMailMessageService implements MailMessageService {
   ): Promise<MailThreadMutationResult> {
     return this.withEntry(input.accountId, (entry, lifecycleSignal) =>
       entry.service.updateThread(input, AbortSignal.any([signal, lifecycleSignal])),
+    );
+  }
+
+  async archiveThreads(
+    input: MailThreadBatchInput,
+    signal: AbortSignal,
+  ): Promise<MailThreadBatchResult> {
+    return this.withEntry(input.accountId, (entry, lifecycleSignal) =>
+      entry.service.archiveThreads(input, AbortSignal.any([signal, lifecycleSignal])),
     );
   }
 

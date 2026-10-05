@@ -686,6 +686,155 @@ describe("brain-mail message HTTP surface", () => {
     "mail_sync_unavailable" alone cannot tell an operator which of two accounts
     is unwell, or whether a list, a mutation or a sync raised it.
   */
+  it("archives a batch with POST /v1/threads/batch and answers each thread", async () => {
+    const messages = messageServiceFixture();
+    const socketPath = await startServer(messages, sendServiceFixture());
+    const ids = ["thread_1", "thread_2"];
+
+    const answer = await requestJson(
+      socketPath,
+      "POST",
+      "/v1/threads/batch",
+      JSON.stringify({ accountId: ACCOUNT_ID, threadIds: ids, archive: true, read: true }),
+    );
+
+    expect(answer.status).toBe(200);
+    expect(answer.body).toMatchObject({
+      apiVersion: 1,
+      results: ids.map((threadId) => ({ threadId, status: "done", markedRead: false })),
+    });
+    expect(messages.archiveThreads).toHaveBeenCalledWith(
+      { accountId: ACCOUNT_ID, threadIds: ids, archive: true, read: true },
+      expect.any(AbortSignal),
+    );
+    // `batch` is the route's own name, never a thread id on the PATCH route.
+    await expect(
+      requestJson(socketPath, "GET", "/v1/threads/batch"),
+    ).resolves.toMatchObject({ status: 405 });
+    expect(messages.getThread).not.toHaveBeenCalled();
+  });
+
+  it("refuses every batch but archive-with-optional-read before the service", async () => {
+    const messages = messageServiceFixture();
+    const socketPath = await startServer(messages, sendServiceFixture());
+    const fifty = Array.from({ length: 50 }, (_value, index) => `thread_${index}`);
+    const refused = [
+      { accountId: ACCOUNT_ID, threadIds: ["thread_1"], archive: false },
+      { accountId: ACCOUNT_ID, threadIds: ["thread_1"], archive: true, read: false },
+      { accountId: ACCOUNT_ID, threadIds: ["thread_1"], read: true },
+      { accountId: ACCOUNT_ID, threadIds: ["thread_1"], archive: true, trash: true },
+      { accountId: ACCOUNT_ID, threadIds: [], archive: true },
+      { accountId: ACCOUNT_ID, threadIds: [...fifty, "thread_50"], archive: true },
+      { accountId: ACCOUNT_ID, threadIds: ["thread_1", "thread_1"], archive: true },
+      { accountId: ACCOUNT_ID, threadIds: ["thread/1"], archive: true },
+      { accountId: "account-x", threadIds: ["thread_1"], archive: true },
+      { accountId: ACCOUNT_ID, threadIds: "thread_1", archive: true },
+    ];
+
+    for (const body of refused) {
+      await expect(
+        requestJson(socketPath, "POST", "/v1/threads/batch", JSON.stringify(body)),
+      ).resolves.toMatchObject({
+        status: 400,
+        body: { error: { code: "mail_request_invalid" } },
+      });
+    }
+    expect(messages.archiveThreads).not.toHaveBeenCalled();
+    await expect(
+      requestJson(
+        socketPath,
+        "POST",
+        "/v1/threads/batch",
+        JSON.stringify({ accountId: ACCOUNT_ID, threadIds: fifty, archive: true }),
+      ),
+    ).resolves.toMatchObject({ status: 200 });
+  });
+
+  it("answers 409 for an account that cannot archive, as a single archive does", async () => {
+    const written: string[] = [];
+    const stderr = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk: unknown) => {
+        written.push(String(chunk));
+        return true;
+      });
+    try {
+      const messages = messageServiceFixture();
+      vi.mocked(messages.archiveThreads).mockRejectedValue(
+        new MailProviderSyncError(
+          "mail_provider_mutation_unsupported",
+          null,
+          "no_mailbox_for_role",
+        ),
+      );
+      const socketPath = await startServer(messages, sendServiceFixture());
+
+      const answer = await requestJson(
+        socketPath,
+        "POST",
+        "/v1/threads/batch",
+        JSON.stringify({ accountId: ACCOUNT_ID, threadIds: [THREAD_ID], archive: true }),
+      );
+
+      expect(answer).toEqual({
+        status: 409,
+        body: { apiVersion: 1, error: { code: "mail_thread_mutation_unsupported" } },
+      });
+      expect(written.map((line) => JSON.parse(line))).toEqual([
+        {
+          event: "mail_request_failed",
+          errorCode: "mail_thread_mutation_unsupported",
+          phase: "thread_batch_post",
+          accountId: ACCOUNT_ID,
+          reason: "no_mailbox_for_role",
+        },
+      ]);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it("answers a batch the deadline cut short with 200 and the threads it never reached", async () => {
+    const messages = messageServiceFixture();
+    // The provider deadline aborts the signal; the service answers per thread.
+    vi.mocked(messages.archiveThreads).mockImplementation(
+      async (input: { readonly threadIds: readonly string[] }, signal: AbortSignal) => {
+        await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve()));
+        return {
+          apiVersion: 1,
+          results: input.threadIds.map((threadId) => ({
+            threadId,
+            status: "failed",
+            errorCode: "request_deadline_exceeded",
+          })),
+        };
+      },
+    );
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const socketPath = await startServer(messages, sendServiceFixture());
+      const answer = requestJson(
+        socketPath,
+        "POST",
+        "/v1/threads/batch",
+        JSON.stringify({ accountId: ACCOUNT_ID, threadIds: [THREAD_ID], archive: true }),
+      );
+      await vi.waitFor(() => expect(messages.archiveThreads).toHaveBeenCalled());
+      await vi.advanceTimersByTimeAsync(MAIL_SERVICE_HTTP_LIMITS.providerOperationDeadlineMs);
+      await expect(answer).resolves.toEqual({
+        status: 200,
+        body: {
+          apiVersion: 1,
+          results: [
+            { threadId: THREAD_ID, status: "failed", errorCode: "request_deadline_exceeded" },
+          ],
+        },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("records a refused mutation with its account and its route", async () => {
     const written: string[] = [];
     const stderr = vi
@@ -1328,6 +1477,15 @@ function messageServiceFixture(): MailMessageService & Record<string, ReturnType
       hasMore: false,
     })),
     updateThread: vi.fn(async () => ({ apiVersion: 1, thread })),
+    archiveThreads: vi.fn(async (input: { readonly threadIds: readonly string[] }) => ({
+      apiVersion: 1,
+      results: input.threadIds.map((threadId) => ({
+        threadId,
+        status: "done",
+        thread: { ...thread, threadId },
+        markedRead: false,
+      })),
+    })),
   } as MailMessageService & Record<string, ReturnType<typeof vi.fn>>;
 }
 

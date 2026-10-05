@@ -2039,6 +2039,10 @@ describe("the new-senders screen", () => {
       sync: vi.fn(),
       syncAccount: vi.fn(),
       updateThread: vi.fn().mockResolvedValue({ apiVersion: 1, thread: fresh }),
+      archiveThreads: vi.fn().mockResolvedValue({
+        apiVersion: 1,
+        results: [{ threadId: "fresh", status: "done", thread: fresh, markedRead: true }],
+      }),
     };
     const screened = new MailSenderScreenedMessageService(inner, world.screen);
 
@@ -2073,6 +2077,62 @@ describe("the new-senders screen", () => {
     expect(detail!.thread.newSender).toBe(true);
     expect(missing).toBeNull();
     expect(updated.thread.newSender).toBe(true);
+  });
+
+  it("annotates a batch's archived threads exactly as it annotates one archived alone", async () => {
+    const world = await createWorld();
+    world.mail.addThread(ACCOUNT_A, { threadId: "old-friend", from: "friend@team.test", at: 500 });
+    await finishBackfill(world);
+    await world.screen.decide(block("news@growth.test"), NO_DEADLINE);
+    world.mail.addThread(ACCOUNT_A, { threadId: "growth-2", from: "news@growth.test", at: LATER + 10 });
+    world.mail.addThread(ACCOUNT_A, { threadId: "stranger", from: "x@elsewhere.test", at: LATER + 10 });
+    world.mail.addThread(ACCOUNT_A, { threadId: "friend-new", from: "friend@team.test", at: LATER + 10 });
+    const ids = ["growth-2", "stranger", "friend-new"];
+    const raw = new Map(ids.map((threadId) => [threadId, world.mail.item(ACCOUNT_A, threadId)]));
+    const inner = {
+      updateThread: vi.fn(async (input: { readonly threadId: string }) => ({
+        apiVersion: 1 as const,
+        thread: raw.get(input.threadId)!,
+      })),
+      archiveThreads: vi.fn(async () => ({
+        apiVersion: 1 as const,
+        results: [
+          ...ids.map((threadId) => ({
+            threadId,
+            status: "done" as const,
+            thread: raw.get(threadId)!,
+            markedRead: false,
+          })),
+          { threadId: "gone", status: "stale" as const },
+        ],
+      })),
+    } as unknown as ConstructorParameters<typeof MailSenderScreenedMessageService>[0];
+    const screened = new MailSenderScreenedMessageService(inner, world.screen);
+    const signal = new AbortController().signal;
+
+    const alone = await Promise.all(
+      ids.map(
+        async (threadId) =>
+          (await screened.updateThread({ accountId: ACCOUNT_A, threadId, archive: true }, signal))
+            .thread,
+      ),
+    );
+    const batch = await screened.archiveThreads(
+      { accountId: ACCOUNT_A, threadIds: [...ids, "gone"], archive: true },
+      signal,
+    );
+
+    // The blocked sender's letter, the stranger's and the known sender's
+    // carry the same marks either way, and a stale row is passed through.
+    expect(alone.map((thread) => [thread.senderBlocked ?? false, thread.newSender])).toEqual([
+      [true, false],
+      [false, true],
+      [false, false],
+    ]);
+    expect(batch.results.slice(0, 3).map((item) => item.status === "done" && item.thread)).toEqual(
+      alone,
+    );
+    expect(batch.results[3]).toEqual({ threadId: "gone", status: "stale" });
   });
 
   it("answers false rather than failing a list when the screen cannot read", async () => {

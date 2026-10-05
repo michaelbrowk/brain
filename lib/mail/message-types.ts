@@ -262,6 +262,48 @@ export type MailThreadMutationInput =
   | { readonly accountId: string; readonly spam: boolean }
   | { readonly accountId: string; readonly starred: boolean };
 
+/** At most this many threads ride one batch: a section's Done is sent in
+ *  chunks of it, one chunk per account. */
+export const MAIL_THREAD_BATCH_MAX = 50;
+
+/**
+ * One account's threads archived in one request, and marked read with it when
+ * `read` is there. That is the only shape a batch has: a section's Done is the
+ * one caller, and every other mutation stays a request per thread.
+ */
+export interface MailThreadBatchInput {
+  readonly accountId: string;
+  readonly threadIds: readonly string[];
+  readonly archive: true;
+  readonly read?: true;
+}
+
+/**
+ * What became of one thread of a batch. `done` carries the thread as the
+ * provider reads it after the batch, and whether the read flag went on it: a
+ * thread that got new mail since the account last saw it is archived and left
+ * unread. `stale` is a thread the account no longer finds where it was.
+ * `failed` was not done, or not reached before the deadline, and says why.
+ */
+export type MailThreadBatchItem =
+  | {
+      readonly threadId: string;
+      readonly status: "done";
+      readonly thread: MailThreadListItem;
+      readonly markedRead: boolean;
+    }
+  | { readonly threadId: string; readonly status: "stale" }
+  | {
+      readonly threadId: string;
+      readonly status: "failed";
+      readonly errorCode: string;
+    };
+
+export interface MailThreadBatchResult {
+  readonly apiVersion: 1;
+  readonly results: readonly MailThreadBatchItem[];
+}
+
 export type MailSendMode = "compose" | "reply";
 export type MailSendOrigin = "app" | "mcp";
 export type MailSendStatus =

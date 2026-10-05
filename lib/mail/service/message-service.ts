@@ -3,13 +3,18 @@ import type {
   MailSearchThreadPage,
   MailSyncResult,
   MailSystemMailbox,
+  MailThreadBatchInput,
+  MailThreadBatchItem,
+  MailThreadBatchResult,
   MailThreadDetail,
+  MailThreadListItem,
   MailThreadMutationInput,
   MailThreadMutationResult,
   MailThreadPage,
   MailThreadSort,
   MailThreadView,
 } from "../message-types";
+import { validateMailThreadBatchInput } from "../message-codec";
 import {
   MAIL_CHANGE_ALL_MAILBOXES,
   type MailServiceChange,
@@ -132,7 +137,56 @@ export interface MailProviderSyncPort {
     starred: boolean,
     signal: AbortSignal,
   ): Promise<void>;
+  /**
+   * A section's Done in as few round trips as the provider allows: archive
+   * every thread, and mark read the ones that got no new mail when `read` is
+   * set. Optional, and partial by design: a thread absent from the answer is
+   * one this call did not touch, and the service takes it through the
+   * per-thread path in the same request. A refusal that speaks for the whole
+   * account (no folder to archive into) throws before anything moves.
+   */
+  archiveThreads?(
+    input: {
+      readonly threads: readonly MailProviderBatchThread[];
+      readonly read: boolean;
+      /** The cache's sync cursor: where the provider's change log is read
+       *  from to learn what reached these threads since the cache saw them. */
+      readonly cursor: string | null;
+    },
+    signal: AbortSignal,
+  ): Promise<ReadonlyMap<string, MailProviderBatchOutcome>>;
 }
+
+/** A thread a batch names, with every message the cache holds for it, or
+ *  null when the cache does not hold it or cannot name every message. */
+export interface MailProviderBatchThread {
+  readonly threadId: string;
+  readonly messages:
+    | readonly { readonly messageId: string; readonly unread: boolean }[]
+    | null;
+}
+
+/**
+ * What a provider's batch did to one thread. `done` carries the thread read
+ * back from the provider. `applied` says the provider took exactly these
+ * cached messages out of the Inbox (and marked them read with `markedRead`)
+ * and nothing else is known to have reached the thread, so the cache applies
+ * that itself instead of a read per thread. `markedRead` is whether the read
+ * flag went on: never on a thread that got new mail.
+ */
+export type MailProviderBatchOutcome =
+  | {
+      readonly status: "done";
+      readonly thread: CachedProviderThread;
+      readonly markedRead: boolean;
+    }
+  | {
+      readonly status: "applied";
+      readonly messageIds: readonly string[];
+      readonly markedRead: boolean;
+    }
+  | { readonly status: "stale" }
+  | { readonly status: "failed"; readonly error: unknown };
 
 export interface MailBackgroundSyncHealth {
   readonly lastSuccessfulAt: number | null;
@@ -191,6 +245,10 @@ export interface MailMessageService {
     input: MailThreadMutationInput & { readonly threadId: string },
     signal: AbortSignal,
   ): Promise<MailThreadMutationResult>;
+  archiveThreads(
+    input: MailThreadBatchInput,
+    signal: AbortSignal,
+  ): Promise<MailThreadBatchResult>;
 }
 
 /**
@@ -420,6 +478,197 @@ export class AccountMailMessageService implements MailMessageService {
       this.recordChange("mutation", MAIL_CHANGE_ALL_MAILBOXES);
       return Object.freeze({ apiVersion: 1, thread: refreshed.thread });
     });
+  }
+
+  /**
+   * A section's Done for one account: one pass through the mutation gate,
+   * the provider's own batch where it has one, the per-thread path for what
+   * that leaves, and one change record at the end.
+   *
+   * Every thread answers for itself. The deadline aborts `signal`, and a
+   * thread the run had not reached by then is `failed`, so a batch that got
+   * half way says which half instead of failing whole. Only a refusal that
+   * speaks for the account, before anything moved, fails the request.
+   */
+  async archiveThreads(
+    input: MailThreadBatchInput,
+    signal: AbortSignal,
+  ): Promise<MailThreadBatchResult> {
+    let batch: MailThreadBatchInput;
+    try {
+      batch = validateMailThreadBatchInput(input);
+    } catch {
+      throw new MailCacheError("mail_cache_invalid");
+    }
+    this.assertAccount(batch.accountId);
+    const read = batch.read === true;
+    try {
+      return await this.mutate(signal, () =>
+        this.archiveThreadsUnlocked(batch.threadIds, read, signal),
+      );
+    } catch (error) {
+      // The gate did not open before the deadline: nothing was reached.
+      if (signal.aborted && error === signal.reason) {
+        return batchResult(
+          batch.threadIds.map((threadId) => failedItem(threadId, NOT_REACHED)),
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async archiveThreadsUnlocked(
+    threadIds: readonly string[],
+    read: boolean,
+    signal: AbortSignal,
+  ): Promise<MailThreadBatchResult> {
+    const cached = this.cache.readBatchThreads(threadIds);
+    const outcomes = new Map<string, MailProviderBatchOutcome>();
+    if (this.provider.archiveThreads !== undefined) {
+      let handled: ReadonlyMap<string, MailProviderBatchOutcome>;
+      try {
+        handled = await this.provider.archiveThreads(
+          {
+            threads: threadIds.map((threadId) =>
+              Object.freeze({
+                threadId,
+                messages: cached.get(threadId)?.messages ?? null,
+              }),
+            ),
+            read,
+            cursor: this.cache.readSyncState().historyId,
+          },
+          signal,
+        );
+      } catch (error) {
+        if (isAccountRefusal(error)) throw error;
+        // The provider's batch never got going: a session that did not open,
+        // a deadline already spent. The per-thread path would meet the same.
+        handled = new Map(
+          threadIds.map((threadId) => [threadId, { status: "failed", error }] as const),
+        );
+      }
+      for (const [threadId, outcome] of handled) {
+        if (threadIds.includes(threadId)) outcomes.set(threadId, outcome);
+      }
+    }
+    for (const threadId of threadIds) {
+      if (outcomes.has(threadId)) continue;
+      if (signal.aborted) {
+        outcomes.set(threadId, { status: "failed", error: signal.reason });
+        continue;
+      }
+      try {
+        outcomes.set(
+          threadId,
+          await this.archiveOneUnlocked(threadId, read, cached.get(threadId)?.thread, signal),
+        );
+      } catch (error) {
+        const reachedAny = [...outcomes.values()].some(
+          (outcome) => outcome.status === "done" || outcome.status === "applied",
+        );
+        if (isAccountRefusal(error) && !reachedAny) throw error;
+        outcomes.set(
+          threadId,
+          error instanceof MailProviderSyncError &&
+            error.code === "mail_provider_thread_stale"
+            ? { status: "stale" }
+            : { status: "failed", error },
+        );
+      }
+    }
+
+    const applied = threadIds.flatMap((threadId) => {
+      const outcome = outcomes.get(threadId);
+      return outcome?.status === "applied"
+        ? [{ threadId, messageIds: outcome.messageIds, read: outcome.markedRead }]
+        : [];
+    });
+    let written: ReadonlyMap<string, MailThreadListItem> = new Map();
+    try {
+      if (applied.length > 0) written = this.cache.applyBatchArchive(applied);
+    } catch {
+      // The provider has the archive either way. The answer below is worked
+      // out from the cached rows, and the next sync pass repairs the cache.
+    }
+    let changed = false;
+    const results = threadIds.map((threadId): MailThreadBatchItem => {
+      const outcome = outcomes.get(threadId)!;
+      if (outcome.status === "stale") return Object.freeze({ threadId, status: "stale" });
+      if (outcome.status === "failed") return failedItem(threadId, batchErrorCode(outcome.error));
+      changed = true;
+      if (outcome.status === "done") {
+        try {
+          this.cache.replaceActiveThread(outcome.thread);
+        } catch {
+          // As above: the provider moved the thread, the sync repairs the row.
+        }
+        return Object.freeze({
+          threadId,
+          status: "done",
+          thread: outcome.thread.thread,
+          markedRead: outcome.markedRead,
+        });
+      }
+      const before = cached.get(threadId)!.thread;
+      return Object.freeze({
+        threadId,
+        status: "done",
+        thread:
+          written.get(threadId) ??
+          Object.freeze({ ...before, unread: outcome.markedRead ? false : before.unread }),
+        markedRead: outcome.markedRead,
+      });
+    });
+    // A thread action can move a thread in or out of any listing.
+    if (changed) this.recordChange("mutation", MAIL_CHANGE_ALL_MAILBOXES);
+    return batchResult(results);
+  }
+
+  /**
+   * One thread of a batch the provider's own batch did not take: the archive,
+   * a read back, and the read flag only on a thread the read back shows no
+   * new mail on, compared with what the cache held at the press. The flag
+   * failing does not undo an archive that landed.
+   */
+  private async archiveOneUnlocked(
+    threadId: string,
+    read: boolean,
+    before: MailThreadListItem | undefined,
+    signal: AbortSignal,
+  ): Promise<MailProviderBatchOutcome> {
+    const readBack = async (): Promise<CachedProviderThread | null> => {
+      const thread = await this.provider.getThread(threadId, signal);
+      if (
+        thread !== null &&
+        (thread.thread.accountId !== this.accountId || thread.thread.threadId !== threadId)
+      ) {
+        throw new MailProviderSyncError("mail_provider_response_invalid");
+      }
+      return thread;
+    };
+    await this.provider.archiveThread(threadId, signal);
+    const archived = await readBack();
+    if (archived === null) return { status: "stale" };
+    if (
+      !read ||
+      !archived.thread.unread ||
+      (before !== undefined && gotNewMail(before, archived.thread))
+    ) {
+      return { status: "done", thread: archived, markedRead: false };
+    }
+    try {
+      await this.provider.setThreadRead(threadId, true, signal);
+    } catch {
+      return { status: "done", thread: archived, markedRead: false };
+    }
+    let after: CachedProviderThread | null = null;
+    try {
+      after = await readBack();
+    } catch {
+      // The flag is on; the thread as the archive left it still answers.
+    }
+    return { status: "done", thread: after ?? archived, markedRead: true };
   }
 
   private async syncUnlocked(
@@ -971,6 +1220,56 @@ async function applyThreadMutation(
     return;
   }
   await provider.setThreadStarred(threadId, input.starred, signal);
+}
+
+/** The code a batch thread the deadline left unreached answers with. */
+const NOT_REACHED = "request_deadline_exceeded";
+
+/**
+ * Whether a thread has mail the cache did not hold: the count catches a
+ * reply, the date a message that took another's place. The rule Brain's Done
+ * queue applies to the press, applied here to the cache.
+ */
+function gotNewMail(before: MailThreadListItem, now: MailThreadListItem): boolean {
+  return now.messageCount !== before.messageCount || now.lastMessageAt !== before.lastMessageAt;
+}
+
+/** A refusal that holds for every thread on the account: the server has no
+ *  folder for an archive, or will not move mail at all. */
+function isAccountRefusal(error: unknown): boolean {
+  return (
+    error instanceof MailProviderSyncError &&
+    error.code === "mail_provider_mutation_unsupported"
+  );
+}
+
+function failedItem(threadId: string, errorCode: string): MailThreadBatchItem {
+  return Object.freeze({ threadId, status: "failed", errorCode });
+}
+
+function batchResult(results: readonly MailThreadBatchItem[]): MailThreadBatchResult {
+  return Object.freeze({ apiVersion: 1, results: Object.freeze([...results]) });
+}
+
+/** The public code of one thread's failure: the codes a single mutation's
+ *  error body would carry, so a client reads both the same way. */
+function batchErrorCode(error: unknown): string {
+  if (error instanceof MailProviderSyncError) {
+    switch (error.code) {
+      case "mail_provider_reauth_required":
+        return "mail_account_reauth_required";
+      case "mail_provider_rate_limited":
+        return "mail_sync_rate_limited";
+      case "mail_provider_mutation_unsupported":
+        return "mail_thread_mutation_unsupported";
+      default:
+        return "mail_sync_unavailable";
+    }
+  }
+  if (error instanceof DOMException && (error.name === "AbortError" || error.name === "TimeoutError")) {
+    return NOT_REACHED;
+  }
+  return "mail_sync_unavailable";
 }
 
 function stableErrorCode(error: unknown): string {

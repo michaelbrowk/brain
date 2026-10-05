@@ -21,6 +21,9 @@ import type {
   MailSystemMailbox,
   MailThreadCategory,
   MailThreadDetail,
+  MailThreadBatchInput,
+  MailThreadBatchItem,
+  MailThreadBatchResult,
   MailThreadListItem,
   MailThreadMutationInput,
   MailThreadMutationResult,
@@ -28,6 +31,7 @@ import type {
   MailThreadSort,
   MailThreadView,
 } from "./message-types";
+import { MAIL_THREAD_BATCH_MAX } from "./message-types";
 import { normalizeMailSearchQueryText } from "./search-query";
 import { validateMailSendAttachments } from "./send-attachment-codec";
 
@@ -35,6 +39,7 @@ const SAFE_ACCOUNT_ID = /^account-a[0-9a-f]{32}$/;
 const SAFE_RESOURCE_ID = /^[A-Za-z0-9_-]{1,255}$/;
 const SAFE_OPERATION_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const SAFE_IDEMPOTENCY_KEY = /^[A-Za-z0-9_-]{16,128}$/;
+const SAFE_ERROR_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const MAX_RECIPIENTS = 100;
 const MAX_MESSAGES_PER_THREAD = 200;
 const MAX_LIST_ITEMS = 100;
@@ -280,6 +285,88 @@ export function validateMailThreadMutationInput(
     default:
       throw requestInvalid();
   }
+}
+
+/**
+ * `{ accountId, threadIds, archive: true, read?: true }` and nothing else:
+ * one to fifty distinct thread ids, archived, and marked read when `read` is
+ * there. Any other mutation, a `read: false`, or an `archive: false` is not a
+ * batch this contract has.
+ */
+export function validateMailThreadBatchInput(value: unknown): MailThreadBatchInput {
+  const read = isPlainRecord(value) && Object.hasOwn(value, "read");
+  if (
+    !isRecordWithExactFields(
+      value,
+      read ? ["accountId", "archive", "read", "threadIds"] : ["accountId", "archive", "threadIds"],
+    ) ||
+    value.archive !== true ||
+    (read && value.read !== true) ||
+    !Array.isArray(value.threadIds) ||
+    value.threadIds.length < 1 ||
+    value.threadIds.length > MAIL_THREAD_BATCH_MAX
+  ) {
+    throw requestInvalid();
+  }
+  const accountId = validateMailAccountId(value.accountId);
+  const threadIds = value.threadIds.map(validateMailResourceId);
+  if (new Set(threadIds).size !== threadIds.length) throw requestInvalid();
+  return Object.freeze({
+    accountId,
+    threadIds: Object.freeze(threadIds),
+    archive: true as const,
+    ...(read ? { read: true as const } : {}),
+  });
+}
+
+/**
+ * A batch answer for exactly the threads that were sent, in the order they
+ * were sent, each on the account that was named.
+ */
+export function validateMailThreadBatchResult(
+  value: unknown,
+  expected: Pick<MailThreadBatchInput, "accountId" | "threadIds">,
+): MailThreadBatchResult {
+  if (
+    !isRecordWithExactFields(value, ["apiVersion", "results"]) ||
+    value.apiVersion !== 1 ||
+    !Array.isArray(value.results) ||
+    value.results.length !== expected.threadIds.length
+  ) {
+    throw responseInvalid();
+  }
+  const results = value.results.map((entry, index): MailThreadBatchItem => {
+    const threadId = expected.threadIds[index];
+    if (!isPlainRecord(entry) || entry.threadId !== threadId || threadId === undefined) {
+      throw responseInvalid();
+    }
+    if (entry.status === "done") {
+      if (
+        !isRecordWithExactFields(entry, ["markedRead", "status", "thread", "threadId"]) ||
+        typeof entry.markedRead !== "boolean"
+      ) {
+        throw responseInvalid();
+      }
+      const thread = validateThreadListItem(entry.thread);
+      if (thread.accountId !== expected.accountId || thread.threadId !== threadId) {
+        throw responseInvalid();
+      }
+      return Object.freeze({ threadId, status: "done", thread, markedRead: entry.markedRead });
+    }
+    if (entry.status === "stale" && isRecordWithExactFields(entry, ["status", "threadId"])) {
+      return Object.freeze({ threadId, status: "stale" });
+    }
+    if (
+      entry.status === "failed" &&
+      isRecordWithExactFields(entry, ["errorCode", "status", "threadId"]) &&
+      typeof entry.errorCode === "string" &&
+      SAFE_ERROR_CODE.test(entry.errorCode)
+    ) {
+      return Object.freeze({ threadId, status: "failed", errorCode: entry.errorCode });
+    }
+    throw responseInvalid();
+  });
+  return Object.freeze({ apiVersion: 1, results: Object.freeze(results) });
 }
 
 export function validateMailSendInput(value: unknown): MailSendInput {

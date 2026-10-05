@@ -838,6 +838,47 @@ describe("shell toast channels, as mail uses them", () => {
       expect(pills()[0]).toContain("Newsletters archived");
     });
 
+    it("an action that throws leaves the pill live, with its window and its onExpire", async () => {
+      const onExpire = vi.fn();
+      const thrown: unknown[] = [];
+      const swallow = (event: ErrorEvent) => {
+        thrown.push(event.error);
+        event.preventDefault();
+      };
+      window.addEventListener("error", swallow);
+      try {
+        await say(
+          "Draft discarded",
+          discardReport(onExpire, () => {
+            throw new Error("undo broke");
+          }),
+        );
+        await act(async () => {
+          vi.advanceTimersByTime(3_000);
+        });
+        await act(async () => {
+          document.body.querySelector<HTMLButtonElement>(".brain-toast button")!.click();
+        });
+        // The error is not swallowed: it reaches the page like any other.
+        expect(thrown.map(String)).toEqual(["Error: undo broke"]);
+        const button = document.body.querySelector<HTMLButtonElement>(".brain-toast button");
+        expect(button?.textContent).toBe("Undo");
+        expect(button?.disabled).toBe(false);
+        await act(async () => {
+          vi.advanceTimersByTime(5_999);
+        });
+        expect(onExpire).not.toHaveBeenCalled();
+        expect(pills().join(" | ")).toContain("Draft discarded");
+        await act(async () => {
+          vi.advanceTimersByTime(2);
+        });
+        expect(onExpire).toHaveBeenCalledTimes(1);
+        expect(pills().join(" | ")).not.toContain("Draft discarded");
+      } finally {
+        window.removeEventListener("error", swallow);
+      }
+    });
+
     it("never fires when the action spent the pill", async () => {
       const onExpire = vi.fn();
       const undo = vi.fn();

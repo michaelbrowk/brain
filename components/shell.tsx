@@ -945,7 +945,16 @@ export function Shell({
       // its window; a pending promise hands it back too, and the settle
       // spends it.
       clock.spent = true;
-      const outcome = action();
+      let outcome: ReturnType<typeof action>;
+      try {
+        outcome = action();
+      } catch (error) {
+        // A throw is not a spend: nothing was taken back, so the pill goes on
+        // standing with its window, and still owes `onExpire` when that
+        // closes. The error goes on to the page like any other.
+        clock.spent = false;
+        throw error;
+      }
       if (outcome === false) {
         clock.spent = false;
         return;

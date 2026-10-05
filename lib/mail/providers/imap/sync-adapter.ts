@@ -740,11 +740,13 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
    * A session with less than that left is not asked at all. A server that
    * answers NO, says the folder is not there, or does not answer in time is
    * not asked again for ROLE_REFUSAL_TTL_MS, and the scan falls back on its
-   * own quiet window meanwhile.
+   * own quiet window meanwhile. A stop ends the wait at once and is held
+   * against nobody.
    */
   private async observeSentStatus(
     client: ImapSessionClient,
     session: ImapSessionBudget | undefined,
+    signal: AbortSignal,
   ): Promise<void> {
     const now = this.now();
     if (
@@ -778,11 +780,17 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
       });
     })();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let stop: (() => void) | undefined;
     try {
       await Promise.race([
         asked,
         new Promise<never>((_resolve, reject) => {
           timer = setTimeout(() => reject(new Error("the Sent STATUS was not answered")), wait);
+        }),
+        new Promise<never>((_resolve, reject) => {
+          stop = () => reject(new Error("the sync was stopped"));
+          if (signal.aborted) stop();
+          else signal.addEventListener("abort", stop, { once: true });
         }),
       ]);
     } catch {
@@ -790,9 +798,12 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
       // The command may still fail when the session closes under it.
       asked.catch(() => undefined);
       this.sentStatus = null;
-      this.sentStatusRestUntil = this.now() + ROLE_REFUSAL_TTL_MS;
+      // A stop is the owner's doing, or the host's, and says nothing about
+      // the server: the next sync asks as if this one had not.
+      if (!signal.aborted) this.sentStatusRestUntil = this.now() + ROLE_REFUSAL_TTL_MS;
     } finally {
       if (timer !== undefined) clearTimeout(timer);
+      if (stop !== undefined) signal.removeEventListener("abort", stop);
     }
   }
 
@@ -1164,7 +1175,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
   ): Promise<T> {
     return this.run(signal, async (client, session) => {
       const page = await operation(client);
-      await this.observeSentStatus(client, session);
+      await this.observeSentStatus(client, session, signal);
       return page;
     });
   }

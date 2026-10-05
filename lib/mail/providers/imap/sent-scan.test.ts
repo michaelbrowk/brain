@@ -1079,6 +1079,81 @@ describe("what a quiet Sent folder costs its host", () => {
     await page;
   });
 
+  it("forgets the last STATUS when the next one is not answered, and opens the folder", async () => {
+    vi.useFakeTimers({ now: 1_000_000 });
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
+    const { provider, pass } = await syncing(server, () => Date.now());
+    // The first scan read letters, so no quiet window stands in for a STATUS.
+    const first = scanned(await provider.scanSentEnvelopes({ cursor: null }, signal()));
+    await pass();
+
+    // A letter is sent, and the STATUS that would say so never comes. What
+    // the STATUS before it said is older than the letter.
+    server.append("Sent", 1);
+    server.hangStatus();
+    const page = pass();
+    await vi.advanceTimersByTimeAsync(1_600);
+    await page;
+
+    const next = scanned(await provider.scanSentEnvelopes({ cursor: first.cursor }, signal()));
+    expect(next.envelopeCount).toBe(1);
+    expect(server.sessionsOf("Sent")).toBe(2);
+  });
+
+  it("holds nothing against the server for a STATUS wait a stop ended", async () => {
+    vi.useFakeTimers({ now: 1_000_000 });
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
+    const { provider } = await syncing(server, () => Date.now());
+    const anchor = await provider.getSyncAnchor(signal());
+    await provider.scanSentEnvelopes({ cursor: null }, signal());
+    const passWith = (stop: AbortSignal) =>
+      provider.listChanges({ startHistoryId: anchor, pageToken: null, maxItems: 5 }, stop);
+
+    server.hangStatus();
+    const controller = new AbortController();
+    let settled = false;
+    const stopped = passWith(controller.signal).then(
+      () => (settled = true),
+      () => (settled = true),
+    );
+    await vi.advanceTimersByTimeAsync(400);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(1);
+    // The wait ends with the stop, and not when its own time runs out.
+    expect(settled).toBe(true);
+    await stopped;
+
+    // The stop was the owner's and not the server's: the next sync asks.
+    server.hangStatus(false);
+    await passWith(signal());
+    expect(server.statuses).toEqual(["Sent", "Sent"]);
+  });
+
+  it("starts the six hours again from a session that found nothing", async () => {
+    const clock = { now: 1_000_000 };
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
+    const { provider, pass } = await syncing(server, () => clock.now);
+    const first = scanned(await provider.scanSentEnvelopes({ cursor: null }, signal()));
+    const hour = 60 * 60_000;
+    for (let step = 0; step < 6; step += 1) {
+      clock.now += hour;
+      await pass();
+      await provider.scanSentEnvelopes({ cursor: first.cursor }, signal());
+    }
+    // The six-hourly session read the folder and found nothing new.
+    expect(server.sessionsOf("Sent")).toBe(2);
+
+    // That session is a read: a quiet folder is left alone again after it.
+    for (let minute = 0; minute < 60; minute += 1) {
+      clock.now += 60_000;
+      await pass();
+      await expect(
+        provider.scanSentEnvelopes({ cursor: first.cursor }, signal()),
+      ).resolves.toEqual({ status: "unchanged" });
+    }
+    expect(server.sessionsOf("Sent")).toBe(2);
+  });
+
   it("asks the STATUS only after the page's own work, and not at all for a page that failed", async () => {
     const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
     const { provider, pass } = await syncing(server);
@@ -1562,9 +1637,9 @@ function serverFixture(options: {
     statuses,
     wire,
     forbidden,
-    /** From now on the server never answers a STATUS. */
-    hangStatus() {
-      statusHangs = true;
+    /** From now on the server never answers a STATUS, or answers again. */
+    hangStatus(hangs = true) {
+      statusHangs = hangs;
     },
     /** From now on the server never answers a LIST. */
     hangList() {

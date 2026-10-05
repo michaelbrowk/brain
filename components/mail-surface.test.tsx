@@ -12,7 +12,9 @@ import {
   UNIFIED_FANOUT_LIMIT,
 } from "./mail-surface";
 import { MAIL_CHANGED_EVENT, type BrainMailEvent } from "@/lib/mail/mail-events";
-import { resetSectionDone } from "./mail-section-done";
+import { doneFailureOf, doneOverlaySnapshot, resetSectionDone } from "./mail-section-done";
+import { unifiedThreadKey } from "./mail-unified";
+import type { MailThreadBatchItem } from "@/lib/mail/message-types";
 import { SMART_UNDO_MS } from "./shell/helpers";
 import type { ToastOptions } from "./ui/primitives";
 
@@ -233,7 +235,8 @@ const readyContent = {
 };
 
 function makeClient(overrides: Partial<MailSurfaceClient> = {}): MailSurfaceClient {
-  return {
+  const client: Omit<MailSurfaceClient, "archiveThreads"> &
+    Partial<Pick<MailSurfaceClient, "archiveThreads">> = {
     loadAccounts: vi.fn().mockResolvedValue([accountA]),
     listThreads: vi.fn().mockResolvedValue(threadPage),
     listMailboxThreads: vi
@@ -326,6 +329,73 @@ function makeClient(overrides: Partial<MailSurfaceClient> = {}): MailSurfaceClie
     listBlockedSenders: vi.fn().mockResolvedValue({ apiVersion: 1, blocked: [] }),
     ...overrides,
   };
+  const whole = client as MailSurfaceClient;
+  whole.archiveThreads ??= vi.fn((input, signal, options) =>
+    batchOverSingles(whole, input, signal, options),
+  );
+  return whole;
+}
+
+/**
+ * The service's batch, played over the per-thread `updateThread` a test
+ * supplies, so a case written against single mutations still says what the
+ * provider is asked, in the order the service asks it: per thread the
+ * archive, and the read flag for an unread one whose archive answer shows no
+ * new mail. A refusal, a timeout, a sign-out or a dead connection on the
+ * first thread is the whole request's answer, as it is from the route; past
+ * a thread that landed it is the rest of the batch's `failed`. The pressed
+ * copy is the one the Done store holds.
+ */
+async function batchOverSingles(
+  client: MailSurfaceClient,
+  input: Parameters<MailSurfaceClient["archiveThreads"]>[0],
+  signal?: AbortSignal,
+  options?: { readonly keepalive?: boolean },
+): Promise<MailThreadBatchItem[]> {
+  const results: MailThreadBatchItem[] = [];
+  for (const [index, threadId] of input.threadIds.entries()) {
+    const key = { accountId: input.accountId, threadId };
+    const pressed = doneOverlaySnapshot().get(unifiedThreadKey(key))?.thread;
+    let archived: MailThreadListItem | void;
+    try {
+      archived = await client.updateThread({ ...key, archive: true }, signal, options);
+    } catch (error) {
+      const failure = doneFailureOf(error);
+      if (failure === "changed") {
+        results.push({ threadId, status: "stale" });
+        continue;
+      }
+      if (failure === "failed") {
+        results.push({ threadId, status: "failed", errorCode: "mail_sync_unavailable" });
+        continue;
+      }
+      if (!results.some((result) => result.status === "done")) throw error;
+      const errorCode =
+        failure === "refused" ? "mail_thread_mutation_unsupported" : "request_deadline_exceeded";
+      for (const rest of input.threadIds.slice(index)) {
+        results.push({ threadId: rest, status: "failed", errorCode });
+      }
+      return results;
+    }
+    const answer = archived || pressed!;
+    const renewed =
+      pressed !== undefined &&
+      (answer.messageCount !== pressed.messageCount ||
+        answer.lastMessageAt !== pressed.lastMessageAt);
+    if (input.read !== true || pressed?.unread !== true || renewed) {
+      results.push({ threadId, status: "done", thread: answer, markedRead: false });
+      continue;
+    }
+    let read: MailThreadListItem | void;
+    try {
+      read = await client.updateThread({ ...key, read: true }, signal, options);
+    } catch {
+      results.push({ threadId, status: "done", thread: answer, markedRead: false });
+      continue;
+    }
+    results.push({ threadId, status: "done", thread: read || answer, markedRead: true });
+  }
+  return results;
 }
 
 const DECISION_ID = `decision-a${"0".repeat(30)}ab`;
@@ -10386,6 +10456,115 @@ describe("MailSurface", () => {
         expect(onToast.mock.calls.at(-1)?.[1]?.id).toBeUndefined();
       });
 
+      it("sends fifteen threads over two accounts as two batch requests, read flags in them", async () => {
+        const items = Array.from({ length: 15 }, (_value, index) =>
+          unifiedThread({
+            accountId: index < 10 ? accountA.accountId : accountB.accountId,
+            threadId: `many-${index}`,
+            lastMessageAt: 1_700_000_000_000 - index,
+          }),
+        );
+        const updateThread = vi.fn().mockResolvedValue(undefined);
+        const archiveThreads = vi.fn<MailSurfaceClient["archiveThreads"]>(async (input) =>
+          input.threadIds.map((threadId) => ({
+            threadId,
+            status: "done" as const,
+            thread: { ...items.find((item) => item.threadId === threadId)!, unread: false },
+            markedRead: true,
+          })),
+        );
+        const onToast = vi.fn();
+        await act(async () =>
+          root.render(
+            <MailSurface
+              client={unifiedClient(items, {
+                updateThread,
+                archiveThreads,
+                listThreads: vi.fn().mockImplementation(({ accountId }) =>
+                  Promise.resolve(pageOf(items.filter((item) => item.accountId === accountId))),
+                ),
+              })}
+              onOpenSettings={() => {}}
+              onToast={onToast}
+            />,
+          ),
+        );
+        await settle();
+
+        await click(findButton("Done — archive all 15 in People"));
+        await closeWindow(onToast);
+
+        expect(archiveThreads.mock.calls.map(([input, , options]) => [input, options])).toEqual([
+          [
+            {
+              accountId: accountA.accountId,
+              threadIds: items.slice(0, 10).map((item) => item.threadId),
+              archive: true,
+              read: true,
+            },
+            { keepalive: true },
+          ],
+          [
+            {
+              accountId: accountB.accountId,
+              threadIds: items.slice(10).map((item) => item.threadId),
+              archive: true,
+              read: true,
+            },
+            { keepalive: true },
+          ],
+        ]);
+        expect(updateThread).not.toHaveBeenCalled();
+        expect(document.body.querySelector('section[aria-label="People"]')).toBeNull();
+        // Success is silent: the press's sentence is the only one.
+        expect(onToast).toHaveBeenCalledTimes(1);
+      });
+
+      it("puts back the row a batch answers failed for, with one report", async () => {
+        const items = [1, 2, 3].map((index) =>
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: `bulk-${index}`,
+            lastMessageAt: 1_700_000_000_000 - index,
+          }),
+        );
+        const archiveThreads = vi.fn<MailSurfaceClient["archiveThreads"]>(async (input) =>
+          input.threadIds.map((threadId) =>
+            threadId === "bulk-2"
+              ? { threadId, status: "failed" as const, errorCode: "mail_sync_unavailable" }
+              : {
+                  threadId,
+                  status: "done" as const,
+                  thread: { ...items.find((item) => item.threadId === threadId)!, unread: false },
+                  markedRead: true,
+                },
+          ),
+        );
+        const onToast = vi.fn();
+        await act(async () =>
+          root.render(
+            <MailSurface
+              client={unifiedClient(items, { archiveThreads })}
+              onOpenSettings={() => {}}
+              onToast={onToast}
+            />,
+          ),
+        );
+        await settle();
+
+        await click(findButton("Done — archive all 3 in People"));
+        await closeWindow(onToast);
+
+        expect(archiveThreads).toHaveBeenCalledTimes(1);
+        expect(threadsList()).toContain("bulk-2");
+        expect(threadsList()).not.toContain("bulk-1");
+        expect(threadsList()).not.toContain("bulk-3");
+        expect(onToast).toHaveBeenLastCalledWith(
+          "People partly cleared",
+          expect.objectContaining({ subtitle: "2 archived, 1 stayed put" }),
+        );
+      });
+
       it("empties the column at the press with the ring already counting, and sends nothing inside the window", async () => {
         // The owner met this as a pill that stood for half a minute with no
         // ring while every other mail action was refused. The press now arms
@@ -10935,11 +11114,19 @@ describe("MailSurface", () => {
           }),
         );
         const updateThread = vi.fn().mockResolvedValue(undefined);
+        const archiveThreads = vi.fn<MailSurfaceClient["archiveThreads"]>(async (input) =>
+          input.threadIds.map((threadId) => ({
+            threadId,
+            status: "done" as const,
+            thread: items.find((item) => item.threadId === threadId)!,
+            markedRead: false,
+          })),
+        );
         const onToast = vi.fn();
         await act(async () =>
           root.render(
             <MailSurface
-              client={unifiedClient(items, { updateThread })}
+              client={unifiedClient(items, { updateThread, archiveThreads })}
               onOpenSettings={() => {}}
               onToast={onToast}
             />,
@@ -10951,25 +11138,18 @@ describe("MailSurface", () => {
         const pill = donePill(onToast);
         onToast.mockClear();
 
-        // Inside the window. A queue that awaited its way through the three
-        // would be cut at the first request, so they leave in the handler,
-        // bounded and allowed to outlive the tab.
+        // Inside the window. The batch leaves in the handler, bounded and
+        // allowed to outlive the tab: one request for the account's three.
         act(() => {
           window.dispatchEvent(new Event("pagehide"));
         });
-        expect(updateThread.mock.calls).toEqual([
+        expect(archiveThreads.mock.calls).toEqual([
           [
-            { accountId: accountA.accountId, threadId: "a-0", archive: true },
-            undefined,
-            { keepalive: true },
-          ],
-          [
-            { accountId: accountA.accountId, threadId: "a-1", archive: true },
-            undefined,
-            { keepalive: true },
-          ],
-          [
-            { accountId: accountA.accountId, threadId: "a-2", archive: true },
+            {
+              accountId: accountA.accountId,
+              threadIds: ["a-0", "a-1", "a-2"],
+              archive: true,
+            },
             undefined,
             { keepalive: true },
           ],
@@ -10988,7 +11168,8 @@ describe("MailSurface", () => {
         );
         expect(onToast.mock.calls[0]?.[1]?.actionLabel).toBeUndefined();
         expect(pill.onAction?.()).toBe(false);
-        expect(updateThread).toHaveBeenCalledTimes(3);
+        expect(archiveThreads).toHaveBeenCalledTimes(1);
+        expect(updateThread).not.toHaveBeenCalled();
       });
 
       it("sends each thread once under StrictMode and beside a second Mail, and hears the page leave once", async () => {
@@ -11595,25 +11776,37 @@ describe("MailSurface", () => {
       });
 
       it("takes a letter someone asked for out of a run the queue has not sent it for", async () => {
+        // One account's batch is out; the other account's has not left yet.
         const items = [0, 1, 2].map((index) =>
           unifiedThread({
-            accountId: accountA.accountId,
+            accountId: index < 2 ? accountA.accountId : accountB.accountId,
             threadId: `a-${index}`,
             unread: false,
             lastMessageAt: 1_700_000_000_000 - index,
           }),
         );
         const first = deferred<void>();
-        const updateThread = vi
-          .fn()
-          .mockReturnValueOnce(first.promise)
-          .mockResolvedValue(undefined);
+        const archiveThreads = vi.fn<MailSurfaceClient["archiveThreads"]>(async (input) => {
+          if (input.threadIds.includes("a-0")) await first.promise;
+          return input.threadIds.map((threadId) => ({
+            threadId,
+            status: "done" as const,
+            thread: items.find((item) => item.threadId === threadId)!,
+            markedRead: false,
+          }));
+        });
         const readThread = detailOf(items);
         const onToast = vi.fn();
         await act(async () =>
           root.render(
             <MailSurface
-              client={unifiedClient(items, { updateThread, readThread })}
+              client={unifiedClient(items, {
+                archiveThreads,
+                readThread,
+                listThreads: vi.fn().mockImplementation(({ accountId }) =>
+                  Promise.resolve(pageOf(items.filter((item) => item.accountId === accountId))),
+                ),
+              })}
               onOpenSettings={() => {}}
               onToast={onToast}
             />,
@@ -11622,19 +11815,18 @@ describe("MailSurface", () => {
         await settle();
         await click(findButton("Done — archive all 3 in Seen"));
         await closeWindow(onToast);
-        expect(sent(updateThread)).toHaveLength(1);
+        expect(archiveThreads).toHaveBeenCalledTimes(1);
 
         await act(async () => {
-          requestOpenThread(accountA.accountId, "a-2");
+          requestOpenThread(accountB.accountId, "a-2");
         });
         await drain();
         expect(readThread.mock.calls.map((call) => call[0].threadId)).toEqual(["a-2"]);
         // Taken out is not a failure: the run has nothing to report for it.
         await act(async () => first.resolve());
         await drain();
-        expect(sent(updateThread).map((mutation) => mutation.threadId)).toEqual([
-          "a-0",
-          "a-1",
+        expect(archiveThreads.mock.calls.map((call) => call[0].threadIds)).toEqual([
+          ["a-0", "a-1"],
         ]);
         expect(threadsList()).toContain("1 thread, nothing unread");
         expect(onToast).toHaveBeenCalledTimes(1);
@@ -12109,25 +12301,39 @@ describe("MailSurface", () => {
         ).toHaveLength(1);
       });
 
+      /** One account's batch held at the provider, the other's not sent yet. */
+      function twoAccountBatches(items: readonly MailThreadListItem[]) {
+        const first = deferred<void>();
+        const archiveThreads = vi.fn<MailSurfaceClient["archiveThreads"]>(async (input) => {
+          if (input.accountId === accountA.accountId) await first.promise;
+          return input.threadIds.map((threadId) => ({
+            threadId,
+            status: "done" as const,
+            thread: { ...items.find((item) => item.threadId === threadId)!, unread: false },
+            markedRead: true,
+          }));
+        });
+        const listThreads = vi.fn().mockImplementation(({ accountId }) =>
+          Promise.resolve(pageOf(items.filter((item) => item.accountId === accountId))),
+        );
+        return { first, archiveThreads, listThreads };
+      }
+
       it("sends the unsent tail when the tab closes after the reader has left Mail", async () => {
         const items = [0, 1, 2].map((index) =>
           unifiedThread({
-            accountId: accountA.accountId,
+            accountId: index < 2 ? accountA.accountId : accountB.accountId,
             threadId: `a-${index}`,
             unread: false,
             lastMessageAt: 1_700_000_000_000 - index,
           }),
         );
-        const first = deferred<void>();
-        const updateThread = vi
-          .fn()
-          .mockReturnValueOnce(first.promise)
-          .mockResolvedValue(undefined);
+        const { first, archiveThreads, listThreads } = twoAccountBatches(items);
         const onToast = vi.fn();
         await act(async () =>
           root.render(
             <MailSurface
-              client={unifiedClient(items, { updateThread })}
+              client={unifiedClient(items, { archiveThreads, listThreads })}
               onOpenSettings={() => {}}
               onToast={onToast}
             />,
@@ -12137,40 +12343,42 @@ describe("MailSurface", () => {
         await click(findButton("Done — archive all 3 in Seen"));
         await act(async () => root.render(<div>Home</div>));
         await drain();
-        expect(sent(updateThread)).toHaveLength(1);
+        expect(archiveThreads).toHaveBeenCalledTimes(1);
 
         // No Mail surface is mounted to hear the page leave. The queue hears
         // it itself, and what it had not reached leaves in that task.
         act(() => {
           window.dispatchEvent(new Event("pagehide"));
         });
-        expect(sent(updateThread)).toEqual([
-          { threadId: "a-0", archive: true, keepalive: true },
-          { threadId: "a-1", archive: true, keepalive: true },
-          { threadId: "a-2", archive: true, keepalive: true },
+        expect(archiveThreads.mock.calls.map(([input, , options]) => [input, options])).toEqual([
+          [
+            { accountId: accountA.accountId, threadIds: ["a-0", "a-1"], archive: true },
+            { keepalive: true },
+          ],
+          [
+            { accountId: accountB.accountId, threadIds: ["a-2"], archive: true },
+            { keepalive: true },
+          ],
         ]);
         await act(async () => first.resolve());
         await drain();
       });
 
-      it("sends every request so it can outlive the page, the one in flight at pagehide included", async () => {
+      it("sends every batch so it can outlive the page, read flags in it, the one in flight at pagehide included", async () => {
         const items = [1, 2, 3].map((index) =>
           unifiedThread({
-            accountId: accountA.accountId,
+            accountId: index < 3 ? accountA.accountId : accountB.accountId,
             threadId: `p-${index}`,
             lastMessageAt: 1_700_000_000_000 - index,
           }),
         );
-        const first = deferred<void>();
-        const updateThread = vi
-          .fn()
-          .mockReturnValueOnce(first.promise)
-          .mockResolvedValue(undefined);
+        const { first, archiveThreads, listThreads } = twoAccountBatches(items);
+        const updateThread = vi.fn().mockResolvedValue(undefined);
         const onToast = vi.fn();
         await act(async () =>
           root.render(
             <MailSurface
-              client={unifiedClient(items, { updateThread })}
+              client={unifiedClient(items, { archiveThreads, listThreads, updateThread })}
               onOpenSettings={() => {}}
               onToast={onToast}
             />,
@@ -12179,32 +12387,35 @@ describe("MailSurface", () => {
         await settle();
         await click(findButton("Done — archive all 3 in People"));
         await closeWindow(onToast);
-        // Mid-run: one archive out, sent the ordinary way a moment ago, and
-        // it too would be cut with the document without `keepalive`.
-        expect(sent(updateThread)).toEqual([
-          { threadId: "p-1", archive: true, keepalive: true },
+        // Mid-run: one batch out, sent the ordinary way a moment ago, and it
+        // too would be cut with the document without `keepalive`.
+        expect(archiveThreads.mock.calls.map(([, , options]) => options)).toEqual([
+          { keepalive: true },
         ]);
 
         act(() => {
           window.dispatchEvent(new Event("pagehide"));
         });
-        // Every archive is out in the handler. The read flags follow their
-        // archives' answers, which a page that is really leaving may never
-        // see: best effort until the mutations go as one batch.
-        expect(sent(updateThread)).toEqual([
-          { threadId: "p-1", archive: true, keepalive: true },
-          { threadId: "p-2", archive: true, keepalive: true },
-          { threadId: "p-3", archive: true, keepalive: true },
+        // Every batch is out in the handler, and each carries its read flag:
+        // nothing waits on an answer a leaving page would never see.
+        expect(archiveThreads.mock.calls.map(([input, , options]) => [input, options])).toEqual([
+          [
+            {
+              accountId: accountA.accountId,
+              threadIds: ["p-1", "p-2"],
+              archive: true,
+              read: true,
+            },
+            { keepalive: true },
+          ],
+          [
+            { accountId: accountB.accountId, threadIds: ["p-3"], archive: true, read: true },
+            { keepalive: true },
+          ],
         ]);
         await act(async () => first.resolve());
         await drain();
-        expect(
-          sent(updateThread).filter((mutation) => "read" in mutation),
-        ).toEqual([
-          { threadId: "p-2", read: true, keepalive: true },
-          { threadId: "p-3", read: true, keepalive: true },
-          { threadId: "p-1", read: true, keepalive: true },
-        ]);
+        expect(updateThread).not.toHaveBeenCalled();
       });
 
       it("ends a hold on its own account's read, not on another account's that landed first", async () => {

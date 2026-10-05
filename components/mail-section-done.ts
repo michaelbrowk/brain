@@ -13,10 +13,10 @@
  * would have to find and restore every copy it removed. Taking the threads
  * off the overlay is the whole of an Undo, and it cannot fail.
  *
- * The QUEUE sends what a closed window owes the provider: per thread an
- * archive and then, for an unread one, the read flag, one request at a time
- * across every Done still going out. It takes its transport as one function,
- * so a batch endpoint replaces `DoneSend` and nothing else.
+ * The QUEUE sends what a closed window owes the provider: one batch request
+ * per account and up to fifty threads, archive and read flag together, one
+ * request at a time across every Done still going out. A thread the answer
+ * shows got new mail is taken back with requests of its own.
  *
  * The STORE holds both for the page, not for one mount of Mail. A reader who
  * leaves Mail while a Done is still sending and comes back finds the same
@@ -25,7 +25,11 @@
  * on screen or not.
  */
 
-import type { MailThreadListItem } from "@/lib/mail/message-types";
+import {
+  MAIL_THREAD_BATCH_MAX,
+  type MailThreadBatchItem,
+  type MailThreadListItem,
+} from "@/lib/mail/message-types";
 import { MailApiError, isMailMutationTimeout } from "./mail-surface-client";
 import { unifiedThreadKey } from "./mail-unified";
 
@@ -154,19 +158,31 @@ export function settleDone(
 }
 
 /**
- * The two mutations a Done owes one thread, each its own request today, and
- * the two that take them back when the provider's answer shows new mail.
+ * The two mutations that take a thread's Done back when the provider's
+ * answer shows new mail, each its own request.
  */
 export type DoneMutation =
   | { readonly accountId: string; readonly threadId: string; readonly archive: boolean }
   | { readonly accountId: string; readonly threadId: string; readonly read: boolean };
 
-/**
- * THE TRANSPORT. One mutation, one request, answered with the thread as the
- * provider reads it after applying the mutation. A transport with no answer
- * to give says nothing about the thread, and the queue takes it at its word.
- */
+/** A take-back's transport: one mutation, one request. */
 export type DoneSend = (mutation: DoneMutation) => Promise<MailThreadListItem | void>;
+
+/** One account's threads, at most `MAIL_THREAD_BATCH_MAX`, to archive, and
+ *  to mark read with `read`. */
+export type DoneBatch = {
+  readonly accountId: string;
+  readonly threadIds: readonly string[];
+  readonly read: boolean;
+};
+
+/**
+ * THE TRANSPORT. One batch, one request, answered per thread with the thread
+ * as the provider reads it afterwards and whether the read flag went on it.
+ * The service flags only a thread that got no new mail, and the queue checks
+ * every answer against the press all the same.
+ */
+export type DoneSendBatch = (batch: DoneBatch) => Promise<readonly MailThreadBatchItem[]>;
 
 /**
  * What a failed mutation says about the rest of the run. `changed`: the
@@ -215,6 +231,17 @@ export function doneFailureOf(error: unknown): DoneFailure {
   return "failed";
 }
 
+/**
+ * Reads one thread a batch answered `failed`, by the code a single request
+ * would have carried. A thread the service's deadline left unreached is an
+ * account that is slow now, as a request the client's clock ended is.
+ */
+export function doneBatchFailureOf(errorCode: string): DoneFailure {
+  if (errorCode === "mail_thread_mutation_unsupported") return "refused";
+  if (errorCode === "request_deadline_exceeded") return "silent";
+  return "failed";
+}
+
 /** What became of one Done's threads. */
 export type DoneOutcome = {
   /** Out of the inbox. */
@@ -231,15 +258,16 @@ export type DoneOutcome = {
 
 /** What one Done hands the queue with its threads. */
 export type DoneHooks = {
+  readonly sendBatch: DoneSendBatch;
   readonly send: DoneSend;
   /**
    * The copy of a thread the lists hold now, or nothing when no list has
-   * one. Asked before each send: a thread whose copy has another message
-   * than the press saw is not sent (`renewed`). A pre-filter that saves a
-   * request; the answers `send` returns are the check that holds.
+   * one. Asked as each batch is made up: a thread whose copy has another
+   * message than the press saw is not sent (`renewed`). A pre-filter that
+   * saves a thread; the answers `sendBatch` returns are the check that holds.
    */
   readonly current?: (thread: MailThreadListItem) => MailThreadListItem | undefined;
-  /** A thread's archive answered. Called before its read flag is sent. */
+  /** A thread's archive answered and it stays out of the Inbox. */
   readonly onArchived?: (thread: MailThreadListItem) => void;
   /** A thread got new mail and is back in the Inbox, or never left it. */
   readonly onRenewed?: (thread: MailThreadListItem) => void;
@@ -297,73 +325,106 @@ export function doneQueue(failureOf: (error: unknown) => DoneFailure): DoneQueue
     }
   };
 
-  /* Archive, then read. That order is the one that fails safely: a failed
-     archive leaves the thread exactly where it was, unread and in its
-     section, while a read that fails after a successful archive costs
-     nothing a reader can see, because the thread is out of the inbox either
-     way. The provider's archive drops the INBOX label and touches nothing
-     else, which is why the read flag is sent at all.
-
-     The press took a snapshot, and a provider's archive and read flag act on
-     every message the thread has when they are called: a reply that arrived
-     inside the window would be filed away, read, before anyone saw it. Three
-     checks stand in its way. The lists are asked what they hold now, before
-     anything is sent; they only know what the change feed has told them, so
-     this one saves a request and nothing more. The archive's answer, the
-     provider reading the thread after moving it, is compared with the press:
-     new mail there and the archive is taken back before any read flag goes.
-     The read flag's answer is compared with the archive's: a reply that
-     landed between the two was marked read with the rest, so both are taken
-     back. A reply after the read flag answered arrives unread, as new mail
-     does, and is no longer this run's to see. */
-  const sendThread = async (run: QueuedRun, thread: MailThreadListItem): Promise<void> => {
-    const now = run.hooks.current?.(thread);
-    if (now !== undefined && gotNewMail(thread, now)) {
-      run.renewed.push(thread);
-      run.hooks.onRenewed?.(thread);
-      return;
+  /* The next batch: the first unsent thread's account, and up to a batch of
+     that account's unsent threads, in order. A thread on an account the run
+     has closed is not sent, and costs no request for one more refusal. The
+     lists are asked what they hold now as each thread is taken; they only
+     know what the change feed has told them, so a thread they show with new
+     mail is kept back and saves a place in the batch, nothing more. */
+  const nextBatch = (run: QueuedRun): MailThreadListItem[] | null => {
+    while (run.rest.length > 0) {
+      const accountId = run.rest[0]!.accountId;
+      const batch: MailThreadListItem[] = [];
+      for (let at = 0; at < run.rest.length && batch.length < MAIL_THREAD_BATCH_MAX; ) {
+        const thread = run.rest[at]!;
+        if (thread.accountId !== accountId) {
+          at += 1;
+          continue;
+        }
+        run.rest.splice(at, 1);
+        if (run.closed.has(accountId)) {
+          run.stayed.push(thread);
+          continue;
+        }
+        const now = run.hooks.current?.(thread);
+        if (now !== undefined && gotNewMail(thread, now)) {
+          run.renewed.push(thread);
+          run.hooks.onRenewed?.(thread);
+          continue;
+        }
+        batch.push(thread);
+      }
+      if (batch.length > 0) return batch;
     }
-    const key = { accountId: thread.accountId, threadId: thread.threadId };
-    let archived: MailThreadListItem | void;
+    return null;
+  };
+
+  /* Archive, then read, in one request. The service keeps that order inside
+     it: every thread is archived, read back, and only then flagged read if
+     the read back shows no new mail, because a failed archive must leave a
+     thread exactly where it was, unread, and a read flag on a reply nobody
+     has seen is the one thing Done must not do.
+
+     The press took a snapshot, and the service compares with what its cache
+     held, which may be newer. So every answer is compared with the press
+     here as well: new mail in it and the thread is taken back, the read flag
+     first when it went on (the reply is the one a reader would miss), then
+     the archive. A reply that lands after the answer arrives unread, as new
+     mail does, and is no longer this run's to see. */
+  const sendBatch = async (run: QueuedRun, batch: readonly MailThreadListItem[]): Promise<void> => {
+    const accountId = batch[0]!.accountId;
+    let answers: readonly MailThreadBatchItem[];
     try {
-      archived = await run.hooks.send({ ...key, archive: true });
+      answers = await run.hooks.sendBatch({
+        accountId,
+        threadIds: batch.map((thread) => thread.threadId),
+        read: batch.some((thread) => thread.unread),
+      });
     } catch (error) {
       const failure = failureOf(error);
-      if (failure === "changed") {
-        run.changed.push(thread);
-        return;
+      for (const thread of batch) {
+        if (failure === "changed") {
+          run.changed.push(thread);
+          continue;
+        }
+        close(run, thread, failure);
+        run.stayed.push(thread);
       }
-      close(run, thread, failure);
-      run.stayed.push(thread);
       return;
     }
-    if (archived && gotNewMail(thread, archived)) {
-      await takeBack(run, thread, [{ ...key, archive: false }]);
-      return;
-    }
-    run.hooks.onArchived?.(thread);
-    if (!thread.unread) {
+    const byThread = new Map(answers.map((answer) => [answer.threadId, answer]));
+    for (const thread of batch) {
+      const answer = byThread.get(thread.threadId);
+      if (answer === undefined) {
+        run.stayed.push(thread);
+        continue;
+      }
+      if (answer.status === "stale") {
+        run.changed.push(thread);
+        continue;
+      }
+      if (answer.status === "failed") {
+        close(run, thread, doneBatchFailureOf(answer.errorCode));
+        run.stayed.push(thread);
+        continue;
+      }
+      if (gotNewMail(thread, answer.thread)) {
+        const key = { accountId, threadId: thread.threadId };
+        await takeBack(
+          run,
+          thread,
+          answer.markedRead
+            ? [
+                { ...key, read: false },
+                { ...key, archive: false },
+              ]
+            : [{ ...key, archive: false }],
+        );
+        continue;
+      }
+      run.hooks.onArchived?.(thread);
       run.moved.push(thread);
-      return;
     }
-    let read: MailThreadListItem | void;
-    try {
-      read = await run.hooks.send({ ...key, read: true });
-    } catch (error) {
-      // A server that went quiet between the two still closes the account.
-      close(run, thread, failureOf(error));
-      run.moved.push(thread);
-      return;
-    }
-    if (read && gotNewMail(archived || thread, read)) {
-      // The reply first: it is the one a reader would miss.
-      await takeBack(run, thread, [
-        { ...key, read: false },
-        { ...key, archive: false },
-      ]);
-      return;
-    }
-    run.moved.push(thread);
   };
 
   /* New mail reached a thread the run already acted on: these mutations
@@ -388,18 +449,10 @@ export function doneQueue(failureOf: (error: unknown) => DoneFailure): DoneQueue
   };
 
   const drain = async (run: QueuedRun): Promise<DoneOutcome> => {
-    for (
-      let thread = run.rest.shift();
-      thread !== undefined;
-      thread = run.rest.shift()
-    ) {
-      // A failing thread does not stop the run, and a closed account does
-      // not cost one more attempt per thread for one more refusal each.
-      if (run.closed.has(thread.accountId)) {
-        run.stayed.push(thread);
-        continue;
-      }
-      await sendThread(run, thread);
+    // A failing thread does not stop the run; a closed account stops its own
+    // threads and no other account's.
+    for (let batch = nextBatch(run); batch !== null; batch = nextBatch(run)) {
+      await sendBatch(run, batch);
     }
     await Promise.all(run.atOnce);
     open.delete(run);
@@ -435,8 +488,8 @@ export function doneQueue(failureOf: (error: unknown) => DoneFailure): DoneQueue
     },
     unload() {
       for (const run of open) {
-        for (const thread of run.rest.splice(0)) {
-          run.atOnce.push(sendThread(run, thread));
+        for (let batch = nextBatch(run); batch !== null; batch = nextBatch(run)) {
+          run.atOnce.push(sendBatch(run, batch));
         }
       }
     },
@@ -458,7 +511,9 @@ export type SectionDoneRun = {
   readonly label: string;
   readonly threads: MailThreadListItem[];
   readonly blocked: number;
-  /** The transport of the surface that pressed Done. */
+  /** The transports of the surface that pressed Done: the batch, and the
+   *  single mutation a take-back needs. */
+  readonly sendBatch: DoneSendBatch;
   readonly send: DoneSend;
   /** Says the press-time sentence again without its Undo. */
   readonly respeak: () => void;
@@ -582,6 +637,7 @@ export function watchDoneLists(lookup: DoneLists): () => void {
 function commitRun(run: SectionDoneRun): void {
   void store.queue
     .commit(run.threads, {
+      sendBatch: run.sendBatch,
       send: run.send,
       current: (thread) => store.lists.at(-1)?.(thread),
       onArchived: (thread) => landSectionDone([thread]),

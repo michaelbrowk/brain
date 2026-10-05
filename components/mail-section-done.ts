@@ -223,7 +223,7 @@ export type DoneOutcome = {
   readonly stayed: readonly MailThreadListItem[];
   /** No longer what the list said they were, so neither of the above. */
   readonly changed: readonly MailThreadListItem[];
-  /** Got new mail between the press and their turn, and so were not sent. */
+  /** Got new mail after the press: not sent, or sent and taken back. */
   readonly renewed: readonly MailThreadListItem[];
   /** Accounts closed for the run, and why. */
   readonly closed: ReadonlyMap<string, DoneClosure>;
@@ -235,12 +235,13 @@ export type DoneHooks = {
   /**
    * The copy of a thread the lists hold now, or nothing when no list has
    * one. Asked before each send: a thread whose copy has another message
-   * than the press saw is not sent (`renewed`).
+   * than the press saw is not sent (`renewed`). A pre-filter that saves a
+   * request; the answers `send` returns are the check that holds.
    */
   readonly current?: (thread: MailThreadListItem) => MailThreadListItem | undefined;
   /** A thread's archive answered. Called before its read flag is sent. */
   readonly onArchived?: (thread: MailThreadListItem) => void;
-  /** A thread got new mail and is not being sent. */
+  /** A thread got new mail and is back in the Inbox, or never left it. */
   readonly onRenewed?: (thread: MailThreadListItem) => void;
 };
 
@@ -461,7 +462,7 @@ export type SectionDoneRun = {
   readonly send: DoneSend;
   /** Says the press-time sentence again without its Undo. */
   readonly respeak: () => void;
-  /** A thread got new mail and came off the run: put its row back. */
+  /** A thread got new mail and is in the Inbox: put its row back. */
   readonly onRenewed?: (thread: MailThreadListItem) => void;
   /** The run has landed. */
   readonly onSettled: (outcome: DoneOutcome) => void;

@@ -790,7 +790,9 @@ export function MailSurface({
      (`watchDoneLists`). The streams keep a held thread and every refresh
      folds its newest copy in, so a reply that arrived since the press is on
      that copy: one more message, a later date. A thread no list holds has
-     nothing to say, and is sent. */
+     nothing to say, and is sent. This only saves a request: the lists know
+     what the change feed has told them, and the server's answer to each
+     mutation is what the queue checks the reply against. */
   useEffect(
     () =>
       watchDoneLists((thread) => {
@@ -5192,8 +5194,8 @@ export function MailSurface({
    * recognises (`mail_thread_stale`: moved by another client, or its mailbox
    * re-keyed under the list) did not "stay put". It is not where the column
    * had it, so it is held out like one that moved, and the next read says
-   * where it is. A letter that got new mail before its turn was never sent
-   * and is back in the column already; the report counts it.
+   * where it is. A letter that got new mail was never sent, or was taken
+   * back, and is in the column already; the report counts it.
    *
    * The report stands `SECTION_DONE_REPORT_MS`, waits its turn behind a
    * standing Undo like any other, and wears no id: the Done pill's id may by
@@ -5297,11 +5299,13 @@ export function MailSurface({
    * Done waits at a time: a second press lets the first go at once and
    * opens a window of its own.
    *
-   * **Before each thread is sent the queue asks what the lists hold now**
-   * (`watchDoneLists`). A thread that got new mail since the press is not
-   * sent: a provider's archive acts on every message the thread has when it
-   * is called, and the reply would be filed away, read, unseen. Its row
-   * comes back at once and the report counts it.
+   * **A reply that arrived since the press is not filed away unseen.** A
+   * provider's archive and read flag act on every message the thread has
+   * when they are called. The queue asks the lists first (`watchDoneLists`)
+   * and does not send a thread whose copy there has new mail; then it reads
+   * the server's answer to the archive, and to the read flag, and takes both
+   * back when that answer has a message the press did not see. Its row comes
+   * back at once and the report counts it.
    *
    * Each archive that answers marks its thread's hold as landed. The hold
    * itself stays until a list read of that account begun after the answer

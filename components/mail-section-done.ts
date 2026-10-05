@@ -153,13 +153,20 @@ export function settleDone(
   return { overlay: next ?? overlay, gone };
 }
 
-/** The two mutations a Done owes one thread, each its own request today. */
+/**
+ * The two mutations a Done owes one thread, each its own request today, and
+ * the two that take them back when the provider's answer shows new mail.
+ */
 export type DoneMutation =
-  | { readonly accountId: string; readonly threadId: string; readonly archive: true }
-  | { readonly accountId: string; readonly threadId: string; readonly read: true };
+  | { readonly accountId: string; readonly threadId: string; readonly archive: boolean }
+  | { readonly accountId: string; readonly threadId: string; readonly read: boolean };
 
-/** THE TRANSPORT. One mutation, one request. */
-export type DoneSend = (mutation: DoneMutation) => Promise<void>;
+/**
+ * THE TRANSPORT. One mutation, one request, answered with the thread as the
+ * provider reads it after applying the mutation. A transport with no answer
+ * to give says nothing about the thread, and the queue takes it at its word.
+ */
+export type DoneSend = (mutation: DoneMutation) => Promise<MailThreadListItem | void>;
 
 /**
  * What a failed mutation says about the rest of the run. `changed`: the
@@ -296,10 +303,18 @@ export function doneQueue(failureOf: (error: unknown) => DoneFailure): DoneQueue
      way. The provider's archive drops the INBOX label and touches nothing
      else, which is why the read flag is sent at all.
 
-     Before either, the lists are asked what they hold now. The press took a
-     snapshot, and a provider's archive acts on every message the thread has
-     when it is called: a reply that arrived inside the window would be filed
-     away, read, before anyone saw it. */
+     The press took a snapshot, and a provider's archive and read flag act on
+     every message the thread has when they are called: a reply that arrived
+     inside the window would be filed away, read, before anyone saw it. Three
+     checks stand in its way. The lists are asked what they hold now, before
+     anything is sent; they only know what the change feed has told them, so
+     this one saves a request and nothing more. The archive's answer, the
+     provider reading the thread after moving it, is compared with the press:
+     new mail there and the archive is taken back before any read flag goes.
+     The read flag's answer is compared with the archive's: a reply that
+     landed between the two was marked read with the rest, so both are taken
+     back. A reply after the read flag answered arrives unread, as new mail
+     does, and is no longer this run's to see. */
   const sendThread = async (run: QueuedRun, thread: MailThreadListItem): Promise<void> => {
     const now = run.hooks.current?.(thread);
     if (now !== undefined && gotNewMail(thread, now)) {
@@ -308,8 +323,9 @@ export function doneQueue(failureOf: (error: unknown) => DoneFailure): DoneQueue
       return;
     }
     const key = { accountId: thread.accountId, threadId: thread.threadId };
+    let archived: MailThreadListItem | void;
     try {
-      await run.hooks.send({ ...key, archive: true });
+      archived = await run.hooks.send({ ...key, archive: true });
     } catch (error) {
       const failure = failureOf(error);
       if (failure === "changed") {
@@ -320,15 +336,54 @@ export function doneQueue(failureOf: (error: unknown) => DoneFailure): DoneQueue
       run.stayed.push(thread);
       return;
     }
-    run.moved.push(thread);
+    if (archived && gotNewMail(thread, archived)) {
+      await takeBack(run, thread, [{ ...key, archive: false }]);
+      return;
+    }
     run.hooks.onArchived?.(thread);
-    if (!thread.unread) return;
+    if (!thread.unread) {
+      run.moved.push(thread);
+      return;
+    }
+    let read: MailThreadListItem | void;
     try {
-      await run.hooks.send({ ...key, read: true });
+      read = await run.hooks.send({ ...key, read: true });
     } catch (error) {
       // A server that went quiet between the two still closes the account.
       close(run, thread, failureOf(error));
+      run.moved.push(thread);
+      return;
     }
+    if (read && gotNewMail(archived || thread, read)) {
+      // The reply first: it is the one a reader would miss.
+      await takeBack(run, thread, [
+        { ...key, read: false },
+        { ...key, archive: false },
+      ]);
+      return;
+    }
+    run.moved.push(thread);
+  };
+
+  /* New mail reached a thread the run already acted on: these mutations
+     undo what was sent, and its row comes back. One that fails leaves the
+     thread out of the inbox, which is what `moved` says, and its new mail
+     arrives the way new mail does. */
+  const takeBack = async (
+    run: QueuedRun,
+    thread: MailThreadListItem,
+    undo: readonly DoneMutation[],
+  ): Promise<void> => {
+    try {
+      for (const mutation of undo) await run.hooks.send(mutation);
+    } catch (error) {
+      close(run, thread, failureOf(error));
+      run.moved.push(thread);
+      run.hooks.onArchived?.(thread);
+      return;
+    }
+    run.renewed.push(thread);
+    run.hooks.onRenewed?.(thread);
   };
 
   const drain = async (run: QueuedRun): Promise<DoneOutcome> => {

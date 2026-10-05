@@ -75,14 +75,28 @@ async function flush(rounds = 20) {
   for (let index = 0; index < rounds; index += 1) await Promise.resolve();
 }
 
-function recorder(answer: (mutation: DoneMutation) => Promise<void> | void = () => {}) {
+/** A transport that records every mutation. `answer` may throw, wait, or
+ *  return the thread as the server would after applying it. */
+function recorder(
+  answer: (
+    mutation: DoneMutation,
+  ) => Promise<MailThreadListItem | void> | MailThreadListItem | void = () => {},
+) {
   const sent: DoneMutation[] = [];
   const send = vi.fn(async (mutation: DoneMutation) => {
     sent.push(mutation);
-    await answer(mutation);
+    return await answer(mutation);
   });
   return { sent, send };
 }
+
+const said = (sent: readonly DoneMutation[]) =>
+  sent.map((mutation) => {
+    const { accountId: _account, threadId, ...rest } = mutation;
+    return `${threadId}:${Object.entries(rest)
+      .map(([field, value]) => `${field}=${String(value)}`)
+      .join(",")}`;
+  });
 
 describe("the Done overlay", () => {
   it("takes held threads out of an Inbox list and hands the same list back when it holds none", () => {
@@ -288,6 +302,89 @@ describe("the Done queue", () => {
     const outcome = await done;
     expect(sent.map((mutation) => mutation.threadId)).toEqual(["1"]);
     expect(ids(outcome.renewed)).toEqual(["2"]);
+  });
+
+  it("takes an archive back when the server's answer carries mail the press did not see", async () => {
+    // No list has heard of the reply: the reader is in another account, out
+    // of Mail, or the change feed has not caught up. The archive's own answer
+    // is the provider reading the thread after it moved it, and it has the
+    // reply in it.
+    const threads = [thread("1"), thread("2")];
+    const { sent, send } = recorder((mutation) =>
+      mutation.threadId === "1" && "archive" in mutation && mutation.archive
+        ? { ...threads[0]!, messageCount: 2, lastMessageAt: 9 }
+        : mutation.threadId === "2"
+          ? { ...threads[1]!, unread: "read" in mutation ? false : true }
+          : undefined,
+    );
+    const archived: string[] = [];
+    const renewed: string[] = [];
+    const outcome = await doneQueue(failureOf).commit(threads, {
+      send,
+      onArchived: (item) => archived.push(item.threadId),
+      onRenewed: (item) => renewed.push(item.threadId),
+    });
+    expect(said(sent)).toEqual([
+      "1:archive=true",
+      // Back to the Inbox, and no read flag over the reply.
+      "1:archive=false",
+      "2:archive=true",
+      "2:read=true",
+    ]);
+    expect(ids(outcome.renewed)).toEqual(["1"]);
+    expect(ids(outcome.moved)).toEqual(["2"]);
+    expect(renewed).toEqual(["1"]);
+    expect(archived).toEqual(["2"]);
+    expect(outcome.stayed).toEqual([]);
+  });
+
+  it("takes the read flag and the archive back when a reply lands between the two", async () => {
+    // The archive's answer is the press's thread. The read flag acts on the
+    // whole thread, the reply included, and its answer shows the reply.
+    const pressed = thread("1");
+    const { sent, send } = recorder((mutation) =>
+      "read" in mutation && mutation.read
+        ? { ...pressed, unread: false, messageCount: 2, lastMessageAt: 9 }
+        : pressed,
+    );
+    const renewed: string[] = [];
+    const outcome = await doneQueue(failureOf).commit([pressed], {
+      send,
+      onRenewed: (item) => renewed.push(item.threadId),
+    });
+    expect(said(sent)).toEqual([
+      "1:archive=true",
+      "1:read=true",
+      "1:read=false",
+      "1:archive=false",
+    ]);
+    expect(ids(outcome.renewed)).toEqual(["1"]);
+    expect(outcome.moved).toEqual([]);
+    expect(renewed).toEqual(["1"]);
+  });
+
+  it("counts a thread it could not take back as moved, and closes its account as any failure would", async () => {
+    // The archive went and the way back did not: the thread is out of the
+    // inbox, which is what `moved` says, and its new mail arrives as new
+    // mail does.
+    const threads = [thread("1", { unread: false }), thread("2", { unread: false })];
+    const { sent, send } = recorder((mutation) => {
+      if ("archive" in mutation && !mutation.archive) throw new Error("silent");
+      return { ...threads[0]!, messageCount: 2 };
+    });
+    const renewed: string[] = [];
+    const archived: string[] = [];
+    const outcome = await doneQueue(failureOf).commit(threads, {
+      send,
+      onArchived: (item) => archived.push(item.threadId),
+      onRenewed: (item) => renewed.push(item.threadId),
+    });
+    expect(said(sent)).toEqual(["1:archive=true", "1:archive=false"]);
+    expect(ids(outcome.moved)).toEqual(["1"]);
+    expect(archived).toEqual(["1"]);
+    expect(renewed).toEqual([]);
+    expect(ids(outcome.stayed)).toEqual(["2"]);
+    expect([...outcome.closed]).toEqual([[ACCOUNT_A, "silent"]]);
   });
 
   it("leaves a failed thread where it was, unread, and keeps going", async () => {

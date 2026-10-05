@@ -469,6 +469,34 @@ describe("defaultMailSurfaceClient system mailboxes", () => {
     );
   });
 
+  it("hands back the thread the server answers a mutation with", async () => {
+    // The service reads the thread again after it applied the mutation. That
+    // copy is the provider's word on what the thread holds now, and a
+    // section's Done compares it with what the reader saw at the press.
+    const answered = { ...thread, messageCount: 2, lastMessageAt: thread.lastMessageAt + 1 };
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockImplementation(() =>
+          Promise.resolve(response({ apiVersion: 1, thread: answered })),
+        ),
+    );
+
+    await expect(
+      defaultMailSurfaceClient.updateThread({
+        accountId: ACCOUNT_ID,
+        threadId: THREAD_ID,
+        archive: true,
+      }),
+    ).resolves.toMatchObject({
+      accountId: ACCOUNT_ID,
+      threadId: THREAD_ID,
+      messageCount: 2,
+      lastMessageAt: thread.lastMessageAt + 1,
+    });
+  });
+
   it("sends a thread mutation with keepalive when the page is unloading", async () => {
     // What a section's Done still owes the provider leaves with the page the
     // way a parked draft delete does: allowed to outlive the tab. An ordinary
@@ -1453,7 +1481,7 @@ describe("defaultMailSurfaceClient mutation deadline", () => {
           threadId: THREAD_ID,
           archive: false,
         }),
-      ).resolves.toBeUndefined();
+      ).resolves.toMatchObject({ threadId: THREAD_ID });
       // No timer is left armed behind a request that already answered.
       expect(vi.getTimerCount()).toBe(0);
     } finally {

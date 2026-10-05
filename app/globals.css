@@ -2707,7 +2707,13 @@ a.brain-share-url:active {
     bottom: calc(24px + env(safe-area-inset-bottom, 0px));
   }
 }
+/* A slot can hold a short column of pills (the shell's undos, newest first),
+   and each is shrink-to-fit on its own: a block-level pill would take the
+   width of the widest one beside it. */
 .brain-toast-slot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
   min-width: 0;
   max-width: 100%;
 }

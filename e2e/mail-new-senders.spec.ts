@@ -616,3 +616,171 @@ test("@mobile new senders frames on a phone", async ({ page }) => {
   await login(page);
   await shootAll(page, "phone");
 });
+
+/* Two undos at once. A Done pressed while a Block's Undo still stood used to
+   wait in the queue: the section left the column at the press and no pill
+   said so for up to nine seconds. Now the Done pill stands at once, on top of
+   the Block's, each with its own ring, its own window and its own Undo. */
+
+/** Blocks a stranger, then presses People's Done, and waits for both pills. */
+async function blockThenDone(page: Page) {
+  await page.getByRole("button", { name: "Block Growth Weekly" }).click();
+  const pills = page.locator('[aria-live="polite"] .brain-toast');
+  await expect(pills.filter({ hasText: "Blocked Growth Weekly" })).toBeVisible();
+  await page.getByRole("button", { name: /^Done — archive .* in People$/ }).click();
+  await expect(peopleGroup(page)).toHaveCount(0);
+  await expect(pills).toHaveCount(2);
+  // both springs settled — a pill measured mid-slide is measured in flight
+  await page.waitForTimeout(700);
+  return {
+    pills,
+    block: pills.filter({ hasText: "Blocked Growth Weekly" }),
+    done: pills.filter({ hasText: "People cleared" }),
+  };
+}
+
+async function pillBoxes(page: Page) {
+  return page.locator('[aria-live="polite"] .brain-toast').evaluateAll((nodes) =>
+    nodes.map((node) => {
+      const rect = node.getBoundingClientRect();
+      return {
+        text: node.textContent ?? "",
+        top: rect.top,
+        bottom: rect.bottom,
+        left: rect.left,
+        right: rect.right,
+        width: rect.width,
+      };
+    }),
+  );
+}
+
+test("@release a Done pressed while a Block's Undo stands shows on top of it, and each Undo takes back its own", async ({
+  page,
+}) => {
+  await login(page);
+  const world = await install(page);
+  await page.route("**/api/mail/threads/batch", (route) => {
+    const body = route.request().postDataJSON() as {
+      readonly threads: readonly { readonly threadId: string }[];
+    };
+    return fulfill(route, {
+      apiVersion: 1,
+      results: body.threads.map(({ threadId }) => {
+        const letter = LETTERS.find((candidate) => candidate.threadId === threadId)!;
+        return {
+          threadId,
+          status: "done",
+          thread: { ...world.item(letter), unread: false },
+          markedRead: true,
+        };
+      }),
+    });
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.goto("/mail");
+
+  const { block, done } = await blockThenDone(page);
+  await expect(block.locator("[data-toast-ring]")).toHaveCount(1);
+  await expect(done.locator("[data-toast-ring]")).toHaveCount(1);
+  await expect(done).toContainText("Undo");
+
+  // The newest stands on top, both on the column's 8, each its own width.
+  const [top, bottom] = await pillBoxes(page);
+  expect(top.text).toContain("People cleared");
+  expect(bottom.text).toContain("Blocked Growth Weekly");
+  expect(bottom.top - top.bottom).toBeGreaterThanOrEqual(7);
+  expect(bottom.top - top.bottom).toBeLessThanOrEqual(9);
+  expect(Math.abs((top.left + top.right) / 2 - (bottom.left + bottom.right) / 2)).toBeLessThan(1);
+  if (SHOTS) {
+    mkdirSync(SHOTS, { recursive: true });
+    await page.screenshot({ path: path.join(SHOTS, "toast-stack-desktop-light.png") });
+  }
+
+  // Done's Undo takes back Done only: People returns, the Block stands.
+  await done.getByRole("button", { name: "Undo" }).click();
+  await expect(peopleGroup(page)).toBeVisible();
+  await expect(done).toHaveCount(0);
+  await expect(block).toBeVisible();
+  expect(world.deleted).toEqual([]);
+
+  // Pressed again, with the pointer resting on the Block: hover holds the
+  // Block's window and only the Block's. Done's own window closes under it.
+  await page.getByRole("button", { name: /^Done — archive .* in People$/ }).click();
+  await expect(done).toBeVisible();
+  await block.hover();
+  await expect(done).toHaveCount(0, { timeout: 12_000 });
+  await expect(block).toBeVisible();
+
+  // And the Block's Undo takes back the Block.
+  await block.getByRole("button", { name: "Undo" }).click();
+  await expect(waitingGroup(page).getByText("Growth Weekly")).toBeVisible();
+  await expect.poll(() => world.deleted.length).toBe(1);
+});
+
+test("@release @mobile two undos stack inside 390 and clear the tab bar and the composer's Send", async ({
+  page,
+}) => {
+  await login(page);
+  await install(page);
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.goto("/mail");
+
+  await blockThenDone(page);
+  const [top, bottom] = await pillBoxes(page);
+  expect(top.text).toContain("People cleared");
+  expect(bottom.text).toContain("Blocked Growth Weekly");
+  expect(bottom.top - top.bottom).toBeGreaterThanOrEqual(7);
+  expect(bottom.top - top.bottom).toBeLessThanOrEqual(9);
+  for (const pill of [top, bottom]) {
+    expect(pill.left).toBeGreaterThanOrEqual(16 - 0.5);
+    expect(pill.right).toBeLessThanOrEqual(390 - 16 + 0.5);
+  }
+  const tabBar = await page.locator('nav[aria-label="Primary"]').boundingBox();
+  expect(tabBar).not.toBeNull();
+  expect(bottom.bottom).toBeLessThanOrEqual(tabBar!.y);
+  if (SHOTS) {
+    mkdirSync(SHOTS, { recursive: true });
+    await page.screenshot({ path: path.join(SHOTS, "toast-stack-phone-light.png") });
+  }
+
+  // The composer is the window on a phone and Send stands on top; the pills
+  // stand at the foot, over the sheet, and stay clear of its action row.
+  await page.getByRole("button", { name: "New message" }).click();
+  const send = page
+    .getByRole("dialog", { name: "New message" })
+    .getByRole("button", { name: "Send", exact: true });
+  await expect(send).toBeVisible();
+  const sendBox = await send.boundingBox();
+  const [over] = await pillBoxes(page);
+  expect(sendBox!.y + sendBox!.height).toBeLessThan(over.top);
+});
+
+/* TOAST_EXIT_SHOTS_DIR=<dir> shoots one pill leaving a stack of two, mid-exit:
+   the leaving pill should fade where it stood while the one under it stays.
+   A local review artifact, never committed. */
+const EXIT_SHOTS = process.env.TOAST_EXIT_SHOTS_DIR ?? "";
+
+async function shootStackExit(page: Page, device: string) {
+  await login(page);
+  await install(page);
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.goto("/mail");
+  const { done } = await blockThenDone(page);
+  await done.getByRole("button", { name: "Undo" }).click();
+  await page.waitForTimeout(20);
+  mkdirSync(EXIT_SHOTS, { recursive: true });
+  await page.screenshot({ path: path.join(EXIT_SHOTS, `toast-exit-stack-${device}-light.png`) });
+}
+
+test("a stacked pill's exit, mid-flight, on the desktop", async ({ page }) => {
+  test.skip(EXIT_SHOTS === "", "artifact capture — run with TOAST_EXIT_SHOTS_DIR=<dir>");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await shootStackExit(page, "desktop");
+});
+
+test("@mobile a stacked pill's exit, mid-flight, on a phone", async ({ page }) => {
+  test.skip(EXIT_SHOTS === "", "artifact capture — run with TOAST_EXIT_SHOTS_DIR=<dir>");
+  await shootStackExit(page, "phone");
+});

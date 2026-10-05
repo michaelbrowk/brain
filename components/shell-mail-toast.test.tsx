@@ -245,6 +245,275 @@ describe("shell toast channels, as mail uses them", () => {
     expect(pills().join(" | ")).toContain("People cleared");
   });
 
+  // TWO UNDOS AT ONCE. A Done pressed while a Block's Undo stood used to wait
+  // in the queue: its section left the column at the press and no pill said
+  // so for up to nine seconds. Now it stands at once, on top of the other.
+  describe("a second undo over a standing one", () => {
+    const pillOf = (title: string) =>
+      [...document.body.querySelectorAll<HTMLElement>(".brain-toast")].find((pill) =>
+        pill.textContent?.includes(title),
+      ) ?? null;
+    const undoOf = (title: string) =>
+      pillOf(title)?.querySelector<HTMLButtonElement>("button") ?? null;
+
+    it("a second Done stands on top of a Block pressed between them, and ⌘Z reaches it", async () => {
+      const firstExpired = vi.fn();
+      const secondUndo = vi.fn();
+      const blockUndo = vi.fn(() => true as const);
+      await say("Newsletters cleared", doneReport(() => {}, firstExpired));
+      await say("Blocked Lena Okafor", {
+        ...blockReport(() => Promise.resolve()),
+        onAction: blockUndo,
+      });
+      // What mail says on a second Done: the first's sentence again under the
+      // one id, without its Undo, then the second Done with one.
+      await say("Newsletters archived", { id: "mail-section-done", icon: "check-linear" });
+      await say("People cleared", doneReport(secondUndo));
+
+      expect(pills()).toHaveLength(2);
+      expect(pills()[0]).toContain("People cleared");
+      expect(pills()[1]).toContain("Blocked Lena Okafor");
+      expect(firstExpired).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true }));
+      });
+      expect(secondUndo).toHaveBeenCalledTimes(1);
+      expect(blockUndo).not.toHaveBeenCalled();
+    });
+
+    it("a second Done draws a ring of its own from its press", async () => {
+      await say("Newsletters cleared", doneReport(() => {}));
+      const firstRing = pillOf("Newsletters cleared")?.querySelector("[data-toast-ring]");
+      expect(firstRing).not.toBeNull();
+      await act(async () => {
+        vi.advanceTimersByTime(4_000);
+      });
+      await say("People cleared", doneReport(() => {}));
+      const secondRing = pillOf("People cleared")?.querySelector("[data-toast-ring]");
+      expect(secondRing).not.toBeNull();
+      // A new element: its drain animation starts at the press instead of
+      // carrying on from where the first Done's had got to.
+      expect(secondRing).not.toBe(firstRing);
+    });
+
+    it("shows Done at once, on top of the Block, each with its own ring", async () => {
+      await say("Blocked Lena Okafor", blockReport(() => Promise.resolve()));
+      const blockRing = pillOf("Blocked Lena Okafor")?.querySelector("[data-toast-ring]");
+      expect(blockRing).not.toBeNull();
+      await act(async () => {
+        vi.advanceTimersByTime(3_000);
+      });
+      await say("Newsletters cleared", doneReport(() => {}));
+
+      // Both up, the newest at the head of the column.
+      expect(pills()).toHaveLength(2);
+      expect(pills()[0]).toContain("Newsletters cleared");
+      expect(pills()[1]).toContain("Blocked Lena Okafor");
+      // Done's ring is its own, drawn from the press. The Block's is the same
+      // element it was, still counting from its own press.
+      expect(pillOf("Newsletters cleared")?.querySelector("[data-toast-ring]")).not.toBeNull();
+      expect(pillOf("Blocked Lena Okafor")?.querySelector("[data-toast-ring]")).toBe(blockRing);
+    });
+
+    it("lets each Undo undo only its own action", async () => {
+      const blockUndo = vi.fn(() => Promise.resolve());
+      const doneUndo = vi.fn();
+      await say("Blocked Lena Okafor", blockReport(blockUndo));
+      await say("Newsletters cleared", doneReport(doneUndo));
+
+      await act(async () => {
+        undoOf("Newsletters cleared")!.click();
+      });
+      expect(doneUndo).toHaveBeenCalledTimes(1);
+      expect(blockUndo).not.toHaveBeenCalled();
+      expect(pillOf("Newsletters cleared")).toBeNull();
+      expect(pillOf("Blocked Lena Okafor")).not.toBeNull();
+      expect(undoOf("Blocked Lena Okafor")?.textContent).toBe("Undo");
+      expect(undoOf("Blocked Lena Okafor")?.disabled).toBe(false);
+    });
+
+    it("keeps one pill's open action off the other", async () => {
+      let settle: () => void = () => {};
+      const settled = new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+      const doneUndo = vi.fn();
+      await say("Blocked Lena Okafor", blockReport(() => settled));
+      await say("Newsletters cleared", doneReport(doneUndo));
+      await act(async () => {
+        undoOf("Blocked Lena Okafor")!.click();
+      });
+      expect(undoOf("Blocked Lena Okafor")?.textContent).toBe("Undoing…");
+      // The Done beside it is still reachable while the Block's request is out.
+      expect(undoOf("Newsletters cleared")?.disabled).toBe(false);
+      await act(async () => {
+        undoOf("Newsletters cleared")!.click();
+      });
+      expect(doneUndo).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        settle();
+        await settled;
+      });
+      expect(pills()).toEqual([]);
+    });
+
+    it("⌘Z undoes the newest one, then the one under it", async () => {
+      const blockUndo = vi.fn(() => true as const);
+      const doneUndo = vi.fn(() => true as const);
+      await say("Blocked Lena Okafor", {
+        ...blockReport(() => Promise.resolve()),
+        onAction: blockUndo,
+      });
+      await say("Newsletters cleared", doneReport(doneUndo));
+
+      const commandZ = () =>
+        act(async () => {
+          window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true }));
+        });
+      await commandZ();
+      expect(doneUndo).toHaveBeenCalledTimes(1);
+      expect(blockUndo).not.toHaveBeenCalled();
+      expect(pillOf("Blocked Lena Okafor")).not.toBeNull();
+      await commandZ();
+      expect(blockUndo).toHaveBeenCalledTimes(1);
+      expect(pills()).toEqual([]);
+    });
+
+    it("⌘Z while the newest pill's undo is going out is swallowed, and reaches nothing under it", async () => {
+      let settle: () => void = () => {};
+      const settled = new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+      const doneUndo = vi.fn();
+      const blockUndo = vi.fn(() => settled);
+      await say("Newsletters cleared", doneReport(doneUndo));
+      await say("Blocked Lena Okafor", blockReport(blockUndo));
+      await act(async () => {
+        undoOf("Blocked Lena Okafor")!.click();
+      });
+      const event = new KeyboardEvent("keydown", { key: "z", metaKey: true, cancelable: true });
+      await act(async () => {
+        window.dispatchEvent(event);
+      });
+      // A second ⌘Z inside the moment the first is going out is the same
+      // gesture twice, not a request for the undo under it.
+      expect(event.defaultPrevented).toBe(true);
+      expect(blockUndo).toHaveBeenCalledTimes(1);
+      expect(doneUndo).not.toHaveBeenCalled();
+      await act(async () => {
+        settle();
+        await settled;
+      });
+    });
+
+    it("⌘Z held down undoes once, not once per key repeat", async () => {
+      const blockUndo = vi.fn(() => true as const);
+      const doneUndo = vi.fn(() => true as const);
+      await say("Blocked Lena Okafor", { ...blockReport(() => Promise.resolve()), onAction: blockUndo });
+      await say("Newsletters cleared", doneReport(doneUndo));
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true }));
+      });
+      for (let i = 0; i < 3; i += 1) {
+        await act(async () => {
+          window.dispatchEvent(
+            new KeyboardEvent("keydown", { key: "z", metaKey: true, repeat: true }),
+          );
+        });
+      }
+      expect(doneUndo).toHaveBeenCalledTimes(1);
+      expect(blockUndo).not.toHaveBeenCalled();
+      expect(pillOf("Blocked Lena Okafor")).not.toBeNull();
+    });
+
+    it("commits Done at the end of ITS window, not the Block's", async () => {
+      const blockExpired = vi.fn();
+      const doneExpired = vi.fn();
+      await say("Blocked Lena Okafor", {
+        ...blockReport(() => Promise.resolve()),
+        onExpire: blockExpired,
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(3_000);
+      });
+      await say("Newsletters cleared", doneReport(() => {}, doneExpired));
+
+      // The Block's window closes first, and only the Block's.
+      await act(async () => {
+        vi.advanceTimersByTime(SMART_UNDO_MS - 3_000);
+      });
+      expect(blockExpired).toHaveBeenCalledTimes(1);
+      expect(doneExpired).not.toHaveBeenCalled();
+      expect(pills()).toHaveLength(1);
+      expect(pills()[0]).toContain("Newsletters cleared");
+
+      // Done's own nine seconds, counted from its press.
+      await act(async () => {
+        vi.advanceTimersByTime(2_999);
+      });
+      expect(doneExpired).not.toHaveBeenCalled();
+      await act(async () => {
+        vi.advanceTimersByTime(2);
+      });
+      expect(doneExpired).toHaveBeenCalledTimes(1);
+      expect(pills()).toEqual([]);
+    });
+
+    it("commits the oldest when a fourth undo arrives", async () => {
+      const expired = [vi.fn(), vi.fn(), vi.fn(), vi.fn()];
+      for (const [index, onExpire] of expired.entries()) {
+        await say(`Undo ${index + 1}`, {
+          icon: "check-linear",
+          actionLabel: "Undo",
+          onAction: () => {},
+          onExpire,
+          durationMs: SMART_UNDO_MS,
+          id: `undo-${index + 1}`,
+        });
+      }
+      expect(pills()).toHaveLength(3);
+      expect(pillOf("Undo 1")).toBeNull();
+      expect(expired[0]).toHaveBeenCalledTimes(1);
+      expect(expired.slice(1).every((each) => each.mock.calls.length === 0)).toBe(true);
+      expect(pills()[0]).toContain("Undo 4");
+    });
+
+    it("a waiting report of Done's id never plays after the Done that said it again", async () => {
+      await say("Blocked Lena Okafor", blockReport(() => Promise.resolve()));
+      await say("Newsletters archived", { id: "mail-section-done", durationMs: 5_000 });
+      await say("People cleared", doneReport(() => {}));
+      await act(async () => {
+        vi.advanceTimersByTime(SMART_UNDO_MS + 1);
+      });
+      expect(pills()).toEqual([]);
+      await act(async () => {
+        vi.advanceTimersByTime(10_000);
+      });
+      expect(pillOf("Newsletters archived")).toBeNull();
+    });
+
+    it("a report still waits until the last undo has gone", async () => {
+      await say("Blocked Lena Okafor", blockReport(() => Promise.resolve()));
+      await act(async () => {
+        vi.advanceTimersByTime(3_000);
+      });
+      await say("Newsletters cleared", doneReport(() => {}));
+      await say("People partly cleared", { durationMs: 5_000 });
+      expect(pillOf("People partly cleared")).toBeNull();
+
+      await act(async () => {
+        vi.advanceTimersByTime(SMART_UNDO_MS - 3_000);
+      });
+      // One undo is still up: the report keeps waiting.
+      expect(pillOf("People partly cleared")).toBeNull();
+      await act(async () => {
+        vi.advanceTimersByTime(3_000);
+      });
+      expect(pills()).toHaveLength(1);
+      expect(pills()[0]).toContain("People partly cleared");
+    });
+  });
+
   it("a pill with no window stands, and takes a ring only when it is said again with one", async () => {
     // A sentence said at the gesture, before the server has answered, the
     // way a task's completion is: there is no deadline to name yet, so it
@@ -551,6 +820,65 @@ describe("shell toast channels, as mail uses them", () => {
       expect(pills().join(" | ")).not.toContain("Draft discarded");
     });
 
+    it("fires once the column has let the pill go, so what it says lands on its own", async () => {
+      // A Done's flush says its sentence again under the one id the moment
+      // the window closes. Told before the column let the expired pill go,
+      // that sentence would take the expired pill's place and owe its
+      // `onExpire` a second time.
+      const onExpire = vi.fn(() => {
+        if (!mailToast) throw new Error("the mail surface never got onToast");
+        mailToast("Newsletters archived", { id: "mail-section-done", icon: "check-linear" });
+      });
+      await say("Newsletters cleared", doneReport(() => {}, onExpire));
+      await act(async () => {
+        vi.advanceTimersByTime(SMART_UNDO_MS + 1);
+      });
+      expect(onExpire).toHaveBeenCalledTimes(1);
+      expect(pills()).toHaveLength(1);
+      expect(pills()[0]).toContain("Newsletters archived");
+    });
+
+    it("an action that throws leaves the pill live, with its window and its onExpire", async () => {
+      const onExpire = vi.fn();
+      const thrown: unknown[] = [];
+      const swallow = (event: ErrorEvent) => {
+        thrown.push(event.error);
+        event.preventDefault();
+      };
+      window.addEventListener("error", swallow);
+      try {
+        await say(
+          "Draft discarded",
+          discardReport(onExpire, () => {
+            throw new Error("undo broke");
+          }),
+        );
+        await act(async () => {
+          vi.advanceTimersByTime(3_000);
+        });
+        await act(async () => {
+          document.body.querySelector<HTMLButtonElement>(".brain-toast button")!.click();
+        });
+        // The error is not swallowed: it reaches the page like any other.
+        expect(thrown.map(String)).toEqual(["Error: undo broke"]);
+        const button = document.body.querySelector<HTMLButtonElement>(".brain-toast button");
+        expect(button?.textContent).toBe("Undo");
+        expect(button?.disabled).toBe(false);
+        await act(async () => {
+          vi.advanceTimersByTime(5_999);
+        });
+        expect(onExpire).not.toHaveBeenCalled();
+        expect(pills().join(" | ")).toContain("Draft discarded");
+        await act(async () => {
+          vi.advanceTimersByTime(2);
+        });
+        expect(onExpire).toHaveBeenCalledTimes(1);
+        expect(pills().join(" | ")).not.toContain("Draft discarded");
+      } finally {
+        window.removeEventListener("error", swallow);
+      }
+    });
+
     it("never fires when the action spent the pill", async () => {
       const onExpire = vi.fn();
       const undo = vi.fn();
@@ -628,10 +956,11 @@ describe("shell toast channels, as mail uses them", () => {
       expect(pills().join(" | ")).not.toContain("Draft discarded");
     });
 
-    it("still fires when the window runs out while the action is pending", async () => {
-      // A pending action hands the spend back until it settles. The window
-      // that runs out meanwhile takes the pill unspent and says so, and the
-      // late settle takes nothing down and owes nothing a second time.
+    it("never fires when the window runs out while the action is pending", async () => {
+      // An action under way is the way back being taken. Its window running
+      // out meanwhile is not the way back being lost: `onExpire` after
+      // `onAction` would flush the delete the Undo is bringing back. The pill
+      // stands, saying what it is doing, until the action settles.
       const onExpire = vi.fn();
       let settle: () => void = () => {};
       const undo = vi.fn(
@@ -650,14 +979,98 @@ describe("shell toast channels, as mail uses them", () => {
       await act(async () => {
         vi.advanceTimersByTime(9_001);
       });
-      expect(onExpire).toHaveBeenCalledTimes(1);
-      expect(pills().join(" | ")).not.toContain("Draft discarded");
+      expect(onExpire).not.toHaveBeenCalled();
+      expect(pills().join(" | ")).toContain("Draft discarded");
       await act(async () => {
         settle();
         await Promise.resolve();
         await Promise.resolve();
       });
-      expect(onExpire).toHaveBeenCalledTimes(1);
+      expect(pills().join(" | ")).not.toContain("Draft discarded");
+      expect(onExpire).not.toHaveBeenCalled();
+    });
+
+    it("never fires for a pending pill a same-id message takes", async () => {
+      const onExpire = vi.fn();
+      let settle: () => void = () => {};
+      const settled = new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+      await say("Blocked Lena Okafor", { ...blockReport(() => settled), onExpire });
+      await say("Newsletters cleared", doneReport(() => {}));
+      await act(async () => {
+        [...document.body.querySelectorAll<HTMLElement>(".brain-toast")]
+          .find((pill) => pill.textContent?.includes("Blocked Lena Okafor"))!
+          .querySelector<HTMLButtonElement>("button")!
+          .click();
+      });
+      await say("Blocked Lena Okafor again", blockReport(() => Promise.resolve()));
+      expect(onExpire).not.toHaveBeenCalled();
+      await act(async () => {
+        settle();
+        await settled;
+      });
+      // The settle takes down the pill it spent, which is already gone, and
+      // nothing else.
+      expect(pills().join(" | ")).toContain("Blocked Lena Okafor again");
+      expect(onExpire).not.toHaveBeenCalled();
+    });
+
+    it("a fourth undo commits the oldest settled pill, never the one whose action is out", async () => {
+      let settle: () => void = () => {};
+      const settled = new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+      const firstExpired = vi.fn();
+      const secondExpired = vi.fn();
+      await say("U1", { ...blockReport(() => settled), onExpire: firstExpired, id: "u1" });
+      await act(async () => {
+        document.body.querySelector<HTMLButtonElement>(".brain-toast button")!.click();
+      });
+      await say("U2", { ...doneReport(() => {}, secondExpired), id: "u2" });
+      await say("U3", { ...doneReport(() => {}), id: "u3" });
+      await say("U4", { ...doneReport(() => {}), id: "u4" });
+      expect(firstExpired).not.toHaveBeenCalled();
+      expect(secondExpired).toHaveBeenCalledTimes(1);
+      expect(pills().map((pill) => pill.slice(0, 2))).toEqual(["U4", "U3", "U1"]);
+      await act(async () => {
+        settle();
+        await settled;
+      });
+      expect(firstExpired).not.toHaveBeenCalled();
+    });
+
+    it("a fourth undo waits while all three standing are settling, and enters when one has", async () => {
+      const settles: Array<() => void> = [];
+      const promises = [0, 1, 2].map(
+        () =>
+          new Promise<void>((resolve) => {
+            settles.push(resolve);
+          }),
+      );
+      const expired = [vi.fn(), vi.fn(), vi.fn()];
+      for (const index of [0, 1, 2]) {
+        await say(`P${index + 1}`, {
+          ...blockReport(() => promises[index]),
+          onExpire: expired[index],
+          id: `p${index + 1}`,
+        });
+        await act(async () => {
+          [...document.body.querySelectorAll<HTMLElement>(".brain-toast")]
+            .find((pill) => pill.textContent?.startsWith(`P${index + 1}`))!
+            .querySelector<HTMLButtonElement>("button")!
+            .click();
+        });
+      }
+      await say("P4", { ...doneReport(() => {}), id: "p4" });
+      expect(pills()).toHaveLength(3);
+      expect(pills().join(" | ")).not.toContain("P4");
+      await act(async () => {
+        settles[1]();
+        await promises[1];
+      });
+      expect(pills().map((pill) => pill.slice(0, 2))).toEqual(["P4", "P3", "P1"]);
+      expect(expired.every((each) => each.mock.calls.length === 0)).toBe(true);
     });
   });
 });

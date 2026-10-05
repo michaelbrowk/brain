@@ -24,6 +24,8 @@
 // note is open in a browser, and the browser then saves the body it loaded,
 // which still carries the unticked line. Letting the stream through would have
 // the tab reload before it ever wrote, and the merge would never be reached.
+import { mkdirSync } from "node:fs";
+import path from "node:path";
 import { expect, test, type Browser, type Page } from "playwright/test";
 
 import { parseTaskLines } from "../lib/tasks/task-lines";
@@ -688,4 +690,32 @@ test("@release @mobile a touch scroll over the list leaves the expanded row stan
   // And a tap that stays where it landed still folds it.
   await page.touchscreen.tap(195, 700);
   await expect(capsule).toHaveCount(0);
+});
+
+/* TOAST_EXIT_SHOTS_DIR=<dir> shoots a lone task undo leaving, mid-exit. A
+   local review artifact, never committed. */
+const EXIT_SHOTS = process.env.TOAST_EXIT_SHOTS_DIR ?? "";
+
+async function shootTaskUndoExit(page: Page, device: string) {
+  test.setTimeout(60_000);
+  await login(page);
+  await page.emulateMedia({ colorScheme: "light" });
+  const id = await createTask(page, "Water the plants");
+  await completeFromTasks(page, "Water the plants", id);
+  const pill = page.locator('[aria-live="polite"] .brain-toast');
+  await pill.getByRole("button", { name: "Undo" }).click();
+  await page.waitForTimeout(70);
+  mkdirSync(EXIT_SHOTS, { recursive: true });
+  await page.screenshot({ path: path.join(EXIT_SHOTS, `toast-exit-task-${device}-light.png`) });
+}
+
+test("a task undo's exit, mid-flight, on the desktop", async ({ page }) => {
+  test.skip(EXIT_SHOTS === "", "artifact capture — run with TOAST_EXIT_SHOTS_DIR=<dir>");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await shootTaskUndoExit(page, "desktop");
+});
+
+test("@mobile a task undo's exit, mid-flight, on a phone", async ({ page }) => {
+  test.skip(EXIT_SHOTS === "", "artifact capture — run with TOAST_EXIT_SHOTS_DIR=<dir>");
+  await shootTaskUndoExit(page, "phone");
 });

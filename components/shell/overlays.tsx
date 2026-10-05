@@ -3,8 +3,8 @@
 // Everything that floats over the shell: the shortcuts / page-ref remove /
 // rename / move dialogs, the Smart Sort preview, trash, history, and
 // the seven snackbars (refusal, smart-sort undo, page-ref undo, save
-// conflict, save error, toast, delete undo) — one bottom column with the
-// refusal at its head. Settings is not an overlay any more — it is a canvas
+// conflict, save error, the toasts, delete undo) — one bottom column with
+// the refusal at its head. Settings is not an overlay any more — it is a canvas
 // surface at /settings/[section]. Presentational — every piece of
 // state and every handler comes from <Shell> as a prop; the dialog session
 // setters are passed through so the owner-keyed open / focus-return
@@ -17,7 +17,7 @@ import type {
   SetStateAction,
 } from "react";
 import type { TreeNode } from "@/lib/store/types";
-import { Snackbar, SnackbarStack } from "../ui/primitives";
+import { Snackbar, SnackbarPill, SnackbarSlot, SnackbarStack } from "../ui/primitives";
 import type { DialogFocusLeaseRef } from "../ui/dialog-focus-return";
 import { SmartSortPreview } from "../smart-sort-preview";
 import { TrashDialog } from "../trash-dialog";
@@ -35,6 +35,7 @@ import {
   type PageRefUndo,
   type SaveState,
   type ShellToast,
+  type ShellToastPill,
 } from "./helpers";
 
 type SmartSortPreviewProps = ComponentProps<typeof SmartSortPreview>;
@@ -81,22 +82,23 @@ export interface ShellOverlaysProps {
   recoveryMessage: { id: string; text: string } | null;
   recoveryCopyId: string | null;
   onSaveConflictCopy: () => Promise<void>;
-  toast: ShellToast | null;
-  /** The standing toast's action has begun and has not settled: the button
-   *  is out of reach and wears the message's `pendingLabel` until it does. */
-  toastActionPending: boolean;
+  /** The general-purpose pills standing, oldest first. A pill whose action
+   *  has begun and not settled is `pending`: its button is out of reach and
+   *  wears the message's `pendingLabel` until it does. */
+  toasts: readonly ShellToastPill[];
   /** The refusal channel: one sentence answering a gesture, on its own pill
    *  above whatever is standing, so it never has to wait for an undo's window
    *  to close before it can be said. */
   urgentToast: string | null;
-  /** Runs the toast's own action and dismisses it in the same beat, so an
+  /** Runs that pill's own action and dismisses it in the same beat, so an
    *  undo cannot be pressed twice while its restore is still running — unless
    *  the action refuses (`false`), which leaves the message standing, or
    *  answers with a promise, which holds the pill until it settles. */
-  onToastAction: (action: () => boolean | void | Promise<unknown>) => void;
-  /** Hover holds the message: the drain ring and its timer stop together. */
-  onPauseToast: () => void;
-  onResumeToast: () => void;
+  onToastAction: (toast: ShellToast) => void;
+  /** Hover holds the hovered message only: its drain ring and its timer stop
+   *  together, and the pills beside it go on counting. */
+  onPauseToast: (toast: ShellToast) => void;
+  onResumeToast: (toast: ShellToast) => void;
   countdown: number;
   onUndoDelete: () => Promise<void>;
   onPauseDelete: () => void;
@@ -143,8 +145,7 @@ export function ShellOverlays({
   recoveryMessage,
   recoveryCopyId,
   onSaveConflictCopy,
-  toast,
-  toastActionPending,
+  toasts,
   urgentToast,
   onToastAction,
   onPauseToast,
@@ -154,18 +155,14 @@ export function ShellOverlays({
   onPauseDelete,
   onResumeDelete,
 }: ShellOverlaysProps) {
-  const toastAction = toast?.onAction;
-  /* The drain ring is drawn only for a message with a window AND something to
-     reach for, and hover has to hold exactly what the ring shows — so one
-     value decides both. A `durationMs` of null is a message with no window at
-     all: no ring, and no hover pause, because there is nothing to hold. */
-  const toastRing =
-    toast?.durationMs != null && toast.actionLabel
-      ? toast.durationMs / 1000
-      : undefined;
-  /* Every other pill on this surface is mutually exclusive with the rest —
-     the refusal is the one that may stand beside one, so it is the one that
-     steps up out of the way. */
+  const toastsShown =
+    !pendingDelete &&
+    save !== "conflict" &&
+    !(save === "error" && localRecoveryUnavailable);
+  /* The page's own pills are mutually exclusive with one another. What may
+     stand beside them is the refusal, at the head of the column, and the
+     general toasts, which keep up to three undos of their own one above the
+     other. */
   return (
     <>
       <ShortcutsDialog open={shortcutsOpen} onOpenChange={onShortcutsOpenChange} />
@@ -366,32 +363,41 @@ export function ShellOverlays({
           title="Couldn't save"
           subtitle={LOCAL_RECOVERY_UNAVAILABLE}
         />
-        {/* The general-purpose toast. Most of what reaches it is a sentence and
-            nothing else; a caller that MOVED something passes the way back with
-            it, and only then does the pill grow an action and a drain ring. */}
-        <Snackbar
-          open={
-            !!toast &&
-            !pendingDelete &&
-            save !== "conflict" &&
-            !(save === "error" && localRecoveryUnavailable)
-          }
-          icon={toast?.icon}
-          title={toast?.title ?? ""}
-          subtitle={toast?.subtitle}
-          actionLabel={
-            toastActionPending
-              ? (toast?.pendingLabel ?? toast?.actionLabel)
-              : toast?.actionLabel
-          }
-          actionDisabled={toastActionPending}
-          onAction={
-            toastAction ? () => onToastAction(toastAction) : undefined
-          }
-          durationSec={toastRing}
-          onHoverStart={toastRing != null ? onPauseToast : undefined}
-          onHoverEnd={toastRing != null ? onResumeToast : undefined}
-        />
+        {/* The general-purpose toasts. Most of what reaches them is a sentence
+            and nothing else; a caller that MOVED something passes the way back
+            with it, and only then does the pill grow an action and a drain
+            ring. Up to three undos stand here at once, the newest at the head,
+            each on its own window. */}
+        <SnackbarSlot atomic={false}>
+          {toastsShown &&
+            [...toasts].reverse().map(({ key, toast, pending }) => {
+              /* The drain ring is drawn only for a message with a window AND
+                 something to reach for, and hover has to hold exactly what the
+                 ring shows — so one value decides both. A `durationMs` of null
+                 is a message with no window at all: no ring, and no hover
+                 pause, because there is nothing to hold. */
+              const ring =
+                toast.durationMs != null && toast.actionLabel
+                  ? toast.durationMs / 1000
+                  : undefined;
+              return (
+                <SnackbarPill
+                  key={key}
+                  icon={toast.icon}
+                  title={toast.title}
+                  subtitle={toast.subtitle}
+                  actionLabel={
+                    pending ? (toast.pendingLabel ?? toast.actionLabel) : toast.actionLabel
+                  }
+                  actionDisabled={pending}
+                  onAction={toast.onAction ? () => onToastAction(toast) : undefined}
+                  durationSec={ring}
+                  onHoverStart={ring != null ? () => onPauseToast(toast) : undefined}
+                  onHoverEnd={ring != null ? () => onResumeToast(toast) : undefined}
+                />
+              );
+            })}
+        </SnackbarSlot>
         <Snackbar
           open={!!pendingDelete}
           icon="trash-bin-trash-linear"

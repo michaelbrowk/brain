@@ -25,6 +25,8 @@ import type {
 } from "../../service/message-cache";
 import {
   MailProviderSyncError,
+  type MailProviderBatchOutcome,
+  type MailProviderBatchThread,
   type MailProviderIncrementalPage,
   type MailProviderInitialPage,
   type MailProviderSyncPort,
@@ -151,6 +153,20 @@ interface ThreadLocation {
   readonly path: string;
   readonly uidValidity: bigint;
   readonly uid: number;
+}
+
+/** A batch's MOVE the server answered, and what it was asked to move. */
+interface LandedMove {
+  readonly present: readonly {
+    readonly threadId: string;
+    readonly read: boolean;
+    readonly location: ThreadLocation;
+    readonly message: FetchMessageObject;
+  }[];
+  readonly result: { readonly uidValidity?: bigint; readonly uidMap?: Map<number, number> };
+  readonly markedRead: boolean;
+  readonly unseen: ReadonlySet<number>;
+  readonly target: string;
 }
 
 interface ImapAnchor {
@@ -515,6 +531,205 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
     signal: AbortSignal,
   ): Promise<void> {
     await this.moveThread(threadId, spam ? "junk" : "inbox", signal);
+  }
+
+  /**
+   * A section's Done on one session: one login where the per-thread path
+   * spends two a thread. The Inbox is opened once, the messages read once,
+   * `\Seen` stored on the unread ones in one `UID STORE`, and all of them
+   * moved in one `UID MOVE` to the archive the single archive would use,
+   * found and refused by the same rules. One IMAP message is one thread, so
+   * no thread can get new mail between the flag and the move.
+   *
+   * The flag goes first because the move changes every UID. A move the
+   * server refuses, or a session that dies under it, takes the flag back as
+   * well as it can: the refusal leaves the mail where it was, unread.
+   *
+   * Only threads this adapter has not moved are taken, the ones still at the
+   * Inbox UID their id encodes; the rest go the per-thread way. With UIDPLUS
+   * a message `COPYUID` does not name did not move and is stale. Without it
+   * every message is looked for in the archive by Message-ID, as a single
+   * archive does, and one that cannot be found is reported where it went
+   * with no handle for an undo.
+   */
+  async archiveThreads(
+    input: {
+      readonly threads: readonly MailProviderBatchThread[];
+      readonly cursor: string | null;
+    },
+    signal: AbortSignal,
+  ): Promise<ReadonlyMap<string, MailProviderBatchOutcome>> {
+    const outcomes = new Map<string, MailProviderBatchOutcome>();
+    const inbox = input.threads.flatMap((thread) =>
+      SAFE_MESSAGE_ID.test(thread.threadId) && !this.relocations.has(thread.threadId)
+        ? [{ threadId: thread.threadId, read: thread.read, location: this.locate(thread.threadId) }]
+        : [],
+    );
+    let landedMove: LandedMove | null = null;
+    if (inbox.length === 0) return outcomes;
+    if (this.roleRefusedFromCache("archive")) {
+      throw new MailProviderSyncError(
+        "mail_provider_mutation_unsupported",
+        null,
+        "role_refused_cached",
+      );
+    }
+    const session = async (client: ImapSessionClient): Promise<void> => {
+      const target = await this.rolePath(client, "archive");
+      assertMoveSupported(client);
+      const moved = await withMailbox(client, INBOX_PATH, false, async (mailbox) => {
+        const uidValidity = validateUidValidity(mailbox.uidValidity);
+        const live = inbox.filter((thread) => {
+          if (thread.location.uidValidity === uidValidity) return true;
+          outcomes.set(thread.threadId, { status: "stale" });
+          return false;
+        });
+        if (live.length === 0) return null;
+        const fetched = await client.fetchAll(
+          live.map((thread) => thread.location.uid),
+          metadataFetchQuery(),
+          { uid: true },
+        );
+        const byUid = new Map(fetched.map((message) => [message.uid, message]));
+        const present = live.flatMap((thread) => {
+          const message = byUid.get(thread.location.uid);
+          if (message === undefined) {
+            outcomes.set(thread.threadId, { status: "stale" });
+            return [];
+          }
+          return [{ ...thread, message }];
+        });
+        if (present.length === 0) return null;
+        // Only a thread unread at the press, and still unseen, is flagged.
+        const unseen = present
+          .filter((entry) => entry.read && !(entry.message.flags?.has("\\Seen") ?? false))
+          .map((entry) => entry.location.uid);
+        let markedRead = false;
+        if (unseen.length > 0) {
+          try {
+            assertFlagStorable(mailbox, "\\Seen", true);
+            markedRead = (await client.messageFlagsAdd(unseen, ["\\Seen"], { uid: true })) === true;
+          } catch (error) {
+            // A mailbox that will not keep the flag still archives.
+            if (!(error instanceof MailProviderSyncError)) throw mapImapProviderError(error);
+          }
+        }
+        const takeFlagBack = async () => {
+          if (!markedRead) return;
+          await client
+            .messageFlagsRemove(unseen, ["\\Seen"], { uid: true })
+            .catch(() => undefined);
+        };
+        let result: Awaited<ReturnType<ImapSessionClient["messageMove"]>>;
+        try {
+          result = await client.messageMove(
+            present.map((entry) => entry.location.uid),
+            target,
+            { uid: true },
+          );
+        } catch (error) {
+          this.mailboxRoles = null;
+          await takeFlagBack();
+          throw mapImapProviderError(error);
+        }
+        if (result === false || result === null || result === undefined) {
+          // The same refusal as a single archive's NO: nothing moved.
+          this.mailboxRoles = null;
+          await takeFlagBack();
+          throw new MailProviderSyncError(
+            "mail_provider_mutation_unsupported",
+            null,
+            "move_answered_no",
+          );
+        }
+        landedMove = Object.freeze({
+          present,
+          result,
+          markedRead,
+          unseen: new Set(unseen),
+          target,
+        });
+        return landedMove;
+      });
+      if (moved === null) return;
+      for (const entry of moved.present) {
+        if (moved.result.uidMap !== undefined && !moved.result.uidMap.has(entry.location.uid)) {
+          // UIDPLUS answered for the move and did not name this one: it was
+          // gone before the MOVE reached it.
+          outcomes.set(entry.threadId, { status: "stale" });
+          continue;
+        }
+        let landed: ThreadLocation | null;
+        try {
+          landed = await this.locateMoved(
+            client,
+            target,
+            entry.location,
+            moved.result,
+            entry.message,
+          );
+        } catch {
+          landed = null;
+        }
+        outcomes.set(entry.threadId, this.movedOutcome(moved, entry, landed));
+      }
+    };
+    try {
+      await this.run(signal, session);
+    } catch (error) {
+      // The MOVE answered, so the mail is in the archive whatever failed
+      // after it: a socket closed under a Message-ID search or the logout, a
+      // deadline that ended the session on its way out. Reporting those
+      // threads failed would put rows back in the column over mail that left
+      // the Inbox. They answer done, with the handle COPYUID gave when it
+      // gave one.
+      if (landedMove === null) throw error;
+      const moved: LandedMove = landedMove;
+      for (const entry of moved.present) {
+        if (outcomes.has(entry.threadId)) continue;
+        const mapped = moved.result.uidMap?.get(entry.location.uid);
+        if (moved.result.uidMap !== undefined && mapped === undefined) {
+          outcomes.set(entry.threadId, { status: "stale" });
+          continue;
+        }
+        const landed =
+          mapped !== undefined && moved.result.uidValidity !== undefined
+            ? Object.freeze({
+                path: moved.target,
+                uidValidity: validateUidValidity(moved.result.uidValidity),
+                uid: validateUid(mapped),
+              })
+            : null;
+        outcomes.set(entry.threadId, this.movedOutcome(moved, entry, landed));
+      }
+    }
+    return outcomes;
+  }
+
+  /** One moved message's answer, and its handle remembered when it has one. */
+  private movedOutcome(
+    moved: LandedMove,
+    entry: LandedMove["present"][number],
+    landed: ThreadLocation | null,
+  ): MailProviderBatchOutcome {
+    const flagged = moved.markedRead && moved.unseen.has(entry.location.uid);
+    const message = flagged
+      ? { ...entry.message, flags: new Set([...(entry.message.flags ?? []), "\\Seen"]) }
+      : entry.message;
+    if (landed === null) {
+      this.relocations.delete(entry.threadId);
+      return {
+        status: "done",
+        thread: this.projectAt(entry.threadId, moved.target, message, null),
+        markedRead: flagged,
+      };
+    }
+    this.remember(entry.threadId, landed);
+    return {
+      status: "done",
+      thread: this.project(entry.threadId, landed, message),
+      markedRead: flagged,
+    };
   }
 
   /**

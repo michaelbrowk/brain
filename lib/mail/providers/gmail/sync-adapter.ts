@@ -12,11 +12,13 @@ import type {
 } from "../../service/message-cache";
 import {
   MailProviderSyncError,
+  type MailProviderBatchOutcome,
+  type MailProviderBatchThread,
   type MailProviderIncrementalPage,
   type MailProviderInitialPage,
   type MailProviderSyncPort,
 } from "../../service/message-service";
-import { GmailApiClient } from "./api-client";
+import { GMAIL_BATCH_MODIFY_IDS, GmailApiClient } from "./api-client";
 import { GmailApiError, type GmailMessage, type GmailMessagePart, type GmailThread } from "./api-types";
 
 const MAX_TEXT_BODY_BYTES = 1024 * 1024;
@@ -304,6 +306,252 @@ export class GmailMailSyncAdapter implements MailProviderSyncPort {
       throw mapGmailError(error);
     }
   }
+
+  /**
+   * A section's Done in a fixed number of calls, whatever its size: one
+   * `messages.batchModify` takes INBOX off every message the cache names, one
+   * read of the change log since the cache's cursor says which of those
+   * threads got a message the cache did not name (or lost one), and only
+   * those are read back. One more batchModify takes UNREAD off the unread
+   * messages of the threads marked `read` that got nothing new, and one more
+   * read of the log catches a letter that landed in between. Fifteen threads
+   * cost four calls where the per-thread path costs sixty.
+   *
+   * Naming messages is what makes the order safe: a reply that arrives after
+   * the cache was read is not among the ids, so it stays in the Inbox and
+   * unread whatever happens to the rest of its thread.
+   *
+   * A thread whose messages the cache cannot name is left to the per-thread
+   * path, and so is the whole batch when Gmail will not take the ids (one was
+   * deleted since). A change log that is gone, or longer than a few pages,
+   * is replaced by a read of each thread.
+   */
+  async archiveThreads(
+    input: {
+      readonly threads: readonly MailProviderBatchThread[];
+      readonly cursor: string | null;
+    },
+    signal: AbortSignal,
+  ): Promise<ReadonlyMap<string, MailProviderBatchOutcome>> {
+    const outcomes = new Map<string, MailProviderBatchOutcome>();
+    if (input.cursor === null) return outcomes;
+    const cursor = input.cursor;
+    const wantsRead = new Set(
+      input.threads.filter((thread) => thread.read).map((thread) => thread.threadId),
+    );
+    const named = new Map<string, readonly { readonly messageId: string; readonly unread: boolean }[]>();
+    for (const thread of input.threads) {
+      if (
+        thread.messages !== null &&
+        thread.messages.length > 0 &&
+        SAFE_PROVIDER_ID.test(thread.threadId) &&
+        thread.messages.every((message) => SAFE_PROVIDER_ID.test(message.messageId))
+      ) {
+        named.set(thread.threadId, thread.messages);
+      }
+    }
+    if (named.size === 0) return outcomes;
+
+    const archived = await this.batchModifyThreads(named, () => true, ["INBOX"], signal);
+    if (archived === "refused") return outcomes;
+    for (const [threadId, error] of archived.failed) {
+      outcomes.set(threadId, { status: "failed", error });
+      named.delete(threadId);
+    }
+    if (named.size === 0) return outcomes;
+
+    const renewed = await this.readBack(named, cursor, false, signal);
+    if (renewed === null) {
+      // The archive landed and nothing more can be learned in time.
+      for (const [threadId, messages] of named) outcomes.set(threadId, applied(messages, false));
+      return outcomes;
+    }
+    for (const [threadId, outcome] of renewed) {
+      outcomes.set(threadId, outcome);
+      named.delete(threadId);
+    }
+
+    const toRead = new Map(
+      [...named].filter(
+        ([threadId, messages]) =>
+          wantsRead.has(threadId) && messages.some((message) => message.unread),
+      ),
+    );
+    for (const [threadId, messages] of named) {
+      if (!toRead.has(threadId)) outcomes.set(threadId, applied(messages, false));
+    }
+    if (toRead.size === 0) return outcomes;
+
+    const flagged = await this.batchModifyThreads(
+      toRead,
+      (message) => message.unread,
+      ["UNREAD"],
+      signal,
+    );
+    if (flagged === "refused") {
+      for (const [threadId, messages] of toRead) outcomes.set(threadId, applied(messages, false));
+      return outcomes;
+    }
+    for (const threadId of flagged.failed.keys()) {
+      outcomes.set(threadId, applied(toRead.get(threadId)!, false));
+      toRead.delete(threadId);
+    }
+    if (toRead.size === 0) return outcomes;
+    const renewedAgain = (await this.readBack(toRead, cursor, true, signal)) ?? new Map();
+    for (const [threadId, messages] of toRead) {
+      outcomes.set(threadId, renewedAgain.get(threadId) ?? applied(messages, true));
+    }
+    return outcomes;
+  }
+
+  /**
+   * One label off the chosen messages of these threads, in as few calls as
+   * Gmail's ceiling allows, never splitting a thread across two. `refused`
+   * when Gmail would not take the ids at all: nothing was changed, and the
+   * caller hands the threads to the per-thread path.
+   */
+  private async batchModifyThreads(
+    threads: ReadonlyMap<string, readonly { readonly messageId: string; readonly unread: boolean }[]>,
+    choose: (message: { readonly messageId: string; readonly unread: boolean }) => boolean,
+    removeLabelIds: readonly string[],
+    signal: AbortSignal,
+  ): Promise<"refused" | { readonly failed: ReadonlyMap<string, unknown> }> {
+    const chunks: { threadIds: string[]; ids: string[] }[] = [];
+    for (const [threadId, messages] of threads) {
+      const ids = messages.filter(choose).map((message) => message.messageId);
+      const last = chunks.at(-1);
+      if (last !== undefined && last.ids.length + ids.length <= GMAIL_BATCH_MODIFY_IDS) {
+        last.threadIds.push(threadId);
+        last.ids.push(...ids);
+      } else {
+        chunks.push({ threadIds: [threadId], ids: [...ids] });
+      }
+    }
+    const failed = new Map<string, unknown>();
+    for (const [index, chunk] of chunks.entries()) {
+      if (chunk.ids.length === 0) continue;
+      try {
+        signal.throwIfAborted();
+        await this.client.batchModifyMessages(chunk.ids, [], removeLabelIds, signal);
+      } catch (error) {
+        if (
+          index === 0 &&
+          error instanceof GmailApiError &&
+          (error.code === "gmail_not_found" || error.code === "gmail_request_invalid")
+        ) {
+          return "refused";
+        }
+        for (const threadId of chunk.threadIds) failed.set(threadId, mapGmailError(error));
+      }
+    }
+    return { failed };
+  }
+
+  /**
+   * Which of these threads changed beyond what the cache named since its
+   * cursor, each read back from Gmail: a message added that is not among the
+   * named ones, or one deleted. A change log that is gone or too long to read
+   * now means every thread is read back. Null when the log could not be read
+   * at all: the caller knows only what it sent.
+   */
+  private async readBack(
+    threads: ReadonlyMap<string, readonly { readonly messageId: string; readonly unread: boolean }[]>,
+    cursor: string,
+    markedRead: boolean,
+    signal: AbortSignal,
+  ): Promise<ReadonlyMap<string, MailProviderBatchOutcome> | null> {
+    let log: { readonly changed: ReadonlySet<string>; readonly known: boolean };
+    try {
+      log = await this.changedSince(threads, cursor, signal);
+    } catch {
+      return null;
+    }
+    const outcomes = new Map<string, MailProviderBatchOutcome>();
+    for (const threadId of log.changed) {
+      try {
+        const thread = await this.getThread(threadId, signal);
+        if (thread === null) {
+          outcomes.set(threadId, { status: "stale" });
+          continue;
+        }
+        const named = new Set(threads.get(threadId)!.map((message) => message.messageId));
+        if (
+          thread.messages.length === named.size &&
+          thread.messages.every((message) => named.has(message.messageId))
+        ) {
+          continue;
+        }
+        outcomes.set(threadId, { status: "done", thread, markedRead });
+      } catch (error) {
+        // The log named this thread: something reached it that the cache
+        // did not hold, and without the read back nobody can say what. It is
+        // answered failed and kept out of the read flag. A thread read back
+        // only because the log was gone is not known to have changed, and
+        // what was sent stands as its answer.
+        if (log.known) outcomes.set(threadId, { status: "failed", error: mapGmailError(error) });
+      }
+    }
+    return outcomes;
+  }
+
+  private async changedSince(
+    threads: ReadonlyMap<string, readonly { readonly messageId: string; readonly unread: boolean }[]>,
+    cursor: string,
+    signal: AbortSignal,
+  ): Promise<{ readonly changed: ReadonlySet<string>; readonly known: boolean }> {
+    const everyThread = { changed: new Set(threads.keys()), known: false };
+    const changed = new Set<string>();
+    let pageToken: string | null = null;
+    for (let page = 0; page < BATCH_HISTORY_PAGES; page += 1) {
+      let history;
+      try {
+        history = await this.client.listHistory(
+          {
+            startHistoryId: cursor,
+            ...(pageToken === null ? {} : { pageToken }),
+            types: ["messageAdded", "messageDeleted"],
+          },
+          signal,
+        );
+      } catch (error) {
+        // The cursor is older than Gmail keeps: read every thread instead.
+        if (error instanceof GmailApiError && error.code === "gmail_not_found") {
+          return everyThread;
+        }
+        throw error;
+      }
+      for (const record of history.items) {
+        for (const message of record.messagesAdded) {
+          const named = threads.get(message.threadId);
+          if (named !== undefined && !named.some((entry) => entry.messageId === message.id)) {
+            changed.add(message.threadId);
+          }
+        }
+        for (const message of record.messagesDeleted) {
+          if (threads.has(message.threadId)) changed.add(message.threadId);
+        }
+      }
+      pageToken = history.nextPageToken;
+      if (pageToken === null) return { changed, known: true };
+    }
+    return everyThread;
+  }
+}
+
+/** How many pages of the change log a batch reads before it reads each
+ *  thread instead: two hundred records of mail added or deleted since the
+ *  cache's cursor. */
+const BATCH_HISTORY_PAGES = 4;
+
+function applied(
+  messages: readonly { readonly messageId: string }[],
+  markedRead: boolean,
+): MailProviderBatchOutcome {
+  return {
+    status: "applied",
+    messageIds: Object.freeze(messages.map((message) => message.messageId)),
+    markedRead,
+  };
 }
 
 export function gmailThreadToCached(

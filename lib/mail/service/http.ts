@@ -80,6 +80,7 @@ import {
   validateMailSyncEnabledInput,
   validateMailSyncInput,
   validateMailSystemMailbox,
+  validateMailThreadBatchInput,
   validateMailThreadListFilter,
   validateMailThreadMutationInput,
 } from "../message-codec";
@@ -727,6 +728,35 @@ async function handleRequest(
       );
       if (detail === null) throw new MailHttpError(404, "mail_thread_not_found");
       writeMailThreadJson(request, response, 200, detail);
+      return;
+    }
+
+    // Before the thread route, whose id pattern would take `batch` for an id.
+    if (url.pathname === "/v1/threads/batch") {
+      if (method !== "POST") throw new MailHttpError(405, "method_not_allowed");
+      const service = requireMessageService(messages);
+      const input = validateMailThreadBatchInput(
+        await readJsonBody(
+          request,
+          deadlineAt,
+          MAIL_SERVICE_HTTP_LIMITS.maxThreadBatchBodyBytes,
+        ),
+      );
+      requestAccountId = input.accountId;
+      // Per-thread outcomes answer 200: the batch stops starting threads at
+      // the provider deadline and reports the rest as failed, so a request
+      // that got half way never comes back as a 5xx with the half unsaid.
+      writeMailThreadJson(
+        request,
+        response,
+        200,
+        await runAccountMutation(
+          request,
+          response,
+          providerOperationDeadlineAt,
+          ({ signal }) => service.archiveThreads(input, signal),
+        ),
+      );
       return;
     }
 

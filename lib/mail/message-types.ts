@@ -262,6 +262,85 @@ export type MailThreadMutationInput =
   | { readonly accountId: string; readonly spam: boolean }
   | { readonly accountId: string; readonly starred: boolean };
 
+/** At most this many threads ride one batch: a section's Done is sent in
+ *  chunks of it, one chunk per account. */
+export const MAIL_THREAD_BATCH_MAX = 50;
+
+/**
+ * Whether a thread has mail a press did not see: more messages, or a newer
+ * one. Fewer messages is a letter deleted elsewhere, and a read flag set
+ * since is not mail, so neither keeps a thread from leaving. The one rule
+ * the service and Brain's Done queue both hold a thread to.
+ */
+export function mailThreadHasNewMail(
+  press: { readonly messageCount: number; readonly lastMessageAt: number | null },
+  now: { readonly messageCount: number; readonly lastMessageAt: number | null },
+): boolean {
+  return (
+    now.messageCount > press.messageCount ||
+    (now.lastMessageAt ?? -1) > (press.lastMessageAt ?? -1)
+  );
+}
+
+/**
+ * One thread of a batch as the press saw it. The service holds every answer
+ * to this: a thread that has more mail, or newer mail, than the press saw is
+ * not archived, and the read flag goes only on a thread that was unread when
+ * it was pressed.
+ */
+export interface MailThreadBatchPress {
+  readonly threadId: string;
+  readonly messageCount: number;
+  readonly lastMessageAt: number | null;
+  readonly unread: boolean;
+}
+
+/**
+ * One account's threads archived in one request, and the ones unread at the
+ * press marked read with it when `read` is there. That is the only shape a
+ * batch has: a section's Done is the one caller, and every other mutation
+ * stays a request per thread.
+ */
+export interface MailThreadBatchInput {
+  readonly accountId: string;
+  readonly threads: readonly MailThreadBatchPress[];
+  readonly archive: true;
+  readonly read?: true;
+}
+
+/**
+ * What became of one thread of a batch. `done` carries the thread as the
+ * provider reads it after the batch, and whether the read flag went on it.
+ * `renewed` is a thread that got mail the press did not see: it is in the
+ * Inbox as the new mail left it, nothing taken off it, and `thread` is the
+ * copy that shows the new mail. `stale` is a thread the account no longer
+ * finds where it was. `failed` was not done, or not reached before the
+ * deadline, and says why.
+ */
+export type MailThreadBatchItem =
+  | {
+      readonly threadId: string;
+      readonly status: "done";
+      readonly thread: MailThreadListItem;
+      readonly markedRead: boolean;
+    }
+  | {
+      readonly threadId: string;
+      readonly status: "renewed";
+      readonly thread: MailThreadListItem;
+    }
+  | { readonly threadId: string; readonly status: "stale" }
+  | {
+      readonly threadId: string;
+      readonly status: "failed";
+      readonly errorCode: string;
+    };
+
+export interface MailThreadBatchResult {
+  readonly apiVersion: 1;
+  readonly results: readonly MailThreadBatchItem[];
+}
+
 export type MailSendMode = "compose" | "reply";
 export type MailSendOrigin = "app" | "mcp";
 export type MailSendStatus =

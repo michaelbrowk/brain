@@ -72,6 +72,7 @@ describe("the module API gate", () => {
       "/api/mail/senders/state",
       "/api/mail/sync",
       "/api/mail/threads",
+      "/api/mail/threads/batch",
       "/api/mail/threads/x",
     ]);
     for (const url of urls) expect(moduleOfApiPath(url), url).toBe("mail");

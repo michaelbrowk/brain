@@ -1063,6 +1063,74 @@ describe("Gmail API incremental sync", () => {
       client.listHistory({ startHistoryId: "not-a-number" }),
     ).rejects.toEqual(new GmailApiError("gmail_request_invalid"));
   });
+
+  it("asks the change log for only the record kinds it names", async () => {
+    const request = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({ historyId: "900" }),
+    );
+    const client = new GmailApiClient({ tokenPort: tokenPortFixture(), request });
+
+    await client.listHistory({
+      startHistoryId: "800",
+      types: ["messageAdded", "messageDeleted"],
+    });
+
+    const url = new URL(String(request.mock.calls[0]![0]));
+    expect(url.searchParams.getAll("historyTypes")).toEqual(["messageAdded", "messageDeleted"]);
+    await expect(
+      client.listHistory({
+        startHistoryId: "800",
+        types: ["messageAdded", "messageAdded"],
+      }),
+    ).rejects.toEqual(new GmailApiError("gmail_request_invalid"));
+    await expect(
+      client.listHistory({
+        startHistoryId: "800",
+        types: ["everything" as "messageAdded"],
+      }),
+    ).rejects.toEqual(new GmailApiError("gmail_request_invalid"));
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Gmail API batch modify", () => {
+  it("posts the named ids and labels to messages.batchModify and takes the empty 204", async () => {
+    const request = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }));
+    const client = new GmailApiClient({ tokenPort: tokenPortFixture(), request });
+
+    await expect(
+      client.batchModifyMessages(["message-a", "message-b"], [], ["INBOX", "UNREAD"]),
+    ).resolves.toBeUndefined();
+
+    const [input, init] = request.mock.calls[0]!;
+    expect(String(input)).toBe(
+      "https://gmail.googleapis.com/gmail/v1/users/me/messages/batchModify",
+    );
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      ids: ["message-a", "message-b"],
+      addLabelIds: [],
+      removeLabelIds: ["INBOX", "UNREAD"],
+    });
+  });
+
+  it("refuses an empty, duplicated, oversized or unsafe id list before the network, and maps a refusal", async () => {
+    const request = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({ error: { code: 404 } }, { status: 404 }),
+    );
+    const client = new GmailApiClient({ tokenPort: tokenPortFixture(), request });
+    const tooMany = Array.from({ length: 1_001 }, (_value, index) => `message-${index}`);
+
+    for (const ids of [[], ["message-a", "message-a"], tooMany, ["bad/id"]]) {
+      await expect(client.batchModifyMessages(ids, [], ["INBOX"])).rejects.toEqual(
+        new GmailApiError("gmail_request_invalid"),
+      );
+    }
+    expect(request).not.toHaveBeenCalled();
+    await expect(client.batchModifyMessages(["message-a"], [], ["INBOX"])).rejects.toMatchObject({
+      code: "gmail_not_found",
+    });
+  });
 });
 
 describe("Gmail API adversarial response validation", () => {

@@ -966,6 +966,87 @@ describe("Brain Mail Unix-socket client", () => {
     );
   });
 
+  it("archives a batch with one POST and reads the answer thread by thread", async () => {
+    const accountId = "account-a0123456789abcdef0123456789abcdef";
+    const requests: Array<{ method: string; path: string; body: unknown }> = [];
+    let answer: unknown = null;
+    const { socketPath } = await startServer(async (request, response) => {
+      requests.push({
+        method: request.method ?? "",
+        path: request.url ?? "",
+        body: JSON.parse(await readBody(request)) as unknown,
+      });
+      writeJson(response, 200, answer);
+    });
+    const client = createBrainMailClient({ socketPath });
+    const input = {
+      accountId,
+      threads: ["thread_1", "thread_2", "thread_3", "thread_4"].map((threadId) => ({
+        threadId,
+        messageCount: 1,
+        lastMessageAt: 1,
+        unread: true,
+      })),
+      archive: true,
+      read: true,
+    } as const;
+    const results = [
+      {
+        threadId: "thread_1",
+        status: "done",
+        thread: mailThreadFixture(accountId),
+        markedRead: true,
+      },
+      { threadId: "thread_2", status: "stale" },
+      { threadId: "thread_3", status: "failed", errorCode: "mail_sync_unavailable" },
+      {
+        threadId: "thread_4",
+        status: "renewed",
+        thread: { ...mailThreadFixture(accountId), threadId: "thread_4", messageCount: 2 },
+      },
+    ];
+    answer = { apiVersion: 1, results };
+
+    await expect(client.archiveThreads(input)).resolves.toMatchObject({ apiVersion: 1, results });
+    expect(requests).toEqual([{ method: "POST", path: "/v1/threads/batch", body: input }]);
+
+    // An answer for other threads, in another order, for a well-formed other
+    // account, or of another shape is not the answer to this batch.
+    const otherAccount = `account-a${"2".repeat(32)}`;
+    const [done, stale, failed, renewed] = results;
+    for (const garbled of [
+      { apiVersion: 1, results: results.slice(1) },
+      { apiVersion: 1, results: [stale, done, failed, renewed] },
+      {
+        apiVersion: 1,
+        results: [{ ...done, thread: mailThreadFixture(otherAccount) }, stale, failed, renewed],
+      },
+      {
+        apiVersion: 1,
+        results: [
+          done,
+          stale,
+          failed,
+          { ...renewed, thread: { ...mailThreadFixture(otherAccount), threadId: "thread_4" } },
+        ],
+      },
+      { apiVersion: 1, results: [{ ...done, markedRead: "yes" }, stale, failed, renewed] },
+      { apiVersion: 1, results: [done, stale, failed, { ...renewed, markedRead: false }] },
+    ]) {
+      answer = garbled;
+      await expect(client.archiveThreads(input)).rejects.toMatchObject({
+        status: 502,
+        code: "mail_service_invalid_response",
+      });
+    }
+    // A batch that is not archive-with-optional-read never reaches the socket.
+    const sent = requests.length;
+    await expect(
+      client.archiveThreads({ ...input, threads: [] }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(requests).toHaveLength(sent);
+  });
+
   it("bridges exact draft CRUD and atomic send contracts over the Unix socket", async () => {
     const accountId = "account-a0123456789abcdef0123456789abcdef";
     const draftId = "draft-00000000-0000-4000-8000-000000000001";

@@ -523,9 +523,126 @@ describe("defaultMailSurfaceClient system mailboxes", () => {
     });
     expect(fetchMock.mock.calls.at(-1)?.[1]?.keepalive).toBeUndefined();
   });
+
+  it("archives a section's threads in one keepalive POST and reads each answer", async () => {
+    const answered = { ...thread, unread: false };
+    const fetchMock = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        response({
+          apiVersion: 1,
+          results: [
+            { threadId: THREAD_ID, status: "done", thread: answered, markedRead: true },
+            { threadId: "thread_2", status: "stale" },
+            { threadId: "thread_3", status: "failed", errorCode: "mail_sync_unavailable" },
+            {
+              threadId: "thread_4",
+              status: "renewed",
+              thread: { ...thread, threadId: "thread_4", messageCount: 2 },
+            },
+          ],
+        }),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const press = (threadId: string) => ({
+      threadId,
+      messageCount: 1,
+      lastMessageAt: 1,
+      unread: true,
+    });
+    const input = {
+      accountId: ACCOUNT_ID,
+      threads: [THREAD_ID, "thread_2", "thread_3", "thread_4"].map(press),
+      archive: true,
+      read: true,
+    } as const;
+
+    await expect(
+      defaultMailSurfaceClient.archiveThreads(input, undefined, { keepalive: true }),
+    ).resolves.toEqual([
+      {
+        threadId: THREAD_ID,
+        status: "done",
+        thread: expect.objectContaining({ unread: false }),
+        markedRead: true,
+      },
+      { threadId: "thread_2", status: "stale" },
+      { threadId: "thread_3", status: "failed", errorCode: "mail_sync_unavailable" },
+      {
+        threadId: "thread_4",
+        status: "renewed",
+        thread: expect.objectContaining({ messageCount: 2 }),
+      },
+    ]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/mail/threads/batch",
+      expect.objectContaining({
+        method: "POST",
+        keepalive: true,
+        headers: expect.objectContaining({ "x-brain-mail-thread-state": "5" }),
+      }),
+    );
+    expect(JSON.parse(fetchMock.mock.calls[0]![1].body)).toEqual(input);
+
+    // The longest batch a Done sends, each id with its press, fits the
+    // batch's body bound, and three of them fit the keepalive quota.
+    const fifty = {
+      accountId: ACCOUNT_ID,
+      threads: Array.from({ length: 50 }, (_value, index) => ({
+        threadId: `${index}`.padEnd(255, "x"),
+        messageCount: 200,
+        lastMessageAt: 9_999_999_999_999,
+        unread: false,
+      })),
+      archive: true,
+      read: true,
+    };
+    const fiftyBytes = new TextEncoder().encode(JSON.stringify(fifty)).length;
+    expect(fiftyBytes).toBeLessThan(24 * 1024);
+    expect(2 * fiftyBytes).toBeLessThan(48 * 1024);
+
+    // An answer for the wrong threads, in another order, or for a thread of
+    // another account, is not this batch's answer.
+    const otherAccount = `account-a${"2".repeat(32)}`;
+    for (const results of [
+      [{ threadId: "thread_2", status: "stale" }],
+      [
+        { threadId: "thread_2", status: "stale" },
+        { threadId: THREAD_ID, status: "stale" },
+        { threadId: "thread_3", status: "stale" },
+        { threadId: "thread_4", status: "stale" },
+      ],
+      [
+        {
+          threadId: THREAD_ID,
+          status: "done",
+          thread: { ...answered, accountId: otherAccount },
+          markedRead: true,
+        },
+        { threadId: "thread_2", status: "stale" },
+        { threadId: "thread_3", status: "stale" },
+        { threadId: "thread_4", status: "stale" },
+      ],
+      [
+        { threadId: THREAD_ID, status: "stale" },
+        { threadId: "thread_2", status: "stale" },
+        { threadId: "thread_3", status: "stale" },
+        {
+          threadId: "thread_4",
+          status: "renewed",
+          thread: { ...thread, threadId: "thread_4", accountId: otherAccount },
+        },
+      ],
+    ]) {
+      fetchMock.mockImplementation(() => Promise.resolve(response({ apiVersion: 1, results })));
+      await expect(defaultMailSurfaceClient.archiveThreads(input)).rejects.toThrow(
+        "invalid mail thread batch",
+      );
+    }
+  });
 });
 
-const DRAFT_ID = "draft-11111111-1111-4111-8111-111111111111";
+const DRAFT_ID ="draft-11111111-1111-4111-8111-111111111111";
 const MUTATION_ID = "draft-mutation-22222222-2222-4222-8222-222222222222";
 const SEND_OPERATION_ID = "send-33333333-3333-4333-8333-333333333333";
 const SEND_IDEMPOTENCY_KEY = "44444444-4444-4444-8444-444444444444";

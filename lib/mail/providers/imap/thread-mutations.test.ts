@@ -765,6 +765,289 @@ describe("IMAP thread mutations", () => {
   });
 });
 
+describe("IMAP batch archive", () => {
+  const ids = (count: number) => Array.from({ length: count }, (_value, index) => `i77u${index + 1}`);
+  const batch = (threadIds: readonly string[], read = true) => ({
+    threads: threadIds.map((threadId) => ({ threadId, messages: null, read })),
+    cursor: null,
+  });
+  /** Sessions from this server, each handed a client `wrap` may change, and
+   *  `after` run as the session ends, as a deadline check or a logout is. */
+  const providerWith = (
+    server: FakeServer,
+    wrap: (client: ImapSessionClient) => ImapSessionClient = (client) => client,
+    after?: () => void,
+  ) =>
+    new ImapMailSyncAdapter(accountFixture(), {
+      async withSession<T>(
+        _account: StoredImapMailAccount,
+        _signal: AbortSignal,
+        operation: (client: ImapSessionClient) => Promise<T>,
+      ) {
+        const value = await operation(wrap(server.client));
+        after?.();
+        return value;
+      },
+    });
+  /** A client whose named commands throw as a dropped socket does. */
+  const dying =
+    (...commands: string[]) =>
+    (client: ImapSessionClient) =>
+      new Proxy(client, {
+        get(target, property, receiver) {
+          if (typeof property === "string" && commands.includes(property)) {
+            return async () => {
+              throw new Error("socket closed");
+            };
+          }
+          return Reflect.get(target, property, receiver);
+        },
+      });
+
+  it("answers done for every moved thread when the session fails after the MOVE answered", async () => {
+    const server = serverFixture({
+      inboxCount: 3,
+      mailboxes: [{ path: "Archive", specialUse: "\\Archive" }],
+    });
+    let ends = 0;
+    const provider = providerWith(server, undefined, () => {
+      ends += 1;
+      if (ends === 1) throw new Error("imap_connection_timeout after operation");
+    });
+
+    const outcomes = await provider.archiveThreads(batch(ids(3)), signal());
+
+    expect(server.mailbox("Archive").messages.size).toBe(3);
+    expect([...outcomes.values()].map((outcome) => outcome.status)).toEqual([
+      "done",
+      "done",
+      "done",
+    ]);
+    expect(outcomes.get("i77u1")).toMatchObject({ markedRead: true, thread: { inInbox: false } });
+    // COPYUID's handle is kept, so the take-back of one thread finds it.
+    await provider.unarchiveThread("i77u1", signal());
+    expect(server.mailbox("INBOX").messages.size).toBe(1);
+  });
+
+  it("answers done when the socket closes under the Message-ID search after the MOVE", async () => {
+    const server = serverFixture({
+      inboxCount: 2,
+      uidplus: false,
+      mailboxes: [{ path: "Archive", specialUse: "\\Archive" }],
+    });
+    const outcomes = await providerWith(server, dying("search")).archiveThreads(
+      batch(ids(2)),
+      signal(),
+    );
+    expect([...outcomes.values()].map((outcome) => outcome.status)).toEqual(["done", "done"]);
+  });
+
+  it("takes the flag back when the session throws under the MOVE", async () => {
+    const server = serverFixture({
+      inboxCount: 2,
+      mailboxes: [{ path: "Archive", specialUse: "\\Archive" }],
+    });
+    await expect(
+      providerWith(server, dying("messageMove")).archiveThreads(batch(ids(2)), signal()),
+    ).rejects.toMatchObject({ code: "mail_provider_unavailable" });
+    expect(server.commands.at(-1)).toEqual({
+      name: "store",
+      mailbox: "INBOX",
+      uids: [1, 2],
+      flags: ["\\Seen"],
+      add: false,
+    });
+    expect([...server.mailbox("INBOX").messages.values()].some((m) => m.flags.has("\\Seen"))).toBe(
+      false,
+    );
+  });
+
+  it("flags only the threads unread at the press, and says no flag went on one already seen", async () => {
+    const server = serverFixture({
+      inboxCount: 3,
+      mailboxes: [{ path: "Archive", specialUse: "\\Archive" }],
+    });
+    server.mailbox("INBOX").messages.get(3)!.flags.add("\\Seen");
+    const outcomes = await providerFor(server).provider.archiveThreads(
+      {
+        threads: [
+          { threadId: "i77u1", messages: null, read: true },
+          { threadId: "i77u2", messages: null, read: false },
+          { threadId: "i77u3", messages: null, read: true },
+        ],
+        cursor: null,
+      },
+      signal(),
+    );
+    expect(server.commands.find((command) => command.name === "store")).toEqual({
+      name: "store",
+      mailbox: "INBOX",
+      uid: 1,
+      flags: ["\\Seen"],
+      add: true,
+    });
+    expect([...outcomes].map(([threadId, outcome]) => [threadId, "markedRead" in outcome && outcome.markedRead])).toEqual([
+      ["i77u1", true],
+      ["i77u2", false],
+      ["i77u3", false],
+    ]);
+  });
+
+  it("answers stale a thread whose Inbox was recreated under another UIDVALIDITY, and moves nothing of it", async () => {
+    const server = serverFixture({
+      inboxCount: 2,
+      mailboxes: [{ path: "Archive", specialUse: "\\Archive" }],
+    });
+    const outcomes = await providerFor(server).provider.archiveThreads(
+      batch(["i77u1", "i78u2"]),
+      signal(),
+    );
+    expect(outcomes.get("i78u2")).toEqual({ status: "stale" });
+    expect(server.commands.find((command) => command.name === "move")).toEqual({
+      name: "move",
+      mailbox: "INBOX",
+      uid: 1,
+      destination: "Archive",
+    });
+  });
+
+  it("flags and moves fifteen threads on one session: one STORE, one MOVE", async () => {
+    const server = serverFixture({
+      inboxCount: 15,
+      mailboxes: [{ path: "Archive", specialUse: "\\Archive" }],
+    });
+    const { provider, opened } = providerFor(server);
+    const uids = Array.from({ length: 15 }, (_value, index) => index + 1);
+
+    const outcomes = await provider.archiveThreads(batch(ids(15)), signal());
+
+    // The per-thread path is two sessions a thread: thirty logins.
+    expect(opened.count).toBe(1);
+    expect(server.commands).toEqual([
+      { name: "list" },
+      { name: "store", mailbox: "INBOX", uids, flags: ["\\Seen"], add: true },
+      { name: "move", mailbox: "INBOX", uids, destination: "Archive" },
+    ]);
+    expect(server.mailbox("INBOX").messages.size).toBe(0);
+    expect([...server.mailbox("Archive").messages.values()].every((m) => m.flags.has("\\Seen"))).toBe(
+      true,
+    );
+    expect([...outcomes.keys()]).toEqual(ids(15));
+    expect(outcomes.get("i77u3")).toMatchObject({
+      status: "done",
+      markedRead: true,
+      thread: { inInbox: false, thread: { threadId: "i77u3", unread: false } },
+    });
+    // The handle is kept: the take-back of one thread finds it in Archive.
+    await provider.unarchiveThread("i77u3", signal());
+    expect(server.mailbox("INBOX").messages.size).toBe(1);
+  });
+
+  it("sends no STORE without `read`, or when every message is already seen", async () => {
+    const unread = serverFixture({ inboxCount: 2, mailboxes: [{ path: "Archive", specialUse: "\\Archive" }] });
+    await providerFor(unread).provider.archiveThreads(batch(ids(2), false), signal());
+    const seen = serverFixture({
+      inboxCount: 2,
+      inboxFlags: ["\\Seen"],
+      mailboxes: [{ path: "Archive", specialUse: "\\Archive" }],
+    });
+    const outcomes = await providerFor(seen).provider.archiveThreads(batch(ids(2)), signal());
+
+    for (const server of [unread, seen]) {
+      expect(server.commands.map((command) => command.name)).toEqual(["list", "move"]);
+    }
+    expect(outcomes.get("i77u1")).toMatchObject({ status: "done", markedRead: false });
+  });
+
+  it("refuses the whole batch, before any flag, on an account with no archive to move into", async () => {
+    const server = serverFixture({ inboxCount: 3, createAnswers: "no" });
+    const { provider, opened } = providerFor(server);
+
+    await expect(provider.archiveThreads(batch(ids(3)), signal())).rejects.toMatchObject({
+      code: "mail_provider_mutation_unsupported",
+      reason: "archive_create_refused",
+    });
+    expect(server.commands.some((command) => command.name === "store")).toBe(false);
+    // The refusal is remembered, and the next batch opens no session for it.
+    await expect(provider.archiveThreads(batch(ids(3)), signal())).rejects.toMatchObject({
+      reason: "role_refused_cached",
+    });
+    expect(opened.count).toBe(1);
+  });
+
+  it("takes the flag back when the server refuses the MOVE", async () => {
+    const server = serverFixture({
+      inboxCount: 2,
+      refuseMove: true,
+      mailboxes: [{ path: "Archive", specialUse: "\\Archive" }],
+    });
+
+    await expect(
+      providerFor(server).provider.archiveThreads(batch(ids(2)), signal()),
+    ).rejects.toMatchObject({ code: "mail_provider_mutation_unsupported", reason: "move_answered_no" });
+    expect(server.commands.at(-1)).toEqual({
+      name: "store",
+      mailbox: "INBOX",
+      uids: [1, 2],
+      flags: ["\\Seen"],
+      add: false,
+    });
+    expect([...server.mailbox("INBOX").messages.values()].some((m) => m.flags.has("\\Seen"))).toBe(
+      false,
+    );
+  });
+
+  it("reports stale a message COPYUID does not name, and one gone before the batch", async () => {
+    const server = serverFixture({
+      inboxCount: 4,
+      vanishBeforeMove: 2,
+      mailboxes: [{ path: "Archive", specialUse: "\\Archive" }],
+    });
+    server.mailbox("INBOX").messages.delete(4);
+
+    const outcomes = await providerFor(server).provider.archiveThreads(batch(ids(4)), signal());
+
+    expect([...outcomes].map(([threadId, outcome]) => [threadId, outcome.status])).toEqual([
+      ["i77u4", "stale"],
+      ["i77u1", "done"],
+      ["i77u2", "stale"],
+      ["i77u3", "done"],
+    ]);
+  });
+
+  it("finds each moved message by Message-ID on a server without UIDPLUS, in the same session", async () => {
+    const server = serverFixture({
+      inboxCount: 2,
+      uidplus: false,
+      mailboxes: [{ path: "Archive", specialUse: "\\Archive" }],
+    });
+    const { provider, opened } = providerFor(server);
+
+    const outcomes = await provider.archiveThreads(batch(ids(2)), signal());
+
+    expect(opened.count).toBe(1);
+    expect(server.commands.filter((command) => command.name === "search")).toHaveLength(2);
+    expect(outcomes.get("i77u2")).toMatchObject({ status: "done", thread: { inInbox: false } });
+    await provider.unarchiveThread("i77u2", signal());
+    expect([...server.mailbox("INBOX").messages.values()].map((m) => m.messageId)).toEqual([
+      "<message-2@example.test>",
+    ]);
+  });
+
+  it("leaves a thread it has already moved to the per-thread path", async () => {
+    const server = serverFixture({
+      inboxCount: 2,
+      mailboxes: [{ path: "Archive", specialUse: "\\Archive" }],
+    });
+    const { provider } = providerFor(server);
+    await provider.archiveThread("i77u1", signal());
+
+    const outcomes = await provider.archiveThreads(batch(ids(2)), signal());
+
+    expect([...outcomes.keys()]).toEqual(["i77u2"]);
+  });
+});
+
 type FakeCommand =
   | { readonly name: "list" }
   | { readonly name: "create"; readonly path: string }
@@ -778,9 +1061,22 @@ type FakeCommand =
       readonly add: boolean;
     }
   | {
+      readonly name: "store";
+      readonly mailbox: string;
+      readonly uids: readonly number[];
+      readonly flags: readonly string[];
+      readonly add: boolean;
+    }
+  | {
       readonly name: "move";
       readonly mailbox: string;
       readonly uid: number;
+      readonly destination: string;
+    }
+  | {
+      readonly name: "move";
+      readonly mailbox: string;
+      readonly uids: readonly number[];
       readonly destination: string;
     };
 
@@ -853,27 +1149,32 @@ function serverFixture(options?: {
   readonly createAnswers?: "created" | "already_exists" | "no" | "drop" | "throttle";
   /** CREATE answers OK, and LIST still does not show the folder afterwards. */
   readonly hideCreated?: boolean;
+  /** How many messages the Inbox holds, at UIDs 1 to n. One by default. */
+  readonly inboxCount?: number;
+  /** This Inbox UID is expunged by another client just before a MOVE. */
+  readonly vanishBeforeMove?: number;
 }): FakeServer {
   const uidplus = options?.uidplus ?? true;
   const capabilities = new Map<string, boolean | number>([["IMAP4rev1", true]]);
   if (options?.move !== false) capabilities.set("MOVE", true);
   if (uidplus) capabilities.set("UIDPLUS", true);
   const mailboxes = new Map<string, FakeMailbox>();
+  const inboxCount = options?.inboxCount ?? 1;
   mailboxes.set("INBOX", {
     path: "INBOX",
     uidValidity: UID_VALIDITY,
-    uidNext: 2,
-    messages: new Map([
-      [
-        1,
+    uidNext: inboxCount + 1,
+    messages: new Map(
+      Array.from({ length: inboxCount }, (_value, index) => [
+        index + 1,
         {
-          uid: 1,
+          uid: index + 1,
           flags: new Set(options?.inboxFlags ?? []),
-          messageId: "<message-1@example.test>",
-          internalDate: new Date(1_700_000_000_000),
+          messageId: `<message-${index + 1}@example.test>`,
+          internalDate: new Date(1_700_000_000_000 + index),
         },
-      ],
-    ]),
+      ]),
+    ),
   });
   for (const [index, entry] of (options?.mailboxes ?? []).entries()) {
     const seeded = entry.messageIds ?? [];
@@ -1066,26 +1367,33 @@ function serverFixture(options?: {
     ) {
       if (moveOptions?.uid !== true) throw new Error("sequence move not modelled");
       const source = current();
-      const uid = range[0]!;
-      commands.push({ name: "move", mailbox: source.path, uid, destination });
+      commands.push(
+        range.length === 1
+          ? { name: "move", mailbox: source.path, uid: range[0]!, destination }
+          : { name: "move", mailbox: source.path, uids: [...range], destination },
+      );
       if (options?.dropDuringMove === true) throw new Error("socket closed");
       if (options?.refuseMove === true) return false as const;
+      // Another client expunges this one between the batch's FETCH and its MOVE.
+      if (options?.vanishBeforeMove !== undefined) {
+        source.messages.delete(options.vanishBeforeMove);
+      }
       const target = require(destination);
-      const message = source.messages.get(uid);
-      if (message === undefined) return false as const;
-      source.messages.delete(uid);
-      const nextUid = target.uidNext;
-      target.uidNext += 1;
-      target.messages.set(nextUid, { ...message, uid: nextUid });
+      const uidMap = new Map<number, number>();
+      for (const uid of range) {
+        const message = source.messages.get(uid);
+        if (message === undefined) continue;
+        source.messages.delete(uid);
+        const nextUid = target.uidNext;
+        target.uidNext += 1;
+        target.messages.set(nextUid, { ...message, uid: nextUid });
+        uidMap.set(uid, nextUid);
+      }
+      if (uidMap.size === 0) return false as const;
       return {
         path: source.path,
         destination: target.path,
-        ...(uidplus
-          ? {
-              uidValidity: target.uidValidity,
-              uidMap: new Map([[uid, nextUid]]),
-            }
-          : {}),
+        ...(uidplus ? { uidValidity: target.uidValidity, uidMap } : {}),
       };
     },
   };
@@ -1098,16 +1406,21 @@ function serverFixture(options?: {
   ): boolean {
     if (storeOptions?.uid !== true) throw new Error("sequence store not modelled");
     const mailbox = current();
-    const uid = range[0]!;
-    commands.push({ name: "store", mailbox: mailbox.path, uid, flags: [...flags], add });
+    commands.push(
+      range.length === 1
+        ? { name: "store", mailbox: mailbox.path, uid: range[0]!, flags: [...flags], add }
+        : { name: "store", mailbox: mailbox.path, uids: [...range], flags: [...flags], add },
+    );
     if (options?.refuseStore === true) return false;
-    const message = mailbox.messages.get(uid);
-    // RFC 3501: UID STORE against a UID that is no longer there is a silent
-    // success, so the caller learns nothing from the command itself.
-    if (message === undefined) return true;
-    for (const flag of flags) {
-      if (add) message.flags.add(flag);
-      else message.flags.delete(flag);
+    for (const uid of range) {
+      const message = mailbox.messages.get(uid);
+      // RFC 3501: UID STORE against a UID that is no longer there is a silent
+      // success, so the caller learns nothing from the command itself.
+      if (message === undefined) continue;
+      for (const flag of flags) {
+        if (add) message.flags.add(flag);
+        else message.flags.delete(flag);
+      }
     }
     return true;
   }

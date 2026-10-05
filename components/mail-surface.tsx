@@ -5386,10 +5386,15 @@ export function MailSurface({
         label,
         threads: pending,
         blocked: blocked.length,
-        /* THE TRANSPORT. One mutation, one request, and every one of them
-           with `keepalive`: a request in flight when the page leaves would
-           otherwise be cut with the document. A batch endpoint replaces this
-           function and nothing else. */
+        /* THE TRANSPORT. One batch per account, and a single mutation for a
+           take-back, every one of them with `keepalive`: a request in flight
+           when the page leaves would otherwise be cut with the document. */
+        sendBatch: ({ accountId, threads, read }) =>
+          client.archiveThreads(
+            { accountId, threads, archive: true, ...(read ? { read: true } : {}) },
+            undefined,
+            { keepalive: true },
+          ),
         send: (mutation) =>
           client.updateThread(mutation, undefined, { keepalive: true }),
         respeak: () =>

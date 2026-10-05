@@ -19,6 +19,8 @@ import type {
   MailSenderUndoResult,
   MailSyncResult,
   MailSystemMailbox,
+  MailThreadBatchInput,
+  MailThreadBatchResult,
   MailThreadCategory,
   MailThreadDetail,
   MailThreadListItem,
@@ -2243,6 +2245,31 @@ export class MailSenderScreenedMessageService implements MailMessageService {
     const result = await this.inner.updateThread(input, signal);
     const [thread] = await this.screen.annotateItems(input.accountId, [result.thread]);
     return Object.freeze({ ...result, thread: thread! });
+  }
+
+  /** Each archived thread carries `newSender` and `senderBlocked` as the
+   *  same thread archived alone would: one annotation over the batch. */
+  async archiveThreads(
+    input: MailThreadBatchInput,
+    signal: AbortSignal,
+  ): Promise<MailThreadBatchResult> {
+    const result = await this.inner.archiveThreads(input, signal);
+    const answered = result.results.flatMap((item) =>
+      item.status === "done" || item.status === "renewed" ? [item.thread] : [],
+    );
+    if (answered.length === 0) return result;
+    const annotated = await this.screen.annotateItems(input.accountId, answered);
+    let next = 0;
+    return Object.freeze({
+      ...result,
+      results: Object.freeze(
+        result.results.map((item) =>
+          item.status === "done" || item.status === "renewed"
+            ? Object.freeze({ ...item, thread: annotated[next++]! })
+            : item,
+        ),
+      ),
+    });
   }
 
   private async annotateDetail(

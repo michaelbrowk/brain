@@ -5870,6 +5870,77 @@ function withDatabase(
   }
 }
 
+describe("the batch archive's reads and writes", () => {
+  /** A thread with two messages, both unread and in the Inbox. */
+  function twoMessages(threadId: string): CachedProviderThread {
+    const base = threadFixture(threadId, 1000);
+    const second = Object.freeze({
+      ...base.messages[0]!,
+      messageId: `second-${threadId}`,
+      sentAt: 1001,
+    });
+    return Object.freeze({
+      ...base,
+      thread: Object.freeze({ ...base.thread, messageCount: 2, lastMessageAt: 1001 }),
+      messages: Object.freeze([base.messages[0]!, second]),
+    });
+  }
+
+  async function seeded(threads: readonly CachedProviderThread[]) {
+    const fixture = await createCache();
+    const generation = fixture.cache.beginInitial("100");
+    fixture.cache.putInitialPage(generation, threads, null, null);
+    fixture.cache.completeInitial(generation, 2000);
+    return fixture;
+  }
+
+  it("names every message of a thread it holds, and none of one whose rows do not add up", async () => {
+    const fixture = await seeded([twoMessages("whole"), twoMessages("short")]);
+    // A row gone from under the count: the cache can no longer name every
+    // message, and a batch must not act on the ones it can.
+    withDatabase(cacheDatabasePath(fixture.cacheRoot), (database) => {
+      database.prepare("DELETE FROM messages WHERE message_id = ?").run("second-short");
+    });
+
+    const found = fixture.cache.readBatchThreads(["whole", "short", "absent"]);
+
+    expect([...found.keys()]).toEqual(["whole", "short"]);
+    expect(found.get("whole")).toMatchObject({
+      thread: { threadId: "whole", messageCount: 2 },
+      messages: [
+        { messageId: "message-whole", unread: true },
+        { messageId: "second-whole", unread: true },
+      ],
+    });
+    expect(found.get("short")!.messages).toBeNull();
+    fixture.cache.close();
+  });
+
+  it("takes the named messages out of the Inbox, and the thread out of every Inbox listing once none is left", async () => {
+    const fixture = await seeded([twoMessages("all-named"), twoMessages("one-named")]);
+
+    const updated = fixture.cache.applyBatchArchive([
+      { threadId: "all-named", messageIds: ["message-all-named", "second-all-named"], read: true },
+      { threadId: "one-named", messageIds: ["message-one-named"], read: false },
+    ]);
+
+    expect(updated.get("all-named")).toMatchObject({ unread: false });
+    expect(updated.get("one-named")).toMatchObject({ unread: true });
+    // A message the batch did not name keeps its thread in the Inbox.
+    expect(fixture.cache.listThreads({ limit: 10 }).items.map((item) => item.threadId)).toEqual([
+      "one-named",
+    ]);
+    withDatabase(cacheDatabasePath(fixture.cacheRoot), (database) => {
+      const memberships = database
+        .prepare("SELECT thread_id FROM thread_mailboxes WHERE mailbox_id = 'inbox' ORDER BY thread_id")
+        .all()
+        .map((row) => row.thread_id);
+      expect(memberships).toEqual(["one-named"]);
+    });
+    fixture.cache.close();
+  });
+});
+
 describe("the cache's answers for the new-senders screen", () => {
   it("names each thread's first message, whether it starts a conversation, whose it is, and where the thread is", async () => {
     const { cache } = await createCache();

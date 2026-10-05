@@ -2,6 +2,10 @@ export const MAIL_SERVICE_HTTP_LIMITS = Object.freeze({
   maxHeaderBytes: 8 * 1024,
   maxHeaders: 32,
   maxBodyBytes: 16 * 1024,
+  // A section's Done names fifty threads, each with what its press saw: at
+  // the longest id that is some 17 KiB of JSON. Brain's route holds the same
+  // bound.
+  maxThreadBatchBodyBytes: 24 * 1024,
   // A send at the 10 MiB attachment cap carries 13.68 MiB of base64 inside a
   // JSON body, and a 1 MiB text body can expand to six JSON bytes per source
   // byte, so the band is 19.68 MiB and 24 MiB admits the whole of it and

@@ -1390,6 +1390,7 @@ describe("mail security and resource contracts", () => {
     expect(mailRequestPhase("PATCH", "/v1/threads/thread_1")).toBe("thread_patch");
     expect(mailRequestPhase("GET", "/v1/threads/thread_1")).toBe("thread_get");
     expect(mailRequestPhase("GET", "/v1/threads")).toBe("thread_list_get");
+    expect(mailRequestPhase("POST", "/v1/threads/batch")).toBe("thread_batch_post");
     expect(mailRequestPhase("POST", "/v1/message-content/m1")).toBe(
       "message_content_post",
     );

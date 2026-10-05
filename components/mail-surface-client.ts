@@ -14,6 +14,8 @@ import type {
   MailSenderThreadRef,
   MailSenderUndoResult,
   MailSystemMailbox,
+  MailThreadBatchInput,
+  MailThreadBatchItem,
   MailThreadDetail,
   MailThreadListItem,
   MailThreadMutationInput,
@@ -325,6 +327,13 @@ export interface MailSurfaceClient {
     signal?: AbortSignal,
     options?: { readonly keepalive?: boolean },
   ): Promise<MailThreadListItem>;
+  /** A section's Done for one account in one request: the answer per
+   *  thread, in the order the threads were named. */
+  archiveThreads(
+    input: MailThreadBatchInput,
+    signal?: AbortSignal,
+    options?: { readonly keepalive?: boolean },
+  ): Promise<readonly MailThreadBatchItem[]>;
   send(input: MailSendInput, signal?: AbortSignal): Promise<MailSendResult>;
   createDraft(
     input: MailDraftCreateInput,
@@ -567,6 +576,26 @@ export const defaultMailSurfaceClient: MailSurfaceClient = {
       MAIL_MUTATION_TIMEOUT_MS,
     );
     return readThreadMutationResult(payload);
+  },
+
+  async archiveThreads(input, signal, options) {
+    const payload = await requestJsonWithin(
+      "/api/mail/threads/batch",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...mailThreadStateHeaders(),
+        },
+        body: JSON.stringify(input),
+        signal,
+        // Fifty of the longest thread ids are some 13 KiB of body, well
+        // inside the 64 KiB a keepalive request may carry.
+        keepalive: options?.keepalive,
+      },
+      MAIL_MUTATION_TIMEOUT_MS,
+    );
+    return readThreadBatchResult(payload, input);
   },
 
   async send(input, signal) {
@@ -1665,6 +1694,55 @@ function readThreadMutationResult(value: unknown): MailThreadListItem {
     throw new Error("invalid mail thread mutation");
   }
   return readThreadListItem(value.thread);
+}
+
+/** One answer per thread sent, in the order sent, each on the account
+ *  named; anything else is not this batch's answer. */
+function readThreadBatchResult(
+  value: unknown,
+  input: MailThreadBatchInput,
+): readonly MailThreadBatchItem[] {
+  if (
+    !isExactRecord(value, ["apiVersion", "results"]) ||
+    value.apiVersion !== 1 ||
+    !Array.isArray(value.results) ||
+    value.results.length !== input.threads.length
+  ) {
+    throw new Error("invalid mail thread batch");
+  }
+  return value.results.map((entry: unknown, index): MailThreadBatchItem => {
+    const threadId = input.threads[index]!.threadId;
+    if (entry === null || typeof entry !== "object" || (entry as { threadId?: unknown }).threadId !== threadId) {
+      throw new Error("invalid mail thread batch");
+    }
+    const ownThread = (raw: unknown) => {
+      const thread = readThreadListItem(raw);
+      if (thread.accountId !== input.accountId || thread.threadId !== threadId) {
+        throw new Error("invalid mail thread batch");
+      }
+      return thread;
+    };
+    if (isExactRecord(entry, ["markedRead", "status", "thread", "threadId"])) {
+      if (entry.status !== "done" || typeof entry.markedRead !== "boolean") {
+        throw new Error("invalid mail thread batch");
+      }
+      return { threadId, status: "done", thread: ownThread(entry.thread), markedRead: entry.markedRead };
+    }
+    if (isExactRecord(entry, ["status", "thread", "threadId"]) && entry.status === "renewed") {
+      return { threadId, status: "renewed", thread: ownThread(entry.thread) };
+    }
+    if (isExactRecord(entry, ["status", "threadId"]) && entry.status === "stale") {
+      return { threadId, status: "stale" };
+    }
+    if (
+      isExactRecord(entry, ["errorCode", "status", "threadId"]) &&
+      entry.status === "failed" &&
+      typeof entry.errorCode === "string"
+    ) {
+      return { threadId, status: "failed", errorCode: entry.errorCode };
+    }
+    throw new Error("invalid mail thread batch");
+  });
 }
 
 function readDraftCreateResponse(

@@ -1704,6 +1704,7 @@ const MAIL_REQUEST_PHASE_FAMILIES: readonly (readonly [RegExp, string])[] =
   Object.freeze([
     [/^\/v1\/health$/, "health"],
     [/^\/v1\/threads$/, "thread_list"],
+    [/^\/v1\/threads\/batch$/, "thread_batch"],
     [/^\/v1\/threads\/[^/]+$/, "thread"],
     [/^\/v1\/search$/, "thread_search"],
     [/^\/v1\/mailboxes\/[^/]+\/threads$/, "mailbox_thread_list"],

@@ -2061,6 +2061,145 @@ export class SqliteMailMessageCache {
     });
   }
 
+  /**
+   * The threads a batch archive names, as the cache holds them: the list row,
+   * and every message id with its read state. `messages` is null when the rows
+   * do not add up to the thread's count, so the cache cannot name every
+   * message and the batch must not act on a guess. A thread the cache does not
+   * hold is absent.
+   */
+  readBatchThreads(threadIds: readonly string[]): ReadonlyMap<
+    string,
+    {
+      readonly thread: MailThreadListItem;
+      readonly messages: readonly { readonly messageId: string; readonly unread: boolean }[] | null;
+    }
+  > {
+    const generation = readableGeneration(this.readSyncState());
+    const database = this.requireDatabase();
+    const found = new Map<
+      string,
+      {
+        readonly thread: MailThreadListItem;
+        readonly messages: readonly { readonly messageId: string; readonly unread: boolean }[] | null;
+      }
+    >();
+    for (const threadId of threadIds) {
+      const id = validateProviderId(threadId);
+      const row = database
+        .prepare(
+          `SELECT thread_id, subject, participants_json, snippet, last_message_at,
+                  message_count, unread, starred, has_attachments,
+                  list_message, size_bytes, category
+             FROM threads
+            WHERE account_id = ? AND generation = ? AND thread_id = ?`,
+        )
+        .get(this.accountId, generation, id);
+      if (!row) continue;
+      const thread = this.threadFromRow(row);
+      const rows = database
+        .prepare(
+          `SELECT message_id, unread
+             FROM messages
+            WHERE account_id = ? AND generation = ? AND thread_id = ?
+            LIMIT ?`,
+        )
+        .all(this.accountId, generation, id, MAX_MESSAGES_PER_THREAD + 1);
+      const messages = rows.map((message) => {
+        if (
+          typeof message.message_id !== "string" ||
+          (message.unread !== 0 && message.unread !== 1)
+        ) {
+          throw new MailCacheError("mail_cache_invalid");
+        }
+        return Object.freeze({
+          messageId: validateProviderId(message.message_id),
+          unread: message.unread === 1,
+        });
+      });
+      found.set(
+        id,
+        Object.freeze({
+          thread,
+          messages:
+            messages.length === thread.messageCount ? Object.freeze(messages) : null,
+        }),
+      );
+    }
+    return found;
+  }
+
+  /**
+   * A batch archive the provider confirmed message by message, written
+   * without reading each thread back: the named messages leave the Inbox, and
+   * lose their unread mark when `read` is set. A thread none of whose messages
+   * is left in the Inbox leaves the Inbox listing. Everything else on the row
+   * stays as the cache held it, and the next sync pass reads the thread as the
+   * provider has it. Answers the rows as they now stand.
+   */
+  applyBatchArchive(
+    entries: readonly {
+      readonly threadId: string;
+      readonly messageIds: readonly string[];
+      readonly read: boolean;
+    }[],
+  ): ReadonlyMap<string, MailThreadListItem> {
+    return this.transaction(() => {
+      const generation = readableGeneration(this.readSyncState());
+      if (generation < 1) throw new MailCacheError("mail_sync_stale");
+      const database = this.requireDatabase();
+      const updated = new Map<string, MailThreadListItem>();
+      for (const entry of entries) {
+        const threadId = validateProviderId(entry.threadId);
+        for (const messageId of entry.messageIds) {
+          database
+            .prepare(
+              `UPDATE messages
+                  SET in_inbox = 0${entry.read ? ", unread = 0" : ""}
+                WHERE account_id = ? AND generation = ? AND thread_id = ? AND message_id = ?`,
+            )
+            .run(this.accountId, generation, threadId, validateProviderId(messageId));
+        }
+        database
+          .prepare(
+            `UPDATE threads
+                SET in_inbox = EXISTS (
+                      SELECT 1 FROM messages
+                       WHERE account_id = threads.account_id AND generation = threads.generation
+                         AND thread_id = threads.thread_id AND in_inbox = 1),
+                    unread = EXISTS (
+                      SELECT 1 FROM messages
+                       WHERE account_id = threads.account_id AND generation = threads.generation
+                         AND thread_id = threads.thread_id AND unread = 1)
+              WHERE account_id = ? AND generation = ? AND thread_id = ?`,
+          )
+          .run(this.accountId, generation, threadId);
+        const row = database
+          .prepare(
+            `SELECT thread_id, subject, participants_json, snippet, last_message_at,
+                    message_count, unread, starred, has_attachments,
+                    list_message, size_bytes, category, in_inbox
+               FROM threads
+              WHERE account_id = ? AND generation = ? AND thread_id = ?`,
+          )
+          .get(this.accountId, generation, threadId);
+        if (!row) throw new MailCacheError("mail_cache_invalid");
+        if (row.in_inbox === 0) {
+          database
+            .prepare(
+              `DELETE FROM thread_mailboxes
+                WHERE account_id = ? AND mailbox_id = 'inbox'
+                  AND generation = ? AND thread_id = ?`,
+            )
+            .run(this.accountId, generation, threadId);
+        }
+        updated.set(threadId, this.threadFromRow(row));
+      }
+      this.bumpSearchRevision(database, generation);
+      return updated;
+    });
+  }
+
   markBackoff(errorCode: string): void {
     this.recordSyncFailure({
       now: Date.now(),

@@ -11836,6 +11836,205 @@ describe("MailSurface", () => {
         });
       });
 
+      /* THE PROVIDER'S ANSWER, wherever the reader is. The lists only know
+         what the change feed told them; the server answers every mutation
+         with the thread as it reads it afterwards, and that copy is the one
+         Done believes. Each case below has a reply that no list on screen
+         holds when the archive goes out. */
+      describe("when no list holds the reply", () => {
+        const pressed = () => [
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: "p-1",
+            messageCount: 1,
+            lastMessageAt: 1_700_000_000_000,
+          }),
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: "p-2",
+            messageCount: 1,
+            lastMessageAt: 1_699_999_999_000,
+          }),
+        ];
+        const replied = (thread: MailThreadListItem): MailThreadListItem => ({
+          ...thread,
+          unread: true,
+          messageCount: 2,
+          lastMessageAt: 1_700_000_060_000,
+        });
+        /** A server: each mutation is answered with the thread as it stands
+         *  when the answer leaves, the read flag applied. */
+        const serverOf = (server: () => readonly MailThreadListItem[]) =>
+          vi.fn().mockImplementation(async (mutation: { threadId: string; read?: boolean }) => {
+            const found = server().find((item) => item.threadId === mutation.threadId)!;
+            return mutation.read === undefined ? found : { ...found, unread: !mutation.read };
+          });
+        const ofThread = (updateThread: ReturnType<typeof vi.fn>, threadId: string) =>
+          sent(updateThread).filter((mutation) => mutation.threadId === threadId);
+
+        async function mount(
+          server: () => readonly MailThreadListItem[],
+          updateThread: ReturnType<typeof vi.fn>,
+        ) {
+          const listThreads = vi.fn().mockImplementation(({ accountId }) =>
+            Promise.resolve(pageOf(accountId === accountA.accountId ? server() : [])),
+          );
+          const onToast = vi.fn();
+          await act(async () =>
+            root.render(
+              <MailSurface
+                client={unifiedClient(server(), { updateThread, listThreads })}
+                onOpenSettings={() => {}}
+                onToast={onToast}
+              />,
+            ),
+          );
+          await settle();
+          await click(findButton("Done — archive all 2 in People"));
+          return onToast;
+        }
+
+        it("takes the archive back when the reader is in another account", async () => {
+          const [original, other] = pressed();
+          let server = [original!, other!];
+          const updateThread = serverOf(() => server);
+          const onToast = await mount(() => server, updateThread);
+          await enterSingleAccount(accountB);
+          await drain();
+          // The reply lands, and account B's list has nothing to say of it.
+          server = [replied(original!), other!];
+          await closeWindow(onToast);
+
+          expect(ofThread(updateThread, "p-1")).toEqual([
+            { threadId: "p-1", archive: true, keepalive: true },
+            { threadId: "p-1", archive: false, keepalive: true },
+          ]);
+          expect(ofThread(updateThread, "p-2")).toEqual([
+            { threadId: "p-2", archive: true, keepalive: true },
+            { threadId: "p-2", read: true, keepalive: true },
+          ]);
+          expect(onToast).toHaveBeenLastCalledWith("People partly cleared", {
+            icon: "check-linear",
+            subtitle: "1 archived, 1 got new mail and stayed",
+            durationMs: 5_000,
+          });
+        });
+
+        it("takes the archive back when no event ever told the lists", async () => {
+          const [original, other] = pressed();
+          let server = [original!, other!];
+          const updateThread = serverOf(() => server);
+          const onToast = await mount(() => server, updateThread);
+          // The change feed lags past the window: nothing is heard at all.
+          server = [replied(original!), other!];
+          await closeWindow(onToast);
+
+          expect(ofThread(updateThread, "p-1")).toEqual([
+            { threadId: "p-1", archive: true, keepalive: true },
+            { threadId: "p-1", archive: false, keepalive: true },
+          ]);
+          // Back in the column the moment the queue knew.
+          expect(threadsList()).toContain("p-1");
+          expect(threadsList()).not.toContain("p-2");
+        });
+
+        it("takes the archive back when the reader has left Mail", async () => {
+          vi.useFakeTimers();
+          const [original, other] = pressed();
+          let server = [original!, other!];
+          const first = deferred<void>();
+          const answer = serverOf(() => server);
+          const updateThread = vi
+            .fn()
+            .mockImplementation(async (mutation: { threadId: string }) => {
+              if (mutation.threadId === "p-1") await first.promise;
+              return answer(mutation);
+            });
+          await mount(() => server, updateThread);
+          // Leaving Mail lets the run go, and its first archive is out.
+          await act(async () => root.render(<div>Home</div>));
+          await drain();
+          // Out of Mail, p-2 gets a reply: no list is mounted to hear it.
+          server = [original!, replied(other!)];
+          await mailEvent({
+            kind: "mail",
+            changeKind: "sync",
+            accountId: accountA.accountId,
+            mailboxIds: ["inbox"],
+          });
+          await act(async () => vi.advanceTimersByTimeAsync(MAIL_EVENT_DEBOUNCE_MS));
+          await act(async () => first.resolve());
+          await drain();
+
+          expect(ofThread(updateThread, "p-2")).toEqual([
+            { threadId: "p-2", archive: true, keepalive: true },
+            { threadId: "p-2", archive: false, keepalive: true },
+          ]);
+        });
+
+        it("takes the read flag and the archive back when the reply lands between them", async () => {
+          const [original, other] = pressed();
+          let server = [original!, other!];
+          const flag = deferred<void>();
+          const answer = serverOf(() => server);
+          const updateThread = vi
+            .fn()
+            .mockImplementation(async (mutation: { threadId: string; read?: boolean }) => {
+              if (mutation.threadId === "p-1" && mutation.read === true) await flag.promise;
+              return answer(mutation);
+            });
+          const onToast = await mount(() => server, updateThread);
+          await closeWindow(onToast);
+          // p-1's archive answered as pressed, and its read flag is out when
+          // the reply lands. The provider's read flag is thread-wide: the
+          // reply is marked read with the rest.
+          server = [replied(original!), other!];
+          await act(async () => flag.resolve());
+          await drain();
+
+          expect(ofThread(updateThread, "p-1")).toEqual([
+            { threadId: "p-1", archive: true, keepalive: true },
+            { threadId: "p-1", read: true, keepalive: true },
+            { threadId: "p-1", read: false, keepalive: true },
+            { threadId: "p-1", archive: false, keepalive: true },
+          ]);
+          expect(threadsList()).toContain("p-1");
+          expect(onToast).toHaveBeenLastCalledWith("People partly cleared", {
+            icon: "check-linear",
+            subtitle: "1 archived, 1 got new mail and stayed",
+            durationMs: 5_000,
+          });
+        });
+
+        it("asks the account's own list first, and sends nothing for a reply it already holds", async () => {
+          // The reader stepped into the account the section is on. Its list
+          // heard the reply, and that copy saves both requests.
+          vi.useFakeTimers();
+          const [original, other] = pressed();
+          let server = [original!, other!];
+          const updateThread = serverOf(() => server);
+          const onToast = await mount(() => server, updateThread);
+          await enterSingleAccount(accountA);
+          await drain();
+          server = [replied(original!), other!];
+          await mailEvent({
+            kind: "mail",
+            changeKind: "sync",
+            accountId: accountA.accountId,
+            mailboxIds: ["inbox"],
+          });
+          await act(async () => vi.advanceTimersByTimeAsync(MAIL_EVENT_DEBOUNCE_MS));
+          await drain();
+          await closeWindow(onToast);
+
+          expect(ofThread(updateThread, "p-1")).toEqual([]);
+          expect(ofThread(updateThread, "p-2")).toEqual([
+            { threadId: "p-2", archive: true, keepalive: true },
+            { threadId: "p-2", read: true, keepalive: true },
+          ]);
+        });
+      });
+
       it("keeps its holds and its queue through a trip out of Mail, and sends each thread once", async () => {
         const items = [0, 1, 2].map((index) =>
           unifiedThread({

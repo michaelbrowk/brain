@@ -11883,7 +11883,10 @@ describe("MailSurface", () => {
           await act(async () =>
             root.render(
               <MailSurface
-                client={unifiedClient(server(), { updateThread, listThreads })}
+                client={unifiedClient(server(), {
+                  updateThread: updateThread as MailSurfaceClient["updateThread"],
+                  listThreads,
+                })}
                 onOpenSettings={() => {}}
                 onToast={onToast}
               />,

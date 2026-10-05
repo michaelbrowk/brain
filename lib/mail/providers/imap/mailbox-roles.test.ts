@@ -152,6 +152,21 @@ describe("IMAP mailbox role discovery", () => {
     ).toBe("‎العناصر المحذوفة‎");
   });
 
+  it("reads a name a server lists in decomposed form, or with a Turkish capital dotted I", () => {
+    // The accent as a combining mark after the letter, as a server that
+    // stores names the way the macOS file system writes them lists them.
+    const decomposed = "Envoye\u0301s";
+    expect(
+      selectImapMailboxPath("sent", [{ path: decomposed, name: decomposed, delimiter: "/" }]),
+    ).toBe(decomposed);
+    // "İ" lowercases to "i" and a combining dot above, which no list holds.
+    expect(
+      selectImapMailboxPath("trash", [
+        { path: "SİLİNMİŞ ÖĞELER", name: "SİLİNMİŞ ÖĞELER", delimiter: "/" },
+      ]),
+    ).toBe("SİLİNMİŞ ÖĞELER");
+  });
+
   it("takes the older attributes a server may state for junk and all mail", () => {
     // What XLIST servers and some SPECIAL-USE ones list instead of \Junk and
     // \All. They are the server's own word, like the standard ones.

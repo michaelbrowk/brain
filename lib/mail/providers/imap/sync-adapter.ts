@@ -2889,8 +2889,17 @@ function leafName(entry: ImapMailboxDescriptor): string {
  * The leaf name as the name tiers compare it: lowercased, trimmed, and
  * without the left-to-right marks some clients put around a right-to-left
  * name for display. It is the reading ImapFlow gives a name before it looks
- * it up in the same lists.
+ * it up in the same lists, and two steps more. The name is composed first,
+ * because the lists hold composed letters and a server may list `é` as `e`
+ * and a combining accent. And the combining dot above is dropped after
+ * lowercasing, because a Turkish capital `İ` lowercases to `i` and that dot,
+ * and the lists write the plain `i`.
  */
 function comparableLeafName(entry: ImapMailboxDescriptor): string {
-  return leafName(entry).toLowerCase().replace(/‎/g, "").trim();
+  return leafName(entry)
+    .normalize("NFC")
+    .toLowerCase()
+    .replace(/\u0307/g, "")
+    .replace(/\u200e/g, "")
+    .trim();
 }

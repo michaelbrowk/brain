@@ -478,6 +478,20 @@ describe("shell toast channels, as mail uses them", () => {
       expect(pills()[0]).toContain("Undo 4");
     });
 
+    it("a waiting report of Done's id never plays after the Done that said it again", async () => {
+      await say("Blocked Lena Okafor", blockReport(() => Promise.resolve()));
+      await say("Newsletters archived", { id: "mail-section-done", durationMs: 5_000 });
+      await say("People cleared", doneReport(() => {}));
+      await act(async () => {
+        vi.advanceTimersByTime(SMART_UNDO_MS + 1);
+      });
+      expect(pills()).toEqual([]);
+      await act(async () => {
+        vi.advanceTimersByTime(10_000);
+      });
+      expect(pillOf("Newsletters archived")).toBeNull();
+    });
+
     it("a report still waits until the last undo has gone", async () => {
       await say("Blocked Lena Okafor", blockReport(() => Promise.resolve()));
       await act(async () => {

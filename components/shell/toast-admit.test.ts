@@ -132,6 +132,17 @@ describe("toastAdmit", () => {
     expect(admitted.waiting).toEqual([correction]);
   });
 
+  it("drops a waiting report of the id an arriving undo wears", () => {
+    // The report spoke for a sentence the undo has now said again: played
+    // after it, the report would be the older sentence arriving last.
+    const stale: ShellToast = { title: "Newsletters archived", id: "done:2" };
+    const other: ShellToast = { title: "Saved" };
+    const next = undo("People cleared", "done:2");
+    const admitted = toastAdmit([undoable], [stale, other], next);
+    expect(admitted.present).toEqual([undoable, next]);
+    expect(admitted.waiting).toEqual([other]);
+  });
+
   it("keeps the queue in arrival order", () => {
     const first: ShellToast = { title: "First", id: "a" };
     const second: ShellToast = { title: "Second", id: "b" };

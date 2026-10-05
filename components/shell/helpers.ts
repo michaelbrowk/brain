@@ -111,6 +111,11 @@ export function toastAdmit(
   next: ShellToast,
   pending: (toast: ShellToast) => boolean = () => false,
 ): ToastAdmission {
+  // A waiting report of the id an arriving undo wears is the older sentence:
+  // played once the undo has gone, it would arrive last and say the past.
+  if (next.onAction && next.id != null) {
+    waiting = waiting.filter((entry) => entry.id !== next.id);
+  }
   const same = next.id != null ? standing.findIndex((entry) => entry.id === next.id) : -1;
   if (same >= 0 && !next.onAction) {
     return {

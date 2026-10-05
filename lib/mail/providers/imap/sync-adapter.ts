@@ -536,7 +536,8 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
    * not be read is neither: it answers `batch_failed`, and the next call at
    * the same cursor asks for half as much, down to one message. That one is
    * passed over and counted when its line is past the session's limit, or
-   * when it has failed three times running. So one envelope a session cannot
+   * when it has failed three times without being read, whatever new mail
+   * was read in between. So one envelope a session cannot
    * read never holds the scan, or the letters after it, and one dropped
    * connection does not cost a letter.
    */
@@ -587,6 +588,8 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
       crawl: false,
       left: 0,
       strikes: 0,
+      strikeAt: null,
+      batch: null,
       skipped: null,
       moreAbove: false,
       lineTooLong: false,
@@ -646,14 +649,19 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
       // UIDs are sparse here, and the search is asked once more.
       const crawl =
         attempt.crawl && (left > 0 || (attempt.moreAbove && result.envelopeCount > 0));
+      // A letter that has failed is not let off by a read of another one:
+      // new mail goes first, so a walk letter's failures are often far
+      // apart. The count ends when its own batch is read or passed over.
+      const struck = attempt.strikeAt !== null && attempt.strikeAt !== attempt.batch;
       this.sentScanRetry =
-        left > 0 || crawl
+        left > 0 || crawl || struck
           ? Object.freeze({
               cursor: result.cursor,
               width: left > 0 ? Math.min(attempt.width, left) : IMAP_SENT_SCAN_BATCH,
               crawl,
               left: Math.max(0, left),
-              strikes: 0,
+              strikes: struck ? attempt.strikes : 0,
+              strikeAt: struck ? attempt.strikeAt : null,
             })
           : null;
     }
@@ -676,6 +684,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
         crawl: true,
         left: attempt.left,
         strikes: attempt.strikes,
+        strikeAt: attempt.strikeAt,
       });
       return SENT_SCAN_BATCH_FAILED;
     }
@@ -685,7 +694,8 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
         width: Math.max(1, Math.floor(attempt.asked / 2)),
         crawl: attempt.crawl,
         left: attempt.asked,
-        strikes: 0,
+        strikes: attempt.strikes,
+        strikeAt: attempt.strikeAt,
       });
       return SENT_SCAN_BATCH_FAILED;
     }
@@ -694,8 +704,9 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
     // letter's, so the letter is asked for again, and passed over only when
     // it has failed IMAP_SENT_SCAN_STRIKES times running. A line past the
     // session's limit is the letter's own doing and will not read next time
-    // either: that one goes at once.
-    const strikes = attempt.strikes + 1;
+    // either: that one goes at once. Strikes another letter earned are not
+    // this one's: they are kept for that letter only until this one fails.
+    const strikes = (attempt.strikeAt === attempt.batch ? attempt.strikes : 0) + 1;
     if (!attempt.lineTooLong && strikes < IMAP_SENT_SCAN_STRIKES) {
       this.sentScanRetry = Object.freeze({
         cursor,
@@ -703,6 +714,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
         crawl: attempt.crawl,
         left: Math.max(1, attempt.left),
         strikes,
+        strikeAt: attempt.batch,
       });
       return SENT_SCAN_BATCH_FAILED;
     }
@@ -1547,8 +1559,14 @@ interface SentScanRetry {
   readonly crawl: boolean;
   /** Messages of the batch that failed that have not been gone through yet. */
   readonly left: number;
-  /** Failures running of a batch of one letter at this cursor. */
+  /** Failures running of the batch of one letter `strikeAt` names. */
   readonly strikes: number;
+  /**
+   * The batch the strikes were earned by. They are charged to that batch
+   * alone: a new letter fetched at the same cursor starts a count of its
+   * own, and new mail read in between leaves the count where it was.
+   */
+  readonly strikeAt: string | null;
 }
 
 /** What one scan session got as far as, written as it goes. */
@@ -1563,6 +1581,9 @@ interface SentScanAttempt {
   crawl: boolean;
   left: number;
   strikes: number;
+  strikeAt: string | null;
+  /** The batch the fetch on the wire asks for, named as `strikeAt` names one. */
+  batch: string | null;
   /** The answer if the one message asked for is passed over. */
   skipped: ((reason: MailSentScanSkipReason) => MailSentScanResult) | null;
   /** Mail above the cursor is left for the batch after this one. */
@@ -1642,6 +1663,7 @@ async function readSentEnvelopes(
   attempt.crawl = plan?.crawl ?? false;
   attempt.left = plan?.left ?? 0;
   attempt.strikes = plan?.strikes ?? 0;
+  attempt.strikeAt = plan?.strikeAt ?? null;
   const answer = (
     next: SentScanCursor,
     messages: readonly FetchMessageObject[],
@@ -1695,6 +1717,7 @@ async function readSentEnvelopes(
     attempt.asked = asked;
     attempt.moreAbove = lastUid > readUid;
     attempt.skipped = (reason) => answer({ ...cursor, highestUid: endUid }, [], reason);
+    attempt.batch = `u${startUid}:${endUid}`;
     attempt.stage = "fetch";
     const messages = withEnvelope(
       await client.fetchAll(`${startUid}:${endUid}`, sentEnvelopeFetchQuery(), { uid: true }),
@@ -1720,6 +1743,7 @@ async function readSentEnvelopes(
   };
   attempt.asked = asked;
   attempt.skipped = (reason) => answer(passed, [], reason);
+  attempt.batch = `s${startSequence}:${endSequence}<${cursor.walkUpperUid}`;
   attempt.stage = "fetch";
   const fetched = withEnvelope(
     await client.fetchAll(`${startSequence}:${endSequence}`, sentEnvelopeFetchQuery()),

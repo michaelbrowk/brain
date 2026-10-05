@@ -582,6 +582,79 @@ describe("a Sent-folder batch that cannot be read", () => {
     ).toMatchObject({ envelopeCount: 1, skippedCount: 0, cursor: "s1_500_6_0_0_0" });
   });
 
+  it("charges a failure to the letter that failed, not to a new letter at the same cursor", async () => {
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
+    const { provider } = providerFor(server);
+    const failed = { status: "batch_failed" };
+    server.failFetchOf(2);
+    let cursor: string | null = null;
+    const step = async () => {
+      const result = await provider.scanSentEnvelopes({ cursor }, signal());
+      if (result.status === "scanned") cursor = result.cursor;
+      return result;
+    };
+
+    // The walk's batch fails, narrows to one letter, reads letter 3, and
+    // letter 2 fails twice by itself.
+    await expect(step()).resolves.toEqual(failed);
+    await expect(step()).resolves.toMatchObject({ status: "scanned", skippedCount: 0 });
+    await expect(step()).resolves.toEqual(failed);
+    await expect(step()).resolves.toEqual(failed);
+    // The owner sends a letter, and the connection drops once under its
+    // fetch. That is the new letter's first failure, not letter 2's third.
+    server.append("Sent", 1);
+    server.failFetchOf(4);
+    await expect(step()).resolves.toEqual(failed);
+
+    server.failFetchOf(null);
+    const read = new Set<string>();
+    let skipped = 0;
+    for (let window = 0; window < 6 && cursor !== "s1_500_4_0_0_0"; window += 1) {
+      const result = await step();
+      if (result.status !== "scanned") continue;
+      skipped += result.skippedCount;
+      for (const address of recipientsOf(result)) read.add(address);
+    }
+    expect(skipped).toBe(0);
+    for (const uid of [1, 2, 4]) expect(read.has(`to${uid}@example.org`)).toBe(true);
+  });
+
+  it("keeps a walk letter's failures when new mail is read between them", async () => {
+    const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
+    const { provider } = providerFor(server);
+    server.failFetchOf(2);
+    const read = new Set<string>();
+    let cursor: string | null = null;
+    let skipped = 0;
+    let windows = 0;
+    let sent = 3;
+    // A letter is sent every second window for as long as this goes on, and
+    // every one of them is read between two failures of letter 2.
+    for (; windows < 30 && skipped === 0; windows += 1) {
+      if (windows >= 3 && windows % 2 === 1) {
+        server.append("Sent", 1);
+        sent += 1;
+      }
+      const result = await provider.scanSentEnvelopes({ cursor }, signal());
+      if (result.status !== "scanned") continue;
+      cursor = result.cursor;
+      skipped += result.skippedCount;
+      for (const address of recipientsOf(result)) read.add(address);
+    }
+
+    expect(skipped).toBe(1);
+    expect(server.fetches.filter((fetch) => !fetch.uid && fetch.range === "2:2")).toHaveLength(3);
+    expect(windows).toBeLessThanOrEqual(12);
+    expect(read.has("to2@example.org")).toBe(false);
+    // Every letter sent meanwhile was read on its way, and the walk goes on.
+    expect(read.has("to3@example.org")).toBe(true);
+    for (let uid = 4; uid <= sent; uid += 1) {
+      expect(read.has(`to${uid}@example.org`)).toBe(true);
+    }
+    const last = scanned(await provider.scanSentEnvelopes({ cursor }, signal()));
+    expect(recipientsOf(last)).toContain("to1@example.org");
+  });
+
   it("does the same above the cursor: one fat new letter does not hold the ones sent after it", async () => {
     const server = serverFixture({ sent: { path: "Sent", specialUse: "\\Sent", uids: range(1, 3) } });
     const { provider } = providerFor(server);

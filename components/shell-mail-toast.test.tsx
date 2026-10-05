@@ -820,6 +820,24 @@ describe("shell toast channels, as mail uses them", () => {
       expect(pills().join(" | ")).not.toContain("Draft discarded");
     });
 
+    it("fires once the column has let the pill go, so what it says lands on its own", async () => {
+      // A Done's flush says its sentence again under the one id the moment
+      // the window closes. Told before the column let the expired pill go,
+      // that sentence would take the expired pill's place and owe its
+      // `onExpire` a second time.
+      const onExpire = vi.fn(() => {
+        if (!mailToast) throw new Error("the mail surface never got onToast");
+        mailToast("Newsletters archived", { id: "mail-section-done", icon: "check-linear" });
+      });
+      await say("Newsletters cleared", doneReport(() => {}, onExpire));
+      await act(async () => {
+        vi.advanceTimersByTime(SMART_UNDO_MS + 1);
+      });
+      expect(onExpire).toHaveBeenCalledTimes(1);
+      expect(pills()).toHaveLength(1);
+      expect(pills()[0]).toContain("Newsletters archived");
+    });
+
     it("never fires when the action spent the pill", async () => {
       const onExpire = vi.fn();
       const undo = vi.fn();

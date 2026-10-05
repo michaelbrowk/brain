@@ -86,6 +86,8 @@ import {
   validateMailSyncResult,
   validateMailSystemMailbox,
   validateMailThreadDetail,
+  validateMailThreadBatchInput,
+  validateMailThreadBatchResult,
   validateMailThreadListFilter,
   validateMailThreadMutationInput,
   validateMailThreadMutationResult,
@@ -104,6 +106,8 @@ import type {
   MailSenderScreenState,
   MailSenderUndoResult,
   MailSystemMailbox,
+  MailThreadBatchInput,
+  MailThreadBatchResult,
   MailThreadDetail,
   MailThreadMutationInput,
   MailThreadMutationResult,
@@ -115,6 +119,7 @@ const ACCOUNT_PATH = "/v1/account";
 const ACCOUNTS_PATH = "/v2/accounts";
 const HEALTH_PATH = "/v1/health";
 const THREADS_PATH = "/v1/threads";
+const THREAD_BATCH_PATH = "/v1/threads/batch";
 const MAILBOXES_PATH = "/v1/mailboxes";
 const SYNC_PATH = "/v1/sync";
 const SEND_PATH = "/v1/send";
@@ -474,6 +479,12 @@ export interface BrainMailClient {
     mutation: MailThreadMutationInput,
     signal?: AbortSignal,
   ): Promise<MailThreadMutationResult>;
+  /** A section's Done for one account: up to fifty threads archived, and
+   *  marked read with `read`, answered thread by thread. */
+  archiveThreads(
+    input: MailThreadBatchInput,
+    signal?: AbortSignal,
+  ): Promise<MailThreadBatchResult>;
   createDraft(
     input: MailDraftCreateInput,
     signal?: AbortSignal,
@@ -911,6 +922,20 @@ export function createBrainMailClient(options?: {
           return result;
         },
         signal,
+      );
+    },
+    archiveThreads: async (input: MailThreadBatchInput, signal?: AbortSignal) => {
+      const safeInput = validateMessageRequest(() => validateMailThreadBatchInput(input));
+      return requestMailService(
+        socketPath,
+        requestTimeoutMs,
+        THREAD_BATCH_PATH,
+        "POST",
+        safeInput,
+        (value) => validateMailThreadBatchResult(value, safeInput),
+        signal,
+        // Fifty list rows: the widest answer a batch has.
+        MAX_THREAD_LIST_RESPONSE_BYTES,
       );
     },
     createDraft: async (

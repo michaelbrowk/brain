@@ -21,6 +21,7 @@ import {
   PATCH as updateThread,
 } from "./threads/[threadId]/route";
 import { GET as listThreads } from "./threads/route";
+import { POST as archiveThreads } from "./threads/batch/route";
 
 const ACCOUNT_ID = "account-a11111111111111111111111111111111";
 const THREAD_ID = "thread_1";
@@ -263,6 +264,93 @@ describe("Brain Mail message API routes", () => {
         body: mutation,
       })),
     );
+  });
+
+  it("carries a section's batch to the service in one POST and its answer back", async () => {
+    const requests: Array<{ method: string; path: string; body: unknown }> = [];
+    process.env.BRAIN_MAIL_SOCKET_PATH = await startServer(async (request, response) => {
+      requests.push({
+        method: request.method ?? "",
+        path: request.url ?? "",
+        body: JSON.parse(await readBody(request)) as unknown,
+      });
+      writeJson(response, 200, {
+        apiVersion: 1,
+        results: [
+          {
+            threadId: THREAD_ID,
+            status: "done",
+            thread: { ...threadFixture(), unread: false },
+            markedRead: true,
+          },
+          { threadId: "thread_2", status: "failed", errorCode: "mail_sync_unavailable" },
+        ],
+      });
+    });
+    const input = {
+      accountId: ACCOUNT_ID,
+      threadIds: [THREAD_ID, "thread_2"],
+      archive: true,
+      read: true,
+    };
+
+    const response = await archiveThreads(
+      jsonRequest("https://brain.test/api/mail/threads/batch", "POST", input, true),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      apiVersion: 1,
+      results: [
+        {
+          threadId: THREAD_ID,
+          status: "done",
+          thread: { ...threadFixture(), unread: false },
+          markedRead: true,
+        },
+        { threadId: "thread_2", status: "failed", errorCode: "mail_sync_unavailable" },
+      ],
+    });
+    expect(requests).toEqual([{ method: "POST", path: "/v1/threads/batch", body: input }]);
+  });
+
+  it("refuses a batch from another origin, in another type, too large, or of another shape before the socket", async () => {
+    process.env.BRAIN_MAIL_SOCKET_PATH = "/tmp/brain-mail-never-opened.sock";
+    const input = { accountId: ACCOUNT_ID, threadIds: [THREAD_ID], archive: true };
+    const crossOrigin = await archiveThreads(
+      new Request("https://brain.test/api/mail/threads/batch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+      }),
+    );
+    const notJson = await archiveThreads(
+      new Request("https://brain.test/api/mail/threads/batch", {
+        method: "POST",
+        headers: { Origin: "https://brain.test", "Content-Type": "text/plain" },
+        body: JSON.stringify(input),
+      }),
+    );
+    const tooLarge = await archiveThreads(
+      jsonRequest("https://brain.test/api/mail/threads/batch", "POST", {
+        ...input,
+        threadIds: Array.from({ length: 80 }, (_value, index) => `t${index}`.padEnd(255, "x")),
+      }),
+    );
+    const unarchive = await archiveThreads(
+      jsonRequest("https://brain.test/api/mail/threads/batch", "POST", {
+        ...input,
+        archive: false,
+      }),
+    );
+
+    expect([crossOrigin, notJson, tooLarge, unarchive].map((answer) => answer.status)).toEqual([
+      403, 415, 413, 400,
+    ]);
+    expect(await unarchive.json()).toEqual({
+      apiVersion: 1,
+      error: { code: "mail_request_invalid" },
+    });
   });
 
   it("rejects duplicate query values and cross-origin writes before the socket", async () => {

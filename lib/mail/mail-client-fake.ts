@@ -230,6 +230,7 @@ function defaultClient(): BrainMailClient {
     syncAccount: unavailable,
     setSyncEnabled: unavailable,
     updateThread: unavailable,
+    archiveThreads: unavailable,
     createDraft: unavailable,
     listDrafts: unavailable,
     getDraft: unavailable,

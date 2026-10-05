@@ -34,43 +34,124 @@ export type SaveState = "idle" | "saving" | "saved" | "error" | "conflict";
 export type ShellToast = { readonly title: string } & ToastOptions;
 
 /**
- * Who gets the pill when a message arrives.
+ * One standing pill of that snackbar, as the overlay draws it. `key` is the
+ * pill's place in the column, kept by a message that takes it under the same
+ * id; `pending` is its own action begun and not yet settled, which puts only
+ * this pill's button out of reach.
+ */
+export type ShellToastPill = {
+  readonly key: number;
+  readonly toast: ShellToast;
+  readonly pending: boolean;
+};
+
+/**
+ * How many pills with a way back may stand at once. A fourth commits the
+ * oldest, which is what that pill's own window closing would have done: the
+ * column stays short enough to read, and nothing is lost that the reader was
+ * not already about to lose.
+ */
+export const TOAST_UNDO_LIMIT = 3;
+
+/**
+ * The general-purpose channel after a message arrives or a pill leaves.
  *
- * A standing UNDO is not overwritten. Replacing it used to throw the way back
- * away with nothing said — block a sender, then discard a draft inside the
- * window, and the first Undo was gone. So a live action holds the pill and
- * what arrives meanwhile waits its turn.
+ * `present` is every pill standing, oldest first; the overlay draws the
+ * newest on top. `left` are the pills this step took down without their
+ * action being spent, so their callers are owed `onExpire`. `replaced` is the
+ * pill whose place the new message took, so it can keep that pill's place in
+ * the column rather than leave and arrive again.
+ */
+export type ToastAdmission = {
+  readonly present: readonly ShellToast[];
+  readonly waiting: readonly ShellToast[];
+  readonly left: readonly ShellToast[];
+  readonly replaced: ShellToast | null;
+};
+
+/**
+ * Who stands in the column when a message arrives.
  *
- * The one message that may take the pill from it wears the SAME id: that is
- * the same sentence said again, not a second one owed to the reader, and it
- * carries its own way back with it. An id already waiting is corrected in
- * place for the same reason, so a report and its correction never both stand
- * in the queue. Mail's section Done wears one id for every press, which is
- * how a second Done takes the pill from the first instead of waiting out its
- * window.
+ * A standing UNDO is never overwritten. Replacing it used to throw the way
+ * back away with nothing said — block a sender, then discard a draft inside
+ * the window, and the first Undo was gone. Making the second wait was the
+ * next answer, and it was wrong too: a Done pressed while a Block's Undo
+ * stood hid its section with no pill at all for up to nine seconds. So a
+ * message with a way back of its own stands at once, ON TOP of the undo that
+ * is already up, and both stay live, each on its own window, up to
+ * `TOAST_UNDO_LIMIT` of them.
  *
- * `present: null` means "leave what is showing alone".
+ * A message wearing the SAME id as a standing pill takes that pill, in its
+ * place: that is the same sentence said again, not a second one owed to the
+ * reader, and it carries its own way back with it. Mail's section Done wears
+ * one id for every press, which is how a second Done takes the pill from the
+ * first. An id already waiting is corrected in place for the same reason, so
+ * a report and its correction never both stand in the queue.
+ *
+ * A REPORT, a message with nothing to reach for, still waits while any undo
+ * stands, and replaces a report: nobody needs two reports at once, and a
+ * report slid in among live undos would push the one the reader is reaching
+ * for out from under the pointer.
  *
  * A REFUSAL never comes here. Waiting is right for a report and wrong for an
  * answer to a gesture, so `showToast` routes an urgent message to its own pill
  * before this function is reached — see `ToastOptions.urgent`.
  */
 export function toastAdmit(
-  standing: ShellToast | null,
+  standing: readonly ShellToast[],
   waiting: readonly ShellToast[],
   next: ShellToast,
-): { readonly present: ShellToast | null; readonly waiting: readonly ShellToast[] } {
-  if (!standing?.onAction || (next.id != null && next.id === standing.id)) {
-    return { present: next, waiting };
+): ToastAdmission {
+  const same = next.id != null ? standing.findIndex((entry) => entry.id === next.id) : -1;
+  if (same >= 0) {
+    return {
+      present: standing.map((entry, index) => (index === same ? next : entry)),
+      waiting,
+      left: [standing[same]],
+      replaced: standing[same],
+    };
   }
-  const at = next.id ? waiting.findIndex((entry) => entry.id === next.id) : -1;
-  return {
-    present: null,
-    waiting:
-      at >= 0
-        ? waiting.map((entry, index) => (index === at ? next : entry))
-        : [...waiting, next],
-  };
+  if (!standing.some((entry) => entry.onAction)) {
+    return { present: [next], waiting, left: standing, replaced: standing.at(-1) ?? null };
+  }
+  if (!next.onAction) {
+    const at = next.id ? waiting.findIndex((entry) => entry.id === next.id) : -1;
+    return {
+      present: standing,
+      waiting:
+        at >= 0
+          ? waiting.map((entry, index) => (index === at ? next : entry))
+          : [...waiting, next],
+      left: [],
+      replaced: null,
+    };
+  }
+  const present = [...standing, next];
+  const left: ShellToast[] = [];
+  while (present.filter((entry) => entry.onAction).length > TOAST_UNDO_LIMIT) {
+    const oldest = present.findIndex((entry) => entry.onAction);
+    left.push(...present.splice(oldest, 1));
+  }
+  return { present, waiting, left, replaced: null };
+}
+
+/**
+ * The column after one pill has gone — its window closed, or its action was
+ * spent. The pill that went is the caller's to settle (`onExpire` or not);
+ * this only says who stands now. The first waiting report gets the column
+ * once no undo is left standing, and not before.
+ */
+export function toastRelease(
+  standing: readonly ShellToast[],
+  waiting: readonly ShellToast[],
+  gone: ShellToast,
+): ToastAdmission {
+  const rest = standing.filter((entry) => entry !== gone);
+  if (rest.some((entry) => entry.onAction) || waiting.length === 0) {
+    return { present: rest, waiting, left: [], replaced: null };
+  }
+  const [head, ...queue] = waiting;
+  return toastAdmit(rest, queue, head);
 }
 
 /** The canvas surface: notes (a page or the hub), mail, settings, or tasks. */

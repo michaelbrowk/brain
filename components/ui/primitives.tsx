@@ -183,18 +183,61 @@ export function SnackbarStack({ children }: { children: React.ReactNode }) {
  *  ring's host, and a pill with nothing to count wears no ring. */
 export function Snackbar({
   open,
-  icon,
-  title,
-  subtitle,
-  actionLabel,
-  onAction,
-  actionDisabled,
-  durationSec,
-  onHoverStart,
-  onHoverEnd,
   assertive = false,
-}: {
+  ...pill
+}: SnackbarPillProps & {
   open: boolean;
+  /** An answer to a gesture interrupts, a report waits — so the live region
+   *  is assertive. The role stays `status`: `alert` is this codebase's mark
+   *  for the inline error text inside a form or a dialog, and a permanent
+   *  empty one at the shell's root would answer for all of them. */
+  assertive?: boolean;
+}) {
+  return (
+    <SnackbarSlot assertive={assertive}>
+      {open && <SnackbarPill {...pill} />}
+    </SnackbarSlot>
+  );
+}
+
+/**
+ * One row of `SnackbarStack`: a permanently mounted live region and the pills
+ * that come and go inside it. A `Snackbar` is a slot holding at most one pill.
+ * The shell's general channel is a slot holding a short column of them, the
+ * newest first, so two undos up at the same beat each keep a pill of their own
+ * without a live region being mounted at the moment it should speak (a region
+ * that arrives already holding its sentence is not announced).
+ *
+ * `popLayout` takes a leaving pill out of the flow as its exit starts, so the
+ * pills that stay, in this slot and in the rows above it, settle into its
+ * place on the toast spring in the same beat instead of waiting for the exit
+ * to finish and then jumping.
+ *
+ * A slot of several is not `aria-atomic`: a pill joining the column is read on
+ * its own, not the whole column again with it.
+ */
+export function SnackbarSlot({
+  assertive = false,
+  atomic = true,
+  children,
+}: {
+  assertive?: boolean;
+  atomic?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      role="status"
+      aria-live={assertive ? "assertive" : "polite"}
+      aria-atomic={atomic}
+      className="brain-toast-slot"
+    >
+      <AnimatePresence mode="popLayout">{children}</AnimatePresence>
+    </div>
+  );
+}
+
+export type SnackbarPillProps = {
   icon?: string;
   title: string;
   subtitle?: string;
@@ -204,86 +247,86 @@ export function Snackbar({
   durationSec?: number;
   onHoverStart?: () => void;
   onHoverEnd?: () => void;
-  /** An answer to a gesture interrupts, a report waits — so the live region
-   *  is assertive. The role stays `status`: `alert` is this codebase's mark
-   *  for the inline error text inside a form or a dialog, and a permanent
-   *  empty one at the shell's root would answer for all of them. */
-  assertive?: boolean;
-}) {
-  return (
-    <div
-      role="status"
-      aria-live={assertive ? "assertive" : "polite"}
-      aria-atomic="true"
-      className="brain-toast-slot"
-    >
-      <AnimatePresence>
-        {open && (
-          <motion.div
-            {...slideUp}
-            /* When a pill below this one closes, its slot collapses to zero in
-               a single frame and everything above teleports down by its height
-               plus the gap. `position` — never bare `layout`, which corrects a
-               height change with a scale and would stretch the text. */
-            layout="position"
-            onHoverStart={onHoverStart}
-            onHoverEnd={onHoverEnd}
-            /* The tight left padding belongs to the RING, and the ring is
-               drawn inside the icon's slot: a pill with a deadline and no icon
-               has no ring to make room for, and used to sit 6px tight with
-               nothing in the gap. So the padding reads the same condition the
-               ring does. */
-            className={`brain-toast group pointer-events-auto relative flex items-center gap-3 overflow-hidden py-2.5 ${
-              actionLabel ? "pr-2.5" : "pr-5"
-            } ${icon && durationSec != null && durationSec > 0 ? "pl-3.5" : "pl-5"}`}
-          >
-            {icon && (
-              <span className="relative grid size-8 shrink-0 place-items-center">
-                {durationSec != null && durationSec > 0 && (
-                  /* countdown ring — pauses with the timer on hover. The
-                     attribute names it: whether the ring is drawn at all is a
-                     rule (a pill with no deadline wears none), so it has to be
-                     assertable without reaching for a viewBox. */
-                  <svg
-                    data-toast-ring
-                    viewBox="0 0 32 32"
-                    aria-hidden
-                    className="absolute inset-0 -rotate-90 motion-reduce:hidden"
-                  >
-                    <circle
-                      cx="16" cy="16" r="14" fill="none" strokeWidth="2"
-                      stroke="color-mix(in oklch, var(--paper) 22%, transparent)"
-                    />
-                    <circle
-                      cx="16" cy="16" r="14" fill="none" strokeWidth="2"
-                      strokeLinecap="round" stroke="var(--paper)"
-                      strokeDasharray="87.96"
-                      style={{ animation: `ring-drain ${durationSec}s linear forwards` }}
-                      className="group-hover:[animation-play-state:paused]"
-                    />
-                  </svg>
-                )}
-                <Icon name={icon} size={16} className="text-paper" />
-              </span>
-            )}
-            <div className="min-w-0">
-              <div className="text-control truncate font-semibold text-paper">{title}</div>
-              {subtitle && <div className="text-caption mt-0.5 text-paper/60">{subtitle}</div>}
-            </div>
-            {actionLabel && (
-              <Button
-                variant="pill"
-                className="ml-1 shrink-0"
-                onClick={onAction}
-                disabled={actionDisabled}
-              >
-                {actionLabel}
-              </Button>
-            )}
+};
 
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
+/** The pill itself, as a direct child of a `SnackbarSlot`. The ref reaches
+ *  the moving element because `popLayout` measures the leaving pill there. */
+export function SnackbarPill({
+  icon,
+  title,
+  subtitle,
+  actionLabel,
+  onAction,
+  actionDisabled,
+  durationSec,
+  onHoverStart,
+  onHoverEnd,
+  ref,
+}: SnackbarPillProps & { ref?: React.Ref<HTMLDivElement> }) {
+  return (
+    <motion.div
+      ref={ref}
+      {...slideUp}
+      /* When a pill below this one leaves, its place closes in a single
+         frame and everything above would teleport down by its height plus
+         the gap. `position` — never bare `layout`, which corrects a height
+         change with a scale and would stretch the text. */
+      layout="position"
+      onHoverStart={onHoverStart}
+      onHoverEnd={onHoverEnd}
+      /* The tight left padding belongs to the RING, and the ring is
+         drawn inside the icon's slot: a pill with a deadline and no icon
+         has no ring to make room for, and used to sit 6px tight with
+         nothing in the gap. So the padding reads the same condition the
+         ring does. */
+      className={`brain-toast group pointer-events-auto relative flex items-center gap-3 overflow-hidden py-2.5 ${
+        actionLabel ? "pr-2.5" : "pr-5"
+      } ${icon && durationSec != null && durationSec > 0 ? "pl-3.5" : "pl-5"}`}
+    >
+      {icon && (
+        <span className="relative grid size-8 shrink-0 place-items-center">
+          {durationSec != null && durationSec > 0 && (
+            /* countdown ring — pauses with the timer on hover. The
+               attribute names it: whether the ring is drawn at all is a
+               rule (a pill with no deadline wears none), so it has to be
+               assertable without reaching for a viewBox. */
+            <svg
+              data-toast-ring
+              viewBox="0 0 32 32"
+              aria-hidden
+              className="absolute inset-0 -rotate-90 motion-reduce:hidden"
+            >
+              <circle
+                cx="16" cy="16" r="14" fill="none" strokeWidth="2"
+                stroke="color-mix(in oklch, var(--paper) 22%, transparent)"
+              />
+              <circle
+                cx="16" cy="16" r="14" fill="none" strokeWidth="2"
+                strokeLinecap="round" stroke="var(--paper)"
+                strokeDasharray="87.96"
+                style={{ animation: `ring-drain ${durationSec}s linear forwards` }}
+                className="group-hover:[animation-play-state:paused]"
+              />
+            </svg>
+          )}
+          <Icon name={icon} size={16} className="text-paper" />
+        </span>
+      )}
+      <div className="min-w-0">
+        <div className="text-control truncate font-semibold text-paper">{title}</div>
+        {subtitle && <div className="text-caption mt-0.5 text-paper/60">{subtitle}</div>}
+      </div>
+      {actionLabel && (
+        <Button
+          variant="pill"
+          className="ml-1 shrink-0"
+          onClick={onAction}
+          disabled={actionDisabled}
+        >
+          {actionLabel}
+        </Button>
+      )}
+
+    </motion.div>
   );
 }

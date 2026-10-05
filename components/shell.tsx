@@ -168,11 +168,14 @@ import {
   type PageRefRemoveTarget,
   type PageRefUndo,
   toastAdmit,
+  toastRelease,
   type SaveState,
   type ShellInitialPage,
   type ShellSurface,
   type ShellToast,
+  type ShellToastPill,
   type TasksListState,
+  type ToastAdmission,
 } from "./shell/helpers";
 import {
   reconcilePageRefEffect,
@@ -212,6 +215,22 @@ const URGENT_TOAST_MS = 3200;
  *  carries a press the reader has to notice and reach. A pill with an
  *  action holds the queue behind it, so it cannot stand without a window. */
 const REDEPLOY_TOAST_MS = 10_000;
+
+/** One standing pill's own window and the state of its own action. */
+type ToastClock = {
+  /** Its place in the column, kept by a message that takes it by id. */
+  key: number;
+  timer: ReturnType<typeof setTimeout> | null;
+  endsAt: number;
+  /** What a hover-paused window has left to run. */
+  leftMs: number;
+  /** True from the moment its action spends it, so that a same-id message
+   *  said from inside the press does not count as the window taking it: only
+   *  a pill that leaves unspent owes its caller `onExpire`. */
+  spent: boolean;
+  /** Its action has begun and not yet settled. */
+  pending: boolean;
+};
 
 /** How long the sorted body keeps its arrival flag. Long enough for the
  *  ladder to finish, short enough that a later re-render cannot replay it. */
@@ -503,26 +522,22 @@ export function Shell({
     useState<FocusDialogSession | null>(null);
   const historyOpen = historyDialog?.open ?? false;
   const [historyBaseRevision, setHistoryBaseRevision] = useState("");
-  const [toast, setToast] = useState<ShellToast | null>(null);
-  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** The general-purpose pills, oldest first, as the overlay draws them. */
+  const [toasts, setToasts] = useState<readonly ShellToastPill[]>([]);
   /** The refusal channel: one sentence, its own pill, never queued. */
   const [urgentToast, setUrgentToast] = useState<string | null>(null);
-  /** An action from the standing toast that has begun and not yet settled. */
-  const [toastActionPending, setToastActionPending] = useState(false);
-  const toastActionPendingRef = useRef(false);
   const urgentTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /** The standing toast, readable synchronously from inside `showToast`. */
-  const toastRef = useRef<ShellToast | null>(null);
-  /** True from the moment an action spends the standing pill until the next
-   *  message is presented, so `presentToast` can tell a pill its action took
-   *  down from one the window or a same-id message took: only the second
-   *  owes its caller `onExpire`. */
-  const toastSpentRef = useRef(false);
-  /** Messages waiting for a standing undo to live out its window. */
+  /** The standing pills, oldest first, readable synchronously from inside
+   *  `showToast`. */
+  const toastsRef = useRef<readonly ShellToast[]>([]);
+  /** Each standing pill's own window and the state of its own action. Every
+   *  pill counts, pauses and is spent on its own, so two undos up at once
+   *  never share a timer or a lock. */
+  const toastClocks = useRef(new Map<ShellToast, ToastClock>());
+  const toastKeys = useRef(0);
+  /** Reports waiting for the standing undos to live out their windows. */
   const toastQueue = useRef<ShellToast[]>([]);
-  const toastEndsAt = useRef(0);
-  const toastLeftMs = useRef(0);
-  const presentToastRef = useRef<(next: ShellToast | null) => void>(() => {});
+  const leaveToastRef = useRef<(toast: ShellToast, spent: boolean) => void>(() => {});
   /** One Smart sort, from the press to Apply or Cancel. It exists from the
    *  click, holding the children it will rearrange, and `result` is the
    *  arrangement when it lands: the client already has the titles and icons,
@@ -758,50 +773,92 @@ export function Shell({
     new Map<string, PageRefNestingOperation>(),
   );
 
-  /** Arms the dismissal for the standing toast, `ms` from now. */
-  const armToast = useCallback((ms: number) => {
-    if (toastTimer.current) clearTimeout(toastTimer.current);
-    toastEndsAt.current = Date.now() + ms;
-    toastLeftMs.current = ms;
-    toastTimer.current = setTimeout(() => {
-      toastTimer.current = null;
-      presentToastRef.current(toastQueue.current.shift() ?? null);
+  /** Hands the overlay what stands now. */
+  const publishToasts = useCallback(() => {
+    setToasts(
+      toastsRef.current.map((toast) => {
+        const clock = toastClocks.current.get(toast);
+        return { key: clock?.key ?? 0, toast, pending: clock?.pending ?? false };
+      }),
+    );
+  }, []);
+
+  /** Arms the dismissal for one standing pill, `ms` from now. */
+  const armToast = useCallback((toast: ShellToast, ms: number) => {
+    const clock = toastClocks.current.get(toast);
+    if (!clock) return;
+    if (clock.timer) clearTimeout(clock.timer);
+    clock.endsAt = Date.now() + ms;
+    clock.leftMs = ms;
+    clock.timer = setTimeout(() => {
+      clock.timer = null;
+      leaveToastRef.current(toast, false);
     }, ms);
   }, []);
 
   /**
-   * Puts one message on screen (or clears the pill) and starts its window.
+   * Puts one step of the column on screen and starts the window of the pill
+   * that just arrived.
    *
    * `durationMs: null` starts NO window. The pill stands until a message
    * wearing its id replaces it or its action is spent — which is what a
    * sentence said before its answer has landed needs (a task's "Completed"),
    * since the alternative is a guessed duration that either leaves before the
    * answer does or draws a countdown over a deadline nobody has.
+   *
+   * A pill leaving unspent is an event its caller may be waiting on — a delete
+   * parked behind an Undo goes out at this moment and no other. Spent by its
+   * own action it owes nothing; taken by its window, by a message wearing its
+   * id, or by a fourth undo arriving, it says so through `onExpire`, once the
+   * column already says who stands now.
    */
-  const presentToast = useCallback(
-    (next: ShellToast | null) => {
-      // A pill leaving unspent is an event its caller may be waiting on — a
-      // delete parked behind an Undo goes out at this moment and no other.
-      // Spent by its own action it owes nothing; taken by its window or by a
-      // message wearing its id, it says so through `onExpire`.
-      const standing = toastRef.current;
-      const spent = toastSpentRef.current;
-      toastSpentRef.current = false;
-      toastRef.current = next;
-      setToast(next);
-      if (standing && standing !== next && !spent) standing.onExpire?.();
-      if (!next || next.durationMs === null) {
-        if (toastTimer.current) clearTimeout(toastTimer.current);
-        toastTimer.current = null;
-        return;
+  const applyToasts = useCallback(
+    (admitted: ToastAdmission) => {
+      const clocks = toastClocks.current;
+      const owed = admitted.left.filter((toast) => !clocks.get(toast)?.spent);
+      const inherited = admitted.replaced ? clocks.get(admitted.replaced)?.key : undefined;
+      for (const toast of toastsRef.current) {
+        if (admitted.present.includes(toast)) continue;
+        const clock = clocks.get(toast);
+        if (clock?.timer) clearTimeout(clock.timer);
+        clocks.delete(toast);
       }
-      armToast(next.durationMs ?? TOAST_MS);
+      toastsRef.current = admitted.present;
+      toastQueue.current = [...admitted.waiting];
+      for (const toast of admitted.present) {
+        if (clocks.has(toast)) continue;
+        clocks.set(toast, {
+          key: inherited ?? ++toastKeys.current,
+          timer: null,
+          endsAt: 0,
+          leftMs: 0,
+          spent: false,
+          pending: false,
+        });
+        if (toast.durationMs !== null) armToast(toast, toast.durationMs ?? TOAST_MS);
+      }
+      publishToasts();
+      for (const toast of owed) toast.onExpire?.();
     },
-    [armToast],
+    [armToast, publishToasts],
+  );
+
+  /** One pill leaves the column: its window closed (`spent` false) or its
+   *  action was spent. A pill already gone — replaced under its id while its
+   *  action was open, say — is not taken down a second time. */
+  const leaveToast = useCallback(
+    (toast: ShellToast, spent: boolean) => {
+      const clock = toastClocks.current.get(toast);
+      if (!clock || !toastsRef.current.includes(toast)) return;
+      const owes = !spent && !clock.spent;
+      applyToasts(toastRelease(toastsRef.current, toastQueue.current, toast));
+      if (owes) toast.onExpire?.();
+    },
+    [applyToasts],
   );
   useEffect(() => {
-    presentToastRef.current = presentToast;
-  }, [presentToast]);
+    leaveToastRef.current = leaveToast;
+  }, [leaveToast]);
 
   /**
    * The shell's one general-purpose snackbar. Most callers pass a sentence and
@@ -809,115 +866,117 @@ export function Shell({
    * reader a way back: an undo action, and the longer window it takes to
    * notice one and reach it.
    *
-   * A message never overwrites a standing UNDO. Replacing the pill used to
-   * throw the way back away silently — block a sender, then discard a draft
-   * inside the window, and the first Undo was gone with nothing said. So an
-   * action that is still live holds the pill, and what arrives meanwhile
-   * waits its turn. The one thing that may take the pill from it is a message
-   * wearing the SAME id: that is the same sentence said again, not a second
-   * one, and it carries its own way back with it. Mail's section Done leans
-   * on exactly that: every Done wears one id, so a second Done takes the pill
-   * from the first, and the first hears `onExpire` and sends what it held.
+   * A message never overwrites a standing UNDO. One that carries a way back of
+   * its own stands on top of it at once, and both stay live (`toastAdmit`):
+   * block a sender, then press a section's Done, and there are two pills, two
+   * rings and two Undos. A REPORT waits while any undo stands. The one thing
+   * that may take a pill's place is a message wearing the SAME id: that is the
+   * same sentence said again, not a second one, and it carries its own way
+   * back with it. Mail's section Done leans on exactly that: every Done wears
+   * one id, so a second Done takes the pill from the first, and the first
+   * hears `onExpire` and sends what it held.
    *
    * The exception is `urgent`. Waiting is right for a REPORT and wrong for a
    * REFUSAL — an Accept the service does not take has to say so with the
    * press, not nine seconds later when a standing undo's window closes and
    * the sentence is no longer even true. So a refusal takes its own pill
-   * above the standing one and never touches the queue.
+   * above the standing ones and never touches the queue.
    */
-  const showToast = useCallback((title: string, options?: ToastOptions) => {
-    if (options?.urgent) {
-      setUrgentToast(title);
-      if (urgentTimer.current) clearTimeout(urgentTimer.current);
-      urgentTimer.current = setTimeout(() => {
-        urgentTimer.current = null;
-        setUrgentToast(null);
-      }, URGENT_TOAST_MS);
-      return;
-    }
-    const admitted = toastAdmit(toastRef.current, toastQueue.current, {
-      title,
-      ...options,
-    });
-    toastQueue.current = [...admitted.waiting];
-    if (admitted.present) presentToastRef.current(admitted.present);
-  }, []);
+  const showToast = useCallback(
+    (title: string, options?: ToastOptions) => {
+      if (options?.urgent) {
+        setUrgentToast(title);
+        if (urgentTimer.current) clearTimeout(urgentTimer.current);
+        urgentTimer.current = setTimeout(() => {
+          urgentTimer.current = null;
+          setUrgentToast(null);
+        }, URGENT_TOAST_MS);
+        return;
+      }
+      applyToasts(
+        toastAdmit(toastsRef.current, toastQueue.current, { title, ...options }),
+      );
+    },
+    [applyToasts],
+  );
 
   /**
-   * Runs the toast's own action, then takes the pill down so the undo cannot
+   * Runs one pill's own action, then takes that pill down so the undo cannot
    * be pressed twice while the restore is still running — in that order,
    * because an action that REFUSES (`false`: another mail action holds the
    * lock, or there is nothing left to bring back) must not spend the way
    * back. A refused press leaves the message and its remaining window exactly
-   * where they were.
+   * where they were. The pills beside it are not touched.
    */
   const runToastAction = useCallback(
-    (action: () => boolean | void | Promise<unknown>) => {
-      // One open action at a time. A second press, or ⌘Z, while the first is
+    (toast: ShellToast) => {
+      const clock = toastClocks.current.get(toast);
+      const action = toast.onAction;
+      // One open action per pill. A second press, or ⌘Z, while the first is
       // still settling would start the same reversal twice.
-      if (toastActionPendingRef.current) return;
+      if (!clock || !action || clock.pending) return;
       // Spent BEFORE the action runs: an action may say the same pill again
       // from inside the press (the discard's Undo after its account left
       // flushes and respeaks), and that replacement is the press spending
       // the pill, not the window closing on it, so no `onExpire` is owed. A
       // refusal hands the flag back, since the pill goes on standing with
-      // its window; a pending promise hands it back too and takes it again
-      // when it settles.
-      toastSpentRef.current = true;
+      // its window; a pending promise hands it back too, and the settle
+      // spends it.
+      clock.spent = true;
       const outcome = action();
       if (outcome === false) {
-        toastSpentRef.current = false;
+        clock.spent = false;
         return;
       }
       if (!(outcome instanceof Promise)) {
-        presentToastRef.current(toastQueue.current.shift() ?? null);
+        leaveToast(toast, true);
         return;
       }
-      toastSpentRef.current = false;
+      clock.spent = false;
       /* The action has begun but cannot finish yet — an undo whose own
          request is still out (a Block taken back, a letter archived again).
          The pill stands, its button out of reach, until the promise settles;
-         only THEN is it spent. The
-         standing message is remembered so a pill that was replaced meanwhile
-         (its own window ran out, or a same-id correction took it) is not the
-         one taken down. */
-      const standing = toastRef.current;
-      toastActionPendingRef.current = true;
-      setToastActionPending(true);
+         only THEN is it spent. A pill that left meanwhile (its own window ran
+         out, or a same-id correction took its place) is not taken down. */
+      clock.pending = true;
+      publishToasts();
       void outcome.then(
         () => {},
         () => {},
       ).then(() => {
-        toastActionPendingRef.current = false;
-        setToastActionPending(false);
-        if (toastRef.current !== standing) return;
-        toastSpentRef.current = true;
-        presentToastRef.current(toastQueue.current.shift() ?? null);
+        clock.pending = false;
+        leaveToast(toast, true);
       });
     },
-    [],
+    [leaveToast, publishToasts],
   );
 
-  /** Hover holds the message. The drain ring pauses under the pointer (one
-   *  `animation-play-state`), and until this existed the timer did not — so
-   *  the pill left from under the hand reaching for Undo. */
-  const pauseToast = useCallback(() => {
-    if (!toastTimer.current) return;
-    clearTimeout(toastTimer.current);
-    toastTimer.current = null;
-    toastLeftMs.current = Math.max(0, toastEndsAt.current - Date.now());
+  /** Hover holds the hovered message. Its drain ring pauses under the pointer
+   *  (one `animation-play-state` on that pill), and its timer with it — the
+   *  pills beside it go on counting, since the hand is reaching for one Undo
+   *  and not the others. */
+  const pauseToast = useCallback((toast: ShellToast) => {
+    const clock = toastClocks.current.get(toast);
+    if (!clock?.timer) return;
+    clearTimeout(clock.timer);
+    clock.timer = null;
+    clock.leftMs = Math.max(0, clock.endsAt - Date.now());
   }, []);
-  const resumeToast = useCallback(() => {
-    if (toastTimer.current || !toastRef.current) return;
-    // A window-less pill has nothing to resume, and `toastLeftMs` still holds
-    // whatever the last counted message left behind. The overlay does not wire
-    // hover on such a pill either; this is the guard for the other order.
-    if (toastRef.current.durationMs === null) return;
-    armToast(toastLeftMs.current);
-  }, [armToast]);
+  const resumeToast = useCallback(
+    (toast: ShellToast) => {
+      const clock = toastClocks.current.get(toast);
+      // A window-less pill has nothing to resume. The overlay does not wire
+      // hover on such a pill either; this is the guard for the other order.
+      if (!clock || clock.timer || toast.durationMs === null) return;
+      armToast(toast, clock.leftMs);
+    },
+    [armToast],
+  );
   useEffect(
     () => () => {
-      if (toastTimer.current) clearTimeout(toastTimer.current);
+      for (const clock of toastClocks.current.values()) {
+        if (clock.timer) clearTimeout(clock.timer);
+      }
       if (urgentTimer.current) clearTimeout(urgentTimer.current);
       if (sortedInTimer.current) clearTimeout(sortedInTimer.current);
       if (smartUndoOpenTimer.current) clearTimeout(smartUndoOpenTimer.current);
@@ -926,11 +985,14 @@ export function Shell({
   );
 
   /**
-   * ⌘Z reaches the standing toast's action, the way it already reaches a
-   * pending page delete three hundred lines below. Without it the way back
+   * ⌘Z reaches the NEWEST standing pill's action, the way it already reaches
+   * a pending page delete three hundred lines below. Without it the way back
    * lived only under the pointer — the pill is a `role="status"`, focus never
    * moves there, and the Tab order does not pass through it — so the ten
-   * seconds a bulk archive offers were mouse-only.
+   * seconds a bulk archive offers were mouse-only. With two undos up, the
+   * newest is the one the reader just did; a second ⌘Z reaches the one under
+   * it. A pill whose own action is still settling is passed over, so no
+   * reversal is started twice.
    *
    * Not while the caret is in a typing surface. The window listener runs
    * AFTER the field or ProseMirror has done its own undo, so ⌘Z to fix a typo
@@ -938,19 +1000,19 @@ export function Shell({
    * threads back with it — the pill leaving looking spent, with nothing said.
    */
   useEffect(() => {
-    const action = toast?.onAction;
-    if (!action) return;
+    const newest = toasts.findLast((pill) => pill.toast.onAction && !pill.pending);
+    if (!newest) return;
     const onKey = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "z") {
         return;
       }
       if (isEditableEventTarget(event.target)) return;
       event.preventDefault();
-      runToastAction(action);
+      runToastAction(newest.toast);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [toast, runToastAction]);
+  }, [toasts, runToastAction]);
 
   const onSearchHighlightStatus = useCallback(
     (requestId: number, status: SearchHighlightStatus) => {
@@ -6262,8 +6324,7 @@ export function Shell({
         recoveryMessage={recoveryMessage}
         recoveryCopyId={recoveryCopyId}
         onSaveConflictCopy={saveConflictCopy}
-        toast={toast}
-        toastActionPending={toastActionPending}
+        toasts={toasts}
         urgentToast={urgentToast}
         onToastAction={runToastAction}
         onPauseToast={pauseToast}

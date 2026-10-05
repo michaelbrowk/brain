@@ -35,8 +35,16 @@ import {
 } from "../../service/account-types";
 import {
   MAX_IMAP_READ_LITERAL_BYTES,
+  type ImapSessionBudget,
   type ImapSessionClient,
 } from "../../service/imapflow-adapter";
+import type {
+  MailSentScanEnvelope,
+  MailSentScanRefusal,
+  MailSentScanRestart,
+  MailSentScanResult,
+  MailSentScanSkipReason,
+} from "../../service/senders";
 
 const MAX_PAGE_ITEMS = 20;
 const MAX_INITIAL_MESSAGES = 200;
@@ -72,12 +80,65 @@ const MAX_TRACKED_RELOCATIONS = 256;
 const MOVE_CAPABILITY = "MOVE";
 /** How long LIST's answer about role folders, and a refused CREATE, are trusted. */
 const ROLE_REFUSAL_TTL_MS = 10 * 60_000;
+/**
+ * Envelopes one Sent-folder scan session asks for. An ENVELOPE is a few
+ * hundred bytes, so a full batch is a response of some hundred kilobytes that
+ * a session reads well inside its ten seconds.
+ */
+export const IMAP_SENT_SCAN_BATCH = 250;
+/**
+ * How far back the first scan of a Sent folder walks, newest first. At one
+ * batch a minute that is twenty minutes of sessions, which a mailbox of any
+ * age finishes the same evening it is connected, and five thousand sent
+ * letters hold the people an owner writes to now. Whoever was last written to
+ * before that waits once in New senders, as everyone did before the scan.
+ */
+export const IMAP_SENT_SCAN_FIRST_RUN_CAP = 5_000;
+/**
+ * How many times running a batch of one letter has to fail before the letter
+ * is passed over. One is a dropped connection; three in three windows, with
+ * the rest of the session working each time, is the letter.
+ */
+const IMAP_SENT_SCAN_STRIKES = 3;
+/**
+ * How long a Sent folder is left alone after a scan session found nothing in
+ * it, when no sync session could say whether anything has arrived since.
+ */
+const SENT_SCAN_QUIET_MS = 10 * 60_000;
+/**
+ * How long a scan goes without a session of its own on the STATUS's word. A
+ * server may answer STATUS from a cache it does not refresh, and a folder
+ * that never looks changed would never be read: once in this long the scan
+ * opens the folder and sees for itself. Four logins a day.
+ */
+const SENT_SCAN_SAFETY_NET_MS = 6 * 60 * 60_000;
+/**
+ * How long after the screen last asked for a scan the sync's sessions go on
+ * asking the Sent folder's STATUS. Twice the longest fallback interval the
+ * service accepts, so the STATUS is there for every scan the scheduler asks
+ * for, and stops within two hours of the screen being switched off.
+ */
+const SENT_STATUS_WANTED_MS = 2 * 60 * 60_000;
+/**
+ * How long a sync session waits for the Sent folder's STATUS, and for the
+ * LIST refresh that rides with it. A STATUS reads two counters and answers in
+ * a round trip; a server that has not answered by now is taken as refusing.
+ */
+const SENT_STATUS_WAIT_MS = 1_500;
+/** What a sync session keeps back of its deadline to hand its page over in. */
+const SENT_STATUS_SESSION_MARGIN_MS = 500;
+/** Below this the STATUS is not asked: the wait would be over before a round trip. */
+const SENT_STATUS_MIN_WAIT_MS = 250;
 
 export interface ImapReadSessions {
+  /**
+   * `session` says how much of the session's deadline is left. A source of
+   * sessions that does not say leaves the operation to its own bounds.
+   */
   withSession<T>(
     expected: StoredImapMailAccount,
     signal: AbortSignal,
-    operation: (client: ImapSessionClient) => Promise<T>,
+    operation: (client: ImapSessionClient, session?: ImapSessionBudget) => Promise<T>,
   ): Promise<T>;
 }
 
@@ -159,6 +220,42 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
    * the service would otherwise refuse until the next restart.
    */
   private mailboxRolesAt = 0;
+  /**
+   * What LIST last said about the Sent mailbox, or the server's refusal to
+   * open it, trusted for ROLE_REFUSAL_TTL_MS like the roles above. It is kept
+   * apart from `mailboxRoles` on purpose: that cache being filled means the
+   * archive's one CREATE has been tried, and a scan must not say so.
+   */
+  private sentMailbox: SentMailboxAnswer | null = null;
+  /**
+   * A Sent-folder batch that could not be read, and how the next call at its
+   * cursor asks. In memory only: after a restart the scan finds the same
+   * letter again by the same halving, a few windows later.
+   */
+  private sentScanRetry: SentScanRetry | null = null;
+  /**
+   * When the screen last asked for a scan. The sync's sessions ask the Sent
+   * folder's STATUS only while it keeps asking. Nothing tells this adapter
+   * that the screen was switched off, so the STATUS goes on for
+   * SENT_STATUS_WANTED_MS after the last scan and stops then.
+   */
+  private sentScanAskedAt: number | null = null;
+  /**
+   * The Sent folder's UIDVALIDITY and UIDNEXT as a sync session last read
+   * them, until a scan takes them. Each is taken once: an answer is only
+   * news to the scan that follows the sync that brought it.
+   */
+  private sentStatus: { readonly uidValidity: bigint; readonly uidNext: number } | null = null;
+  /** No STATUS on a sync session before this time: the last one failed. */
+  private sentStatusRestUntil = 0;
+  /**
+   * The last scan session that found nothing to read and no walk to go on
+   * with, and the cursor it left. With no STATUS to go by, the folder is left
+   * alone for SENT_SCAN_QUIET_MS after it.
+   */
+  private sentQuiet: { readonly at: number; readonly cursor: string } | null = null;
+  /** When a scan session last read the folder, for SENT_SCAN_SAFETY_NET_MS. */
+  private sentScanReadAt: number | null = null;
   private readonly now: () => number;
 
   constructor(
@@ -190,7 +287,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
     const maxItems = validatePageSize(input.maxItems);
     const parsedToken =
       input.pageToken === null ? null : parseInitialPageToken(input.pageToken);
-    return this.run(signal, (client) =>
+    return this.runSync(signal, (client) =>
       withInbox(client, async (mailbox) => {
         const uidValidity = validateUidValidity(mailbox.uidValidity);
         const currentUidNext = validateUid(mailbox.uidNext);
@@ -283,7 +380,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
     const start = parseAnchor(input.startHistoryId);
     const continuation =
       input.pageToken === null ? null : parseChangePageToken(input.pageToken);
-    return this.run(signal, (client) =>
+    return this.runSync(signal, (client) =>
       withInbox(client, async (mailbox) => {
         const current: Omit<ImapAnchor, "cycle"> = Object.freeze({
           uidValidity: validateUidValidity(mailbox.uidValidity),
@@ -418,6 +515,332 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
     signal: AbortSignal,
   ): Promise<void> {
     await this.moveThread(threadId, spam ? "junk" : "inbox", signal);
+  }
+
+  /**
+   * One bounded read of the Sent mailbox for the new-senders screen: who
+   * wrote each sent letter and to whom. The cache holds the Inbox alone, so a
+   * letter sent from another client is seen nowhere else.
+   *
+   * One session a call. The mailbox is examined read-only and the only fetch
+   * asks for UID and ENVELOPE: no body, no header block, no flag, and nothing
+   * is ever stored, moved or created. An ENVELOPE carries Bcc on the wire,
+   * because the protocol has no envelope without it; this adapter never reads
+   * that field. Mail that arrived since the cursor is read first; then the
+   * first walk goes on, newest first. The caller spaces the calls.
+   *
+   * A server with no Sent mailbox, or one that refuses to open it, is an
+   * answer and not a failure, and it is remembered for ROLE_REFUSAL_TTL_MS so
+   * hearing it again costs no session. A connection that drops before
+   * anything was asked for is a failure. A batch that was asked for and could
+   * not be read is neither: it answers `batch_failed`, and the next call at
+   * the same cursor asks for half as much, down to one message. That one is
+   * passed over and counted when its line is past the session's limit, or
+   * when it has failed three times without being read, whatever new mail
+   * was read in between. So one envelope a session cannot
+   * read never holds the scan, or the letters after it, and one dropped
+   * connection does not cost a letter.
+   */
+  async scanSentEnvelopes(
+    input: { readonly cursor: string | null },
+    signal: AbortSignal,
+  ): Promise<MailSentScanResult> {
+    this.sentScanAskedAt = this.now();
+    const remembered = this.rememberedSentMailbox();
+    if (remembered !== null && remembered.refusal !== null) {
+      return sentScanUnavailable(remembered.refusal);
+    }
+    // A scan session is a login, and a quiet folder has nothing to read. The
+    // sync's own session asked the folder's STATUS on its way: when that
+    // names the cursor's UIDVALIDITY and a next UID one past the highest UID
+    // read, and the first walk is over, there is nothing to open a session
+    // for. Without a STATUS (the server refused it, or no sync has run since
+    // the last one was taken) the folder is left alone for a while after a
+    // scan that found it quiet, and asked otherwise. And whatever the STATUS
+    // says, the folder is opened once in SENT_SCAN_SAFETY_NET_MS.
+    const observed = this.sentStatus;
+    this.sentStatus = null;
+    const stored = parseSentScanCursor(input.cursor);
+    let sentHereByStatus = false;
+    if (stored !== null && stored.walkRemaining === 0) {
+      const nothingNew =
+        observed !== null
+          ? observed.uidValidity === stored.uidValidity &&
+            observed.uidNext - 1 === stored.highestUid
+          : this.sentQuiet !== null &&
+            this.sentQuiet.cursor === input.cursor &&
+            this.now() - this.sentQuiet.at < SENT_SCAN_QUIET_MS;
+      const readLately =
+        this.sentScanReadAt !== null &&
+        this.now() - this.sentScanReadAt < SENT_SCAN_SAFETY_NET_MS;
+      if (nothingNew && readLately) return SENT_SCAN_UNCHANGED;
+      sentHereByStatus = observed !== null && !nothingNew;
+    }
+    this.sentQuiet = null;
+    // Kept outside the session on purpose: a session that runs into its
+    // deadline is abandoned in the middle of an await, and what it had asked
+    // for is all that is known about it afterwards.
+    const attempt: SentScanAttempt = {
+      stage: null,
+      cursor: null,
+      asked: 0,
+      width: IMAP_SENT_SCAN_BATCH,
+      crawl: false,
+      left: 0,
+      strikes: 0,
+      strikeAt: null,
+      batch: null,
+      skipped: null,
+      moreAbove: false,
+      lineTooLong: false,
+    };
+    let result: MailSentScanResult;
+    try {
+      result = await this.run(signal, async (client) => {
+        const listed = remembered ?? (await this.listSentMailbox(client));
+        const path = listed.path;
+        if (path === null) return sentScanUnavailable(listed.refusal ?? "no_sent_mailbox");
+        // ImapFlow says what killed a stream on this event and nowhere else.
+        client.on("error", (error) => {
+          if (isLineLimitError(error)) attempt.lineTooLong = true;
+        });
+        let examined = false;
+        try {
+          return await withMailbox(client, path, true, (mailbox) => {
+            examined = true;
+            return readSentEnvelopes(client, mailbox, stored, this.sentScanRetry, attempt);
+          });
+        } catch (error) {
+          if (examined || !isServerAnswer(error)) throw error;
+          // A tagged NO to the EXAMINE: the folder LIST named is gone, or an
+          // ACL keeps it shut. LIST is asked again once this answer is old.
+          this.sentMailbox = Object.freeze({
+            path: null,
+            refusal: "examine_refused",
+            at: this.now(),
+          });
+          return sentScanUnavailable("examine_refused");
+        }
+      });
+    } catch (error) {
+      // A stop is not the server's doing, and a session that failed before
+      // it asked for a batch says nothing about one.
+      if (attempt.stage === null || attempt.cursor === null || signal.aborted) throw error;
+      return this.afterUnreadBatch(attempt);
+    }
+    if (result.status === "scanned") {
+      this.sentScanReadAt = this.now();
+      if (result.envelopeCount === 0 && !result.hasMore) {
+        this.sentQuiet = Object.freeze({ at: this.now(), cursor: result.cursor });
+        // The STATUS said the folder had changed, and the folder, opened,
+        // stands where the cursor left it: this server's STATUS does not say
+        // what its EXAMINE says. It is rested like one that refused, so a
+        // stale answer costs a session in ten minutes and not one a window.
+        if (sentHereByStatus && result.cursor === input.cursor) {
+          this.sentStatusRestUntil = this.now() + ROLE_REFUSAL_TTL_MS;
+        }
+      }
+      // The batch after a narrowed one stays narrow until the range that
+      // failed has been gone through: one of its halves holds the letter.
+      const left = attempt.left - attempt.asked;
+      // And new mail goes on by plain UID range after a search that failed,
+      // for as long as the ranges hold letters: a search too long for a line
+      // is too long again a batch later. A range that held nothing says the
+      // UIDs are sparse here, and the search is asked once more.
+      const crawl =
+        attempt.crawl && (left > 0 || (attempt.moreAbove && result.envelopeCount > 0));
+      // A letter that has failed is not let off by a read of another one:
+      // new mail goes first, so a walk letter's failures are often far
+      // apart. The count ends when its own batch is read or passed over.
+      const struck = attempt.strikeAt !== null && attempt.strikeAt !== attempt.batch;
+      this.sentScanRetry =
+        left > 0 || crawl || struck
+          ? Object.freeze({
+              cursor: result.cursor,
+              width: left > 0 ? Math.min(attempt.width, left) : IMAP_SENT_SCAN_BATCH,
+              crawl,
+              left: Math.max(0, left),
+              strikes: struck ? attempt.strikes : 0,
+              strikeAt: struck ? attempt.strikeAt : null,
+            })
+          : null;
+    }
+    return result;
+  }
+
+  /**
+   * What a batch that was asked for and not read turns into. A search that
+   * failed is answered by reading new mail by plain UID range from then on. A
+   * fetch of several messages is asked for again at half its width. A fetch
+   * of one message is asked for again, and passed over when it is the letter
+   * that cannot be read and not the connection.
+   */
+  private afterUnreadBatch(attempt: SentScanAttempt): MailSentScanResult {
+    const cursor = attempt.cursor!;
+    if (attempt.stage === "search") {
+      this.sentScanRetry = Object.freeze({
+        cursor,
+        width: attempt.width,
+        crawl: true,
+        left: attempt.left,
+        strikes: attempt.strikes,
+        strikeAt: attempt.strikeAt,
+      });
+      return SENT_SCAN_BATCH_FAILED;
+    }
+    if (attempt.asked > 1 || attempt.skipped === null) {
+      this.sentScanRetry = Object.freeze({
+        cursor,
+        width: Math.max(1, Math.floor(attempt.asked / 2)),
+        crawl: attempt.crawl,
+        left: attempt.asked,
+        strikes: attempt.strikes,
+        strikeAt: attempt.strikeAt,
+      });
+      return SENT_SCAN_BATCH_FAILED;
+    }
+    // A batch of one is the ordinary batch: a letter sent from the phone is
+    // one new UID. One failure of it is as likely the network's as the
+    // letter's, so the letter is asked for again, and passed over only when
+    // it has failed IMAP_SENT_SCAN_STRIKES times running. A line past the
+    // session's limit is the letter's own doing and will not read next time
+    // either: that one goes at once. Strikes another letter earned are not
+    // this one's: they are kept for that letter only until this one fails.
+    const strikes = (attempt.strikeAt === attempt.batch ? attempt.strikes : 0) + 1;
+    if (!attempt.lineTooLong && strikes < IMAP_SENT_SCAN_STRIKES) {
+      this.sentScanRetry = Object.freeze({
+        cursor,
+        width: 1,
+        crawl: attempt.crawl,
+        left: Math.max(1, attempt.left),
+        strikes,
+        strikeAt: attempt.batch,
+      });
+      return SENT_SCAN_BATCH_FAILED;
+    }
+    // The letter is found, so the next batch is a whole one again.
+    this.sentScanRetry = null;
+    return attempt.skipped(
+      attempt.lineTooLong ? "envelope_line_too_long" : "envelope_unreadable",
+    );
+  }
+
+  /**
+   * The Sent folder's STATUS, asked on a sync session that is open anyway,
+   * so that a scan knows whether there is anything to open a session of its
+   * own for. `STATUS (UIDNEXT UIDVALIDITY)` reads two counters and selects
+   * nothing; LIST is asked here too when its ten minutes have run out, so
+   * that refresh costs no login either.
+   *
+   * It never fails the sync it rides on. The session is one race against its
+   * deadline, so a STATUS or a LIST the server never answers would lose that
+   * race for the page that was already complete: both are given a short wait
+   * of their own, SENT_STATUS_WAIT_MS and never more than the session has
+   * left less a margin to close in, and the page goes back when it runs out.
+   * A session with less than that left is not asked at all. A server that
+   * answers NO, says the folder is not there, or does not answer in time is
+   * not asked again for ROLE_REFUSAL_TTL_MS, and the scan falls back on its
+   * own quiet window meanwhile. A stop ends the wait at once and is held
+   * against nobody.
+   */
+  private async observeSentStatus(
+    client: ImapSessionClient,
+    session: ImapSessionBudget | undefined,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const now = this.now();
+    if (
+      this.sentScanAskedAt === null ||
+      now - this.sentScanAskedAt > SENT_STATUS_WANTED_MS ||
+      now < this.sentStatusRestUntil
+    ) {
+      return;
+    }
+    const wait = Math.min(
+      SENT_STATUS_WAIT_MS,
+      (session?.remainingMs() ?? Number.POSITIVE_INFINITY) - SENT_STATUS_SESSION_MARGIN_MS,
+    );
+    // Too little of the session is left to ask and still close it in time.
+    // That is this session's doing and not the server's: the next one asks.
+    if (wait < SENT_STATUS_MIN_WAIT_MS) return;
+    // An answer that arrives after the wait ran out belongs to a session
+    // that has been closed since, and is not kept.
+    let abandoned = false;
+    const asked = (async () => {
+      const path = (this.rememberedSentMailbox() ?? (await this.listSentMailbox(client))).path;
+      if (path === null || abandoned) return;
+      const status = await client.status(path, { uidNext: true, uidValidity: true });
+      if (abandoned) return;
+      if (status === false || status.uidNext === undefined || status.uidValidity === undefined) {
+        throw new MailProviderSyncError("mail_provider_response_invalid");
+      }
+      this.sentStatus = Object.freeze({
+        uidValidity: validateUidValidity(status.uidValidity),
+        uidNext: validateUid(status.uidNext),
+      });
+    })();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let stop: (() => void) | undefined;
+    try {
+      await Promise.race([
+        asked,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("the Sent STATUS was not answered")), wait);
+        }),
+        new Promise<never>((_resolve, reject) => {
+          stop = () => reject(new Error("the sync was stopped"));
+          if (signal.aborted) stop();
+          else signal.addEventListener("abort", stop, { once: true });
+        }),
+      ]);
+    } catch {
+      abandoned = true;
+      // The command may still fail when the session closes under it.
+      asked.catch(() => undefined);
+      this.sentStatus = null;
+      // A stop is the owner's doing, or the host's, and says nothing about
+      // the server: the next sync asks as if this one had not.
+      if (!signal.aborted) this.sentStatusRestUntil = this.now() + ROLE_REFUSAL_TTL_MS;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      if (stop !== undefined) signal.removeEventListener("abort", stop);
+    }
+  }
+
+  private rememberedSentMailbox(): SentMailboxAnswer | null {
+    if (
+      this.sentMailbox !== null &&
+      this.now() - this.sentMailbox.at > ROLE_REFUSAL_TTL_MS
+    ) {
+      this.sentMailbox = null;
+    }
+    return this.sentMailbox;
+  }
+
+  /**
+   * LIST, and what it says about the Sent mailbox, remembered. A list longer
+   * than this adapter reads is an answer like the others: thrown, it was
+   * remembered by nobody, and the scan logged in every window to hear it.
+   */
+  private async listSentMailbox(client: ImapSessionClient): Promise<SentMailboxAnswer> {
+    let listed: unknown;
+    try {
+      listed = await client.list();
+    } catch (error) {
+      throw mapImapProviderError(error);
+    }
+    const path = isSupportedMailboxList(listed) ? selectImapMailboxPath("sent", listed) : null;
+    this.sentMailbox = Object.freeze({
+      path,
+      refusal:
+        path !== null
+          ? null
+          : isSupportedMailboxList(listed)
+            ? "no_sent_mailbox"
+            : "mailbox_list_unsupported",
+      at: this.now(),
+    });
+    return this.sentMailbox;
   }
 
   /** `\Seen` and `\Flagged` are set where the message already is. */
@@ -739,9 +1162,27 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
     );
   }
 
-  private async run<T>(
+  /**
+   * A sync page's session: the Inbox work, and then, on the same login, the
+   * Sent folder's STATUS for the new-senders scan. The page is complete
+   * before the STATUS is asked, and it is what the caller gets whatever the
+   * STATUS answers and however long it takes to answer: the STATUS has a
+   * short wait of its own inside what the session has left.
+   */
+  private runSync<T>(
     signal: AbortSignal,
     operation: (client: ImapSessionClient) => Promise<T>,
+  ): Promise<T> {
+    return this.run(signal, async (client, session) => {
+      const page = await operation(client);
+      await this.observeSentStatus(client, session, signal);
+      return page;
+    });
+  }
+
+  private async run<T>(
+    signal: AbortSignal,
+    operation: (client: ImapSessionClient, session?: ImapSessionBudget) => Promise<T>,
   ): Promise<T> {
     try {
       return await this.sessions.withSession(this.account, signal, operation);
@@ -1084,6 +1525,327 @@ function metadataFetchQuery() {
     // the read-only session stays flag-neutral.
     headers: ["list-id", "list-unsubscribe", "precedence", "auto-submitted"],
   });
+}
+
+interface SentMailboxAnswer {
+  /** The path LIST named, or null with the reason there is none to read. */
+  readonly path: string | null;
+  readonly refusal: MailSentScanRefusal | null;
+  readonly at: number;
+}
+
+/**
+ * Where a Sent-folder scan stands, as the `s1_…` token the caller stores.
+ * `highestUid` is the newest UID already read: every later run fetches only
+ * the UIDs above it. The three walk fields are the first run going down
+ * through what the folder held when it began, and all zero once it is over.
+ */
+interface SentScanCursor {
+  readonly uidValidity: bigint;
+  readonly highestUid: number;
+  /** The sequence number the next walk batch ends at. */
+  readonly walkEndSequence: number;
+  /** Every UID at or above this one has been read by the walk. */
+  readonly walkUpperUid: number;
+  /** Envelopes the walk may still ask for under the first-run cap. */
+  readonly walkRemaining: number;
+}
+
+function sentScanUnavailable(reason: MailSentScanRefusal): MailSentScanResult {
+  return Object.freeze({ status: "unavailable", reason });
+}
+
+/** ENVELOPE, and the UID that says where it stands. Nothing else is fetched. */
+function sentEnvelopeFetchQuery() {
+  return Object.freeze({ uid: true, envelope: true });
+}
+
+/** A batch that could not be read, and how the next call at its cursor asks. */
+interface SentScanRetry {
+  /** The token of the cursor the next batch starts from. */
+  readonly cursor: string;
+  /** Messages the next batch may ask for. */
+  readonly width: number;
+  /** The search for what is new failed here, so new mail goes by UID range. */
+  readonly crawl: boolean;
+  /** Messages of the batch that failed that have not been gone through yet. */
+  readonly left: number;
+  /** Failures running of the batch of one letter `strikeAt` names. */
+  readonly strikes: number;
+  /**
+   * The batch the strikes were earned by. They are charged to that batch
+   * alone: a new letter fetched at the same cursor starts a count of its
+   * own, and new mail read in between leaves the count where it was.
+   */
+  readonly strikeAt: string | null;
+}
+
+/** What one scan session got as far as, written as it goes. */
+interface SentScanAttempt {
+  /** What is on the wire and unanswered: the batch has been asked for. */
+  stage: "search" | "fetch" | null;
+  /** The token of the cursor the batch starts from. */
+  cursor: string | null;
+  /** Messages the fetch asked for. */
+  asked: number;
+  width: number;
+  crawl: boolean;
+  left: number;
+  strikes: number;
+  strikeAt: string | null;
+  /** The batch the fetch on the wire asks for, named as `strikeAt` names one. */
+  batch: string | null;
+  /** The answer if the one message asked for is passed over. */
+  skipped: ((reason: MailSentScanSkipReason) => MailSentScanResult) | null;
+  /** Mail above the cursor is left for the batch after this one. */
+  moreAbove: boolean;
+  lineTooLong: boolean;
+}
+
+const SENT_SCAN_BATCH_FAILED: MailSentScanResult = Object.freeze({ status: "batch_failed" });
+const SENT_SCAN_UNCHANGED: MailSentScanResult = Object.freeze({ status: "unchanged" });
+
+/** ImapFlow's codes for a response line or literal past the session's limit. */
+function isLineLimitError(error: unknown): boolean {
+  if (error === null || typeof error !== "object") return false;
+  const code = (error as { readonly code?: unknown }).code;
+  return code === "LineTooLarge" || code === "LiteralTooLarge";
+}
+
+/**
+ * One batch of envelopes from the examined Sent mailbox.
+ *
+ * Mail above the cursor is read lowest UID first. When what is new fits a
+ * batch by its UID span it is fetched by that range outright. Otherwise the
+ * server is asked which UIDs exist above the cursor and the lowest batch of
+ * them is fetched, so a letter a hundred thousand UIDs up (a server that
+ * numbers across the whole account, a long pause) is one session away and not
+ * a window for every 250 UIDs in between.
+ *
+ * The walk down goes by sequence number under a UID ceiling instead: UIDs in
+ * a folder the owner prunes are sparse, while a sequence range always holds
+ * as many letters as it is wide. Sequence numbers move when another client
+ * expunges between two sessions, and only ever down, so an unread letter is
+ * never above the stored end; a read one that slid into the range is
+ * recognised by its UID and left out. The cap counts the range asked for, so
+ * the first run never fetches more envelopes than it.
+ *
+ * A FETCH response without an envelope is not one of the answers: a server
+ * reports another client's flag change in the middle of this fetch, and it
+ * is stepped over.
+ */
+async function readSentEnvelopes(
+  client: ImapSessionClient,
+  mailbox: MailboxObject,
+  stored: SentScanCursor | null,
+  retry: SentScanRetry | null,
+  attempt: SentScanAttempt,
+): Promise<MailSentScanResult> {
+  const uidValidity = validateUidValidity(mailbox.uidValidity);
+  const uidNext = validateUid(mailbox.uidNext);
+  const exists = validateExists(mailbox.exists);
+  // A cursor at or past the folder's next UID has read letters this folder
+  // does not hold: a mailbox restored under its old UIDVALIDITY. Nothing above
+  // such a cursor would ever be read, so the walk begins again, as it does
+  // under a new UIDVALIDITY.
+  const restart: MailSentScanRestart | null =
+    stored === null
+      ? null
+      : stored.uidValidity !== uidValidity
+        ? "uidvalidity_changed"
+        : stored.highestUid >= uidNext
+          ? "uidnext_regressed"
+          : null;
+  const cursor: SentScanCursor =
+    stored === null || restart !== null
+      ? {
+          uidValidity,
+          highestUid: uidNext - 1,
+          walkEndSequence: exists,
+          walkUpperUid: uidNext,
+          walkRemaining: Math.min(exists, IMAP_SENT_SCAN_FIRST_RUN_CAP),
+        }
+      : stored;
+  const token = encodeSentScanCursor(cursor);
+  const plan = retry !== null && retry.cursor === token ? retry : null;
+  const width = plan?.width ?? IMAP_SENT_SCAN_BATCH;
+  attempt.cursor = token;
+  attempt.width = width;
+  attempt.crawl = plan?.crawl ?? false;
+  attempt.left = plan?.left ?? 0;
+  attempt.strikes = plan?.strikes ?? 0;
+  attempt.strikeAt = plan?.strikeAt ?? null;
+  const answer = (
+    next: SentScanCursor,
+    messages: readonly FetchMessageObject[],
+    skipReason: MailSentScanSkipReason | null,
+  ): MailSentScanResult => {
+    const settled: SentScanCursor =
+      next.walkEndSequence === 0 || next.walkRemaining === 0
+        ? { ...next, walkEndSequence: 0, walkUpperUid: 0, walkRemaining: 0 }
+        : next;
+    return Object.freeze({
+      status: "scanned",
+      cursor: encodeSentScanCursor(settled),
+      envelopes: Object.freeze(messages.flatMap(sentEnvelopeOf)),
+      envelopeCount: messages.length,
+      skippedCount: skipReason === null ? 0 : 1,
+      skipReason,
+      restart,
+      hasMore: uidNext - 1 > settled.highestUid || settled.walkRemaining > 0,
+    });
+  };
+
+  const lastUid = uidNext - 1;
+  if (lastUid > cursor.highestUid) {
+    let startUid = cursor.highestUid + 1;
+    let endUid = Math.min(lastUid, cursor.highestUid + width);
+    let asked = endUid - startUid + 1;
+    // Where the cursor stands once the batch is read.
+    let readUid = endUid;
+    if (lastUid - startUid + 1 > width && !attempt.crawl) {
+      attempt.stage = "search";
+      const found = await client.search({ uid: `${startUid}:*` }, { uid: true });
+      attempt.stage = null;
+      if (found !== false) {
+        // `n:*` always names the newest message, even one below n.
+        const uids = [...new Set(found)]
+          .filter((uid) => Number.isSafeInteger(uid) && uid >= startUid && uid <= lastUid)
+          .sort((left, right) => left - right);
+        if (uids.length === 0) return answer({ ...cursor, highestUid: lastUid }, [], null);
+        // The fetch asks for the letters the search named and no UID beyond
+        // them. When they are all it named, reading them is reading the
+        // folder to its end. Passing one over is not: that moves the cursor
+        // past the one UID, so a search that named too few cannot take the
+        // letters nobody tried along with the one that failed.
+        asked = Math.min(uids.length, width);
+        startUid = uids[0]!;
+        endUid = uids[asked - 1]!;
+        readUid = uids.length > width ? endUid : lastUid;
+      }
+    }
+    const next: SentScanCursor = { ...cursor, highestUid: readUid };
+    attempt.asked = asked;
+    attempt.moreAbove = lastUid > readUid;
+    attempt.skipped = (reason) => answer({ ...cursor, highestUid: endUid }, [], reason);
+    attempt.batch = `u${startUid}:${endUid}`;
+    attempt.stage = "fetch";
+    const messages = withEnvelope(
+      await client.fetchAll(`${startUid}:${endUid}`, sentEnvelopeFetchQuery(), { uid: true }),
+    );
+    if (
+      messages.length > asked ||
+      messages.some((message) => message.uid < startUid || message.uid > endUid)
+    ) {
+      throw new MailProviderSyncError("mail_provider_response_invalid");
+    }
+    attempt.stage = null;
+    return answer(next, messages, null);
+  }
+
+  const endSequence = Math.min(cursor.walkEndSequence, exists);
+  const asked = Math.min(width, cursor.walkRemaining, endSequence);
+  if (asked === 0) return answer({ ...cursor, walkEndSequence: 0 }, [], null);
+  const startSequence = endSequence - asked + 1;
+  const passed: SentScanCursor = {
+    ...cursor,
+    walkEndSequence: startSequence - 1,
+    walkRemaining: cursor.walkRemaining - asked,
+  };
+  attempt.asked = asked;
+  attempt.skipped = (reason) => answer(passed, [], reason);
+  attempt.batch = `s${startSequence}:${endSequence}<${cursor.walkUpperUid}`;
+  attempt.stage = "fetch";
+  const fetched = withEnvelope(
+    await client.fetchAll(`${startSequence}:${endSequence}`, sentEnvelopeFetchQuery()),
+  );
+  if (fetched.length > asked) {
+    throw new MailProviderSyncError("mail_provider_response_invalid");
+  }
+  attempt.stage = null;
+  const ceiling = cursor.walkUpperUid;
+  const messages = fetched.filter((message) => message.uid < ceiling);
+  return answer(
+    {
+      ...passed,
+      walkUpperUid: messages.reduce((lowest, message) => Math.min(lowest, message.uid), ceiling),
+    },
+    messages,
+    null,
+  );
+}
+
+/** The fetch answers that are envelopes, each under a UID that can be one. */
+function withEnvelope(messages: readonly FetchMessageObject[]): FetchMessageObject[] {
+  const answers = messages.filter((message) => message.envelope !== undefined);
+  for (const message of answers) validateUid(message.uid);
+  return answers;
+}
+
+/**
+ * Who wrote one sent letter and to whom, or nothing when the envelope does
+ * not say plainly who wrote it. A Sent folder holds letters the owner did not
+ * write, and what is learned from a letter depends on its author being the
+ * owner, so the author has to be one address: exactly one From, and a Sender
+ * that, when the letter states one, is that same address. A delegate's
+ * send-as and a list's resend both carry a Sender of their own. The caller
+ * decides whether the address is the owner's. To and Cc are the recipients;
+ * Bcc is in the envelope and is never read.
+ */
+function sentEnvelopeOf(message: FetchMessageObject): MailSentScanEnvelope[] {
+  const envelope = message.envelope;
+  if (envelope === undefined) return [];
+  const from = addresses(envelope.from);
+  if (from.length !== 1 || envelope.from?.length !== 1) return [];
+  const author = from[0]!.address;
+  if (Array.isArray(envelope.sender) && envelope.sender.length > 0) {
+    const sender = addresses(envelope.sender);
+    if (envelope.sender.length !== 1 || sender[0]?.address !== author) return [];
+  }
+  const recipients = new Set<string>();
+  for (const entry of addresses(envelope.to)) recipients.add(entry.address);
+  for (const entry of addresses(envelope.cc)) recipients.add(entry.address);
+  if (recipients.size === 0) return [];
+  return [Object.freeze({ from: author, recipients: Object.freeze([...recipients]) })];
+}
+
+function encodeSentScanCursor(cursor: SentScanCursor): string {
+  return [
+    "s1",
+    cursor.uidValidity,
+    cursor.highestUid,
+    cursor.walkEndSequence,
+    cursor.walkUpperUid,
+    cursor.walkRemaining,
+  ].join("_");
+}
+
+/**
+ * Null for no cursor and for one this adapter cannot read: the position such
+ * a token names is nowhere in the folder, so the walk begins again, as it
+ * does for a first run.
+ */
+function parseSentScanCursor(value: string | null): SentScanCursor | null {
+  if (value === null) return null;
+  const match = /^s1_([1-9]\d{0,9})_(\d{1,10})_(\d{1,10})_(\d{1,10})_(\d{1,4})$/.exec(value);
+  if (!match) return null;
+  const cursor: SentScanCursor = {
+    uidValidity: BigInt(match[1]!),
+    highestUid: Number(match[2]),
+    walkEndSequence: Number(match[3]),
+    walkUpperUid: Number(match[4]),
+    walkRemaining: Number(match[5]),
+  };
+  if (
+    cursor.uidValidity > BigInt(MAX_UID_COMPONENT) ||
+    cursor.highestUid > MAX_UID_COMPONENT ||
+    cursor.walkEndSequence > MAX_UID_COMPONENT ||
+    cursor.walkUpperUid > cursor.highestUid + 1 ||
+    cursor.walkRemaining > IMAP_SENT_SCAN_FIRST_RUN_CAP
+  ) {
+    return null;
+  }
+  return cursor;
 }
 
 /**
@@ -1729,7 +2491,12 @@ function mapImapProviderError(error: unknown): MailProviderSyncError {
  * Which server folder plays a role — outside Gmail there is no INBOX label to
  * drop, so archive, trash and junk are ordinary mailboxes that first have to be
  * found. A server states the answer through SPECIAL-USE (RFC 6154) or the older
- * XLIST attribute, and ImapFlow surfaces both as `specialUse`. A server that
+ * XLIST attribute, which arrives among the entry's own `flags`. ImapFlow's
+ * `specialUse` beside them is not that statement and is never read here: where
+ * no folder carries the flag it is a guess from the folder's leaf name, some
+ * ninety localized names at any depth, the first that matches, and it once
+ * made `Projects/Acme/Archive` the destination of the owner's archive and
+ * would have had another user's shared `Sent` read as his own. A server that
  * states nothing is matched against a short list of well-known names, at the
  * account root or directly under the Inbox and only when exactly one folder
  * answers, and a server that matches neither has no mailbox for that role:
@@ -1745,13 +2512,23 @@ function mapImapProviderError(error: unknown): MailProviderSyncError {
 
 export type ImapMailboxRole = "archive" | "trash" | "junk";
 
+/**
+ * Every mailbox LIST is asked to name: the three a message is moved into, and
+ * the Sent mailbox, which is only ever read. Sent stays out of
+ * `ImapMailboxRole` so that no move can be addressed to it.
+ */
+export type ImapDiscoveredMailbox = ImapMailboxRole | "sent";
+
 export interface ImapMailboxDescriptor {
   readonly path: string;
   /** Leaf name as listed. Derived from `path` and `delimiter` when absent. */
   readonly name?: string;
   readonly delimiter?: string;
-  /** One SPECIAL-USE or XLIST attribute, e.g. `\Archive`. */
-  readonly specialUse?: string;
+  /**
+   * The attributes the server listed for the mailbox: `\Noselect` and its
+   * kind, and a SPECIAL-USE or XLIST attribute such as `\Archive` when the
+   * server states one.
+   */
   readonly flags?: Iterable<string>;
 }
 
@@ -1771,7 +2548,67 @@ type RoleTier =
   | { readonly kind: "special_use"; readonly attribute: string }
   | { readonly kind: "name"; readonly names: readonly string[] };
 
-const ROLE_TIERS: Readonly<Record<ImapMailboxRole, readonly RoleTier[]>> =
+/*
+ * The names a server's own language gives the trash, junk and sent folders.
+ *
+ * These are ImapFlow's lists (`imapflow/lib/special-use`, 1.4.7), written out
+ * here rather than read from the package, with the few names this adapter
+ * knew before them. ImapFlow uses them to guess a `specialUse` for a folder
+ * at any depth; that guess is never read here, but on a server that states no
+ * attribute it was the only thing that found a German or a Russian mailbox's
+ * trash, and without the names those accounts lose the trash and spam
+ * buttons. Here they are bound by the name tier's own rule: at the account
+ * root or directly under the Inbox, and only when exactly one folder answers.
+ * `mailbox-roles.test.ts` compares them with the package's lists, so an
+ * upgrade that adds a name fails there until it is added here on purpose.
+ */
+const TRASH_NAMES = Object.freeze([
+  "trash", "deleted items", "deleted messages", "articole șterse", "bin",
+  "borttagna objekt", "deleted", "elementi eliminati", "elementos borrados",
+  "elementos eliminados", "gelöschte objekte", "gelöschte elemente",
+  "item dipadam", "itens apagados", "itens excluídos", "kustutatud üksused",
+  "mục đã xóa", "odstraněné položky", "odstraněná pošta", "pesan terhapus",
+  "poistetut", "praht", "prügikast", "silinmiş öğeler", "slettede beskeder",
+  "slettede elementer", "törölt elemek", "törölt", "usunięte wiadomości",
+  "verwijderde items", "vymazané správy", "éléments supprimés", "видалені",
+  "жойылғандар", "удаленные", "פריטים שנמחקו", "العناصر المحذوفة",
+  "موارد حذف شده", "รายการที่ลบ", "已删除邮件", "已刪除項目",
+]);
+const JUNK_NAMES = Object.freeze([
+  "junk", "spam", "junk e-mail", "junk email", "bulk mail",
+  "correo no deseado", "courrier indésirable", "istenmeyen",
+  "istenmeyen e-posta", "junk-e-mail", "levélszemét", "nevyžiadaná pošta",
+  "nevyžádaná pošta", "no deseado", "posta indesiderata", "pourriel",
+  "roskaposti", "rämpspost", "skräppost", "spamowanie", "søppelpost",
+  "thư rác", "wiadomości-śmieci", "спам", "דואר זבל", "الرسائل العشوائية",
+  "هرزنامه", "สแปม", "垃圾郵件", "垃圾邮件", "垃圾電郵",
+]);
+const SENT_NAMES = Object.freeze([
+  "sent", "sent items", "sent messages", "отправленные", "надіслані",
+  "gesendet", "envoyés", "enviados", "inviati", "wysłane",
+  "gönderilmiş öğeler", "verzonden", "skickat", "aika", "bidaliak",
+  "bidalita", "dihantar", "e rometsweng", "e tindami", "elküldött",
+  "elküldöttek", "elementos enviados", "éléments envoyés", "enviadas",
+  "enviats", "ethunyelweyo", "expediate", "ezipuru", "gesendete",
+  "gesendete elemente", "gestuur", "göndərilənlər", "iberilen",
+  "išsiųstieji", "kuthunyelwe", "lasa", "lähetetyt", "messages envoyés",
+  "naipadala", "nalefa", "napadala", "nosūtītās ziņas", "odeslané",
+  "odeslaná pošta", "padala", "poslane", "poslano", "poslané", "poslato",
+  "saadetud", "saadetud kirjad", "saadetud üksused", "sendt",
+  "sända poster", "sänt", "terkirim", "ti fi ranṣẹ", "të dërguara",
+  "vilivyotumwa", "đã gửi", "σταλθέντα", "жиберилген", "жіберілгендер",
+  "изпратени", "илгээсэн", "ирсол шуд", "испратено", "пасланыя",
+  "юборилган", "ուղարկված", "נשלחו", "פריטים שנשלחו", "المرسلة",
+  "بھیجے گئے", "سوزمژہ", "لېګل شوی", "موارد ارسال شده", "पाठविले",
+  "पाठविलेले", "प्रेषित", "भेजा गया", "প্রেরিত", "প্ৰেৰিত", "ਭੇਜੇ",
+  "મોકલેલા", "ପଠାଗଲା", "அனுப்பியவை", "పంపించబడింది", "ಕಳುಹಿಸಲಾದ", "അയച്ചു",
+  "යැවු පණිවුඩ", "ส่งแล้ว", "გაგზავნილი", "የተላኩ",
+  // Khmer, with the zero-width space the name is written with.
+  "បាន​ផ្ញើ",
+  "寄件備份", "已发信息", "送信済みﾒｰﾙ", "발신 메시지", "보낸 편지함",
+]);
+
+const ROLE_TIERS: Readonly<Record<ImapDiscoveredMailbox, readonly RoleTier[]>> =
   Object.freeze({
     archive: Object.freeze<readonly RoleTier[]>([
       Object.freeze({ kind: "special_use", attribute: "\\Archive" }),
@@ -1798,21 +2635,27 @@ const ROLE_TIERS: Readonly<Record<ImapMailboxRole, readonly RoleTier[]>> =
         ]),
       }),
       Object.freeze({ kind: "special_use", attribute: "\\All" }),
+      // What XLIST calls the same view. It is the server's own statement,
+      // like \All, and it ranks where \All does.
+      Object.freeze({ kind: "special_use", attribute: "\\AllMail" }),
       Object.freeze({ kind: "name", names: Object.freeze(["all mail"]) }),
     ]),
     trash: Object.freeze<readonly RoleTier[]>([
       Object.freeze({ kind: "special_use", attribute: "\\Trash" }),
-      Object.freeze({
-        kind: "name",
-        names: Object.freeze(["trash", "deleted items", "deleted messages"]),
-      }),
+      Object.freeze({ kind: "name", names: TRASH_NAMES }),
     ]),
     junk: Object.freeze<readonly RoleTier[]>([
       Object.freeze({ kind: "special_use", attribute: "\\Junk" }),
-      Object.freeze({
-        kind: "name",
-        names: Object.freeze(["junk", "spam", "junk e-mail", "junk email"]),
-      }),
+      // XLIST's word for \Junk, which some SPECIAL-USE servers list too.
+      Object.freeze({ kind: "special_use", attribute: "\\Spam" }),
+      Object.freeze({ kind: "name", names: JUNK_NAMES }),
+    ]),
+    // Sent is found under the archive's own rule: the stated attribute, then
+    // a name at the root or directly under the Inbox when exactly one folder
+    // answers.
+    sent: Object.freeze<readonly RoleTier[]>([
+      Object.freeze({ kind: "special_use", attribute: "\\Sent" }),
+      Object.freeze({ kind: "name", names: SENT_NAMES }),
     ]),
   });
 
@@ -1836,27 +2679,35 @@ export function isInboxPath(path: string): boolean {
  * order.
  */
 export function selectImapMailboxPath(
-  role: ImapMailboxRole,
+  role: ImapDiscoveredMailbox,
   mailboxes: readonly ImapMailboxDescriptor[],
 ): string | null {
+  return resolveImapMailboxRole(role, mailboxes).path;
+}
+
+/**
+ * The reading `selectImapMailboxPath` gives, with the folders a name tier
+ * refused to choose between when that is why there is no path. The Sent
+ * copy is the one caller that settles such a tie, and only among these.
+ */
+export function resolveImapMailboxRole<T extends ImapMailboxDescriptor>(
+  role: ImapDiscoveredMailbox,
+  mailboxes: readonly T[],
+): { readonly path: string | null; readonly tied: readonly T[] } {
   const candidates = mailboxes.filter(isSelectableMailbox);
   for (const tier of ROLE_TIERS[role]) {
     if (tier.kind === "special_use") {
-      const match = candidates.find(
-        (entry) => normalizedAttribute(entry.specialUse) === tier.attribute.toLowerCase(),
-      );
-      if (match) return match.path;
+      const match = candidates.find((entry) => statesAttribute(entry, tier.attribute));
+      if (match) return { path: match.path, tied: [] };
       continue;
     }
     const named = candidates.filter(
-      (entry) =>
-        isRoleMountPoint(entry) &&
-        tier.names.includes(leafName(entry).toLowerCase()),
+      (entry) => isRoleMountPoint(entry) && tier.names.includes(comparableLeafName(entry)),
     );
-    if (named.length === 1) return named[0]!.path;
-    if (named.length > 1) return null;
+    if (named.length === 1) return { path: named[0]!.path, tied: [] };
+    if (named.length > 1) return { path: null, tied: named };
   }
-  return null;
+  return { path: null, tied: [] };
 }
 
 /**
@@ -1892,15 +2743,14 @@ const ARCHIVE_MAILBOX_NAME = "Archive";
 const NAMESPACE_ANCHOR_ATTRIBUTES = Object.freeze([
   "\\trash",
   "\\junk",
+  "\\spam",
   "\\sent",
   "\\drafts",
 ]);
 const NAMESPACE_ANCHOR_NAMES = Object.freeze([
-  ...ROLE_TIERS.trash.flatMap((tier) => (tier.kind === "name" ? tier.names : [])),
-  ...ROLE_TIERS.junk.flatMap((tier) => (tier.kind === "name" ? tier.names : [])),
-  "sent",
-  "sent items",
-  "sent messages",
+  ...TRASH_NAMES,
+  ...JUNK_NAMES,
+  ...SENT_NAMES,
   "drafts",
 ]);
 
@@ -1916,9 +2766,8 @@ export function archiveCreatePath(mailboxes: readonly ImapMailboxDescriptor[]): 
   const anchors = mailboxes.filter(
     (entry) =>
       isSelectableMailbox(entry) &&
-      (NAMESPACE_ANCHOR_ATTRIBUTES.includes(normalizedAttribute(entry.specialUse) ?? "") ||
-        (isRoleMountPoint(entry) &&
-          NAMESPACE_ANCHOR_NAMES.includes(leafName(entry).toLowerCase()))),
+      (NAMESPACE_ANCHOR_ATTRIBUTES.some((attribute) => statesAttribute(entry, attribute)) ||
+        (isRoleMountPoint(entry) && NAMESPACE_ANCHOR_NAMES.includes(comparableLeafName(entry)))),
   );
   const prefixes = new Set(anchors.map(inboxChildPrefix));
   if (prefixes.size !== 1) return ARCHIVE_MAILBOX_NAME;
@@ -2026,8 +2875,18 @@ function isSelectableMailbox(entry: ImapMailboxDescriptor): boolean {
   );
 }
 
-function normalizedAttribute(value: string | undefined): string | null {
-  return typeof value === "string" && value.length > 0 ? value.toLowerCase() : null;
+/**
+ * Whether the server itself listed this attribute for the mailbox. Only the
+ * entry's flags are read: they are what LIST or XLIST answered, in whatever
+ * letter case the server wrote them.
+ */
+function statesAttribute(entry: ImapMailboxDescriptor, attribute: string): boolean {
+  if (entry.flags === undefined) return false;
+  const wanted = attribute.toLowerCase();
+  for (const flag of entry.flags) {
+    if (typeof flag === "string" && flag.toLowerCase() === wanted) return true;
+  }
+  return false;
 }
 
 function leafName(entry: ImapMailboxDescriptor): string {
@@ -2036,4 +2895,23 @@ function leafName(entry: ImapMailboxDescriptor): string {
   if (typeof delimiter !== "string" || delimiter.length !== 1) return entry.path;
   const index = entry.path.lastIndexOf(delimiter);
   return index === -1 ? entry.path : entry.path.slice(index + delimiter.length);
+}
+
+/**
+ * The leaf name as the name tiers compare it: lowercased, trimmed, and
+ * without the left-to-right marks some clients put around a right-to-left
+ * name for display. It is the reading ImapFlow gives a name before it looks
+ * it up in the same lists, and two steps more. The name is composed first,
+ * because the lists hold composed letters and a server may list `é` as `e`
+ * and a combining accent. And the combining dot above is dropped after
+ * lowercasing, because a Turkish capital `İ` lowercases to `i` and that dot,
+ * and the lists write the plain `i`.
+ */
+function comparableLeafName(entry: ImapMailboxDescriptor): string {
+  return leafName(entry)
+    .normalize("NFC")
+    .toLowerCase()
+    .replace(/\u0307/g, "")
+    .replace(/\u200e/g, "")
+    .trim();
 }

@@ -311,9 +311,10 @@ state.
 
 The first real send is a canary, not a soak: one message from the account to
 itself, `GET /v1/send/:id` reaching `sent`, and the copy visible in the
-provider's Sent folder. A `sent_copy_failed` on a provider without
-SPECIAL-USE `\Sent` is the known gap in `imap-sent-copy.ts` and does not mean
-the message was lost.
+provider's Sent folder. A `sent_copy_failed` on a provider that states no
+`\Sent` means `imap-sent-copy.ts` found no single folder under a Sent name at
+the root or directly under the Inbox, and none named `Sent` at the root, to
+file the copy in. It does not mean the message was lost.
 
 ### Rollback
 

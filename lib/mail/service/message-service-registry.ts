@@ -38,12 +38,26 @@ import {
   type MailProviderSyncPort,
   MailProviderSyncError,
 } from "./message-service";
+import type { MailSentScanResult } from "./senders";
+
+/**
+ * A provider's bounded read of its Sent mailbox, for an account whose cache
+ * holds the Inbox alone. The new-senders screen is its only caller.
+ */
+export interface MailSentScanPort {
+  scanSentEnvelopes(
+    input: { readonly cursor: string | null },
+    signal: AbortSignal,
+  ): Promise<MailSentScanResult>;
+}
 
 export interface MailProviderFactory {
   create(
     account: StoredMailAccount,
   ): Promise<{
     readonly provider: MailProviderSyncPort;
+    /** Absent for a provider whose Sent mail the cache already holds. */
+    readonly sentScan?: MailSentScanPort;
     readonly destroy?: () => void;
   }>;
 }
@@ -54,6 +68,7 @@ interface RegistryEntry {
   readonly transportBindingVersion: number | null;
   readonly cache: SqliteMailMessageCache;
   readonly service: AccountMailMessageService;
+  readonly sentScan: MailSentScanPort | null;
   readonly destroyProvider: (() => void) | undefined;
   readonly lifecycle: AbortController;
   activeOperations: number;
@@ -307,6 +322,24 @@ export class MultiAccountMailMessageService implements MailMessageService {
     return this.withEntry(accountId, (entry) => entry.cache.readSenderBackfillBatch(input));
   }
 
+  /**
+   * The screen's one read that does reach a provider: a bounded batch of the
+   * Sent mailbox's envelopes, on a session of its own that ends with the
+   * caller's pass and with the account. Null where the provider has no such
+   * scan, because its Sent mail is in the cache.
+   */
+  async scanSentEnvelopes(
+    accountId: string,
+    input: { readonly cursor: string | null },
+    signal: AbortSignal,
+  ): Promise<MailSentScanResult | null> {
+    return this.withEntry(accountId, (entry, lifecycleSignal) =>
+      entry.sentScan === null
+        ? null
+        : entry.sentScan.scanSentEnvelopes(input, AbortSignal.any([signal, lifecycleSignal])),
+    );
+  }
+
   /** Every account with its address: the owner's own addresses, and which
    *  of them the scheduler syncs. */
   async listAccounts(): Promise<
@@ -482,6 +515,7 @@ export class MultiAccountMailMessageService implements MailMessageService {
           hydrateHiddenMailboxes: account.providerKind === "gmail",
           onChange: this.onChange,
         }),
+        sentScan: provider.sentScan ?? null,
         destroyProvider,
         lifecycle: new AbortController(),
         activeOperations: 0,
@@ -532,9 +566,8 @@ export function createProductionMailProviderFactory(options: {
         if (options.imapProviderFactory) {
           return options.imapProviderFactory.create(account);
         }
-        return Object.freeze({
-          provider: new ImapMailSyncAdapter(account, imapSessions),
-        });
+        const provider = new ImapMailSyncAdapter(account, imapSessions);
+        return Object.freeze({ provider, sentScan: provider });
       }
       const tokenPort = new StoredGmailAccessTokenPort({
         accountId: account.account.accountId,

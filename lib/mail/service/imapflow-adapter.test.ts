@@ -745,6 +745,7 @@ function readClientFixture() {
     unbind: vi.fn(() => ({ readSocket, writeSocket })),
     getMailboxLock: vi.fn(),
     fetchAll: vi.fn(),
+    status: vi.fn(),
     list: vi.fn(),
     mailboxCreate: vi.fn(),
     mailboxSubscribe: vi.fn(),

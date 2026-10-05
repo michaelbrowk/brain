@@ -98,13 +98,27 @@ export interface ImapReadClient {
     query: FetchQueryObject,
     options?: FetchOptions,
   ): Promise<FetchMessageObject[]>;
+  /**
+   * `STATUS` of a mailbox other than the selected one, which reads its
+   * counters without opening it. ImapFlow answers `false` when the server
+   * says NO, and throws when the server says the mailbox is not there.
+   */
+  status(
+    path: string,
+    query: { readonly uidNext?: boolean; readonly uidValidity?: boolean },
+  ): Promise<
+    | { readonly path: string; readonly uidNext?: number; readonly uidValidity?: bigint }
+    | false
+  >;
 }
 
 /**
  * The commands a session may issue once the caller takes a writable mailbox
  * lock. ImapFlow issues `UID STORE` for flags and `UID MOVE` (RFC 6851) for a
  * relocation. Mailbox roles are discovered through LIST, which carries the
- * SPECIAL-USE and XLIST attributes as `specialUse`.
+ * SPECIAL-USE and XLIST attributes among each entry's `flags`. The entry's
+ * `specialUse` is ImapFlow's own reading, a guess from the folder's name
+ * where no flag is listed, and no caller may take a role from it.
  */
 export interface ImapMutationCommands {
   /**
@@ -154,6 +168,17 @@ export interface ImapMutationCommands {
 
 /** One authenticated session. Reads always; mutates on a writable lock. */
 export interface ImapSessionClient extends ImapReadClient, ImapMutationCommands {}
+
+/**
+ * What a session's operation may know about the session it runs on. A session
+ * is one race against one deadline, and a command the server never answers
+ * loses that race for everything the operation had already done. An operation
+ * that adds something optional to its work asks how long is left and puts a
+ * shorter wait of its own around it.
+ */
+export interface ImapSessionBudget {
+  remainingMs(): number;
+}
 
 type ImapReadClientFactory = (options: ImapFlowOptions) => ImapSessionClient;
 
@@ -210,7 +235,7 @@ export class ImapFlowReadSessionFactory {
   async withSession<T>(
     expected: StoredImapMailAccount,
     signal: AbortSignal,
-    operation: (client: ImapSessionClient) => Promise<T>,
+    operation: (client: ImapSessionClient, session: ImapSessionBudget) => Promise<T>,
   ): Promise<T> {
     signal.throwIfAborted();
     const current = await this.store.readAccount(expected.account.accountId);
@@ -316,7 +341,7 @@ export class ImapFlowReadSessionFactory {
     password: Buffer,
     signal: AbortSignal,
     deadlineAt: number,
-    operation: (client: ImapSessionClient) => Promise<T>,
+    operation: (client: ImapSessionClient, session: ImapSessionBudget) => Promise<T>,
   ): Promise<
     | { readonly ok: true; readonly value: T }
     | {
@@ -361,7 +386,10 @@ export class ImapFlowReadSessionFactory {
             throw new MailAccountError("imap_authentication_failed");
           }
           sessionReady = true;
-          const result = await operation(client);
+          const result = await operation(
+            client,
+            Object.freeze({ remainingMs: () => deadlineAt - this.now() }),
+          );
           const current = await this.store.readAccount(
             account.account.accountId,
           );

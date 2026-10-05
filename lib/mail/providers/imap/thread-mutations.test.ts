@@ -257,6 +257,32 @@ describe("IMAP thread mutations", () => {
     expect(server.mailbox("INBOX").messages.has(1)).toBe(false);
   });
 
+  it("never moves mail into a folder whose role was only guessed from its name", async () => {
+    // What ImapFlow's LIST hands back on a server that states no attribute:
+    // a `Projects.Acme.Archive` with `specialUse: "\\Archive"` it guessed from
+    // the leaf name, and a trash guessed the same way. The owner's Inbox mail
+    // used to be archived into that project folder.
+    const server = serverFixture({
+      mailboxes: [
+        { path: "Projects.Acme.Archive", guessedUse: "\\Archive" },
+        { path: "Projects.Acme.Trash", guessedUse: "\\Trash" },
+      ],
+    });
+    const { provider } = providerFor(server);
+
+    await provider.archiveThread("i77u1", signal());
+
+    // No stated archive and none by name at the root, so one is created there.
+    expect(server.commands).toContainEqual({ name: "create", path: "Archive" });
+    expect(server.mailbox("Archive").messages.size).toBe(1);
+    expect(server.mailbox("Projects.Acme.Archive").messages.size).toBe(0);
+    // Trash is never invented: the role is refused, and nothing moves.
+    await expect(provider.trashThread("i77u1", signal())).rejects.toMatchObject({
+      code: "mail_provider_mutation_unsupported",
+    });
+    expect(server.mailbox("Projects.Acme.Trash").messages.size).toBe(0);
+  });
+
   it("asks the server again once a remembered refusal is ten minutes old", async () => {
     let clock = 1_800_000_000_000;
     const server = serverFixture({ mailboxes: [{ path: "Sent" }], createAnswers: "no" });
@@ -768,6 +794,7 @@ interface FakeMessage {
 interface FakeMailbox {
   readonly path: string;
   readonly specialUse?: string;
+  readonly guessedUse?: string;
   uidValidity: bigint;
   uidNext: number;
   readonly messages: Map<number, FakeMessage>;
@@ -795,7 +822,10 @@ interface FakeServer {
 function serverFixture(options?: {
   readonly mailboxes?: readonly {
     readonly path: string;
+    /** A SPECIAL-USE or XLIST attribute the server states for the folder. */
     readonly specialUse?: string;
+    /** A role ImapFlow guessed from the folder's name; the server states none. */
+    readonly guessedUse?: string;
     readonly messageIds?: readonly string[];
   }[];
   readonly inboxFlags?: readonly string[];
@@ -850,6 +880,7 @@ function serverFixture(options?: {
     mailboxes.set(entry.path, {
       path: entry.path,
       ...(entry.specialUse === undefined ? {} : { specialUse: entry.specialUse }),
+      ...(entry.guessedUse === undefined ? {} : { guessedUse: entry.guessedUse }),
       uidValidity: BigInt(500 + index),
       uidNext: seeded.length + 1,
       messages: new Map(
@@ -948,8 +979,12 @@ function serverFixture(options?: {
           delimiter: ".",
           parent: [],
           parentPath: "",
-          flags: new Set<string>(),
-          ...(entry.specialUse === undefined ? {} : { specialUse: entry.specialUse }),
+          // As ImapFlow lists it: a stated attribute is among the flags and
+          // repeated as `specialUse`; a guessed one is in `specialUse` alone.
+          flags: new Set<string>(entry.specialUse === undefined ? [] : [entry.specialUse]),
+          ...(entry.specialUse === undefined && entry.guessedUse === undefined
+            ? {}
+            : { specialUse: entry.specialUse ?? entry.guessedUse }),
           listed: true,
           subscribed: true,
         }));

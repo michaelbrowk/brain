@@ -520,7 +520,8 @@ language the library's own list covers (`Gelöschte Elemente`, `Удаленны
 server that states SPECIAL-USE or XLIST attributes, `\Spam` and `\AllMail`
 included. The copy of a sent letter follows the same rule since 0.20.3: it
 goes to the folder the server marks `\Sent`, else to the one folder under a
-Sent name at the root or under the Inbox, else to a folder named `Sent` at
+Sent name at the root or under the Inbox (of two such folders, the one the
+library itself picks, as 0.20.2 did), else to a folder named `Sent` at
 the root, and where there is none of these the send ends `sent_copy_failed`
 with the letter delivered and no copy filed. Before, it could be filed in a
 folder called Sent inside a project folder or a colleague's shared mailbox.

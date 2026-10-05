@@ -2682,20 +2682,32 @@ export function selectImapMailboxPath(
   role: ImapDiscoveredMailbox,
   mailboxes: readonly ImapMailboxDescriptor[],
 ): string | null {
+  return resolveImapMailboxRole(role, mailboxes).path;
+}
+
+/**
+ * The reading `selectImapMailboxPath` gives, with the folders a name tier
+ * refused to choose between when that is why there is no path. The Sent
+ * copy is the one caller that settles such a tie, and only among these.
+ */
+export function resolveImapMailboxRole<T extends ImapMailboxDescriptor>(
+  role: ImapDiscoveredMailbox,
+  mailboxes: readonly T[],
+): { readonly path: string | null; readonly tied: readonly T[] } {
   const candidates = mailboxes.filter(isSelectableMailbox);
   for (const tier of ROLE_TIERS[role]) {
     if (tier.kind === "special_use") {
       const match = candidates.find((entry) => statesAttribute(entry, tier.attribute));
-      if (match) return match.path;
+      if (match) return { path: match.path, tied: [] };
       continue;
     }
     const named = candidates.filter(
       (entry) => isRoleMountPoint(entry) && tier.names.includes(comparableLeafName(entry)),
     );
-    if (named.length === 1) return named[0]!.path;
-    if (named.length > 1) return null;
+    if (named.length === 1) return { path: named[0]!.path, tied: [] };
+    if (named.length > 1) return { path: null, tied: named };
   }
-  return null;
+  return { path: null, tied: [] };
 }
 
 /**

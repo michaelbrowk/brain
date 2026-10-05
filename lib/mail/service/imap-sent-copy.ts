@@ -6,7 +6,7 @@ import type {
   MailEndpoint,
   ValidatedMailDialTarget,
 } from "../ports";
-import { selectImapMailboxPath } from "../providers/imap/sync-adapter";
+import { resolveImapMailboxRole } from "../providers/imap/sync-adapter";
 import { createVerificationOptions } from "./imapflow-adapter";
 import type {
   MailSentCopyAppendRequest,
@@ -34,6 +34,8 @@ interface SentCopyImapClient {
       readonly name?: string;
       readonly delimiter?: string;
       readonly flags?: Iterable<string>;
+      /** ImapFlow's reading: the stated flag, or its guess from the name. */
+      readonly specialUse?: string;
     }[]
   >;
   mailboxOpen(
@@ -218,13 +220,17 @@ export class ImapFlowSentCopyAdapter implements MailSentCopyPort {
     // The reading the Sent scan uses: the `\Sent` attribute the server itself
     // lists, then a name a mail client gives the folder, at the root or
     // directly under the Inbox and only when exactly one folder answers.
-    // ImapFlow's `specialUse` is not read. Where no folder carries the flag
-    // it is a guess from the leaf name at any depth, and it once sent the
-    // owner's copy into a project folder called Sent. A folder literally
-    // named Sent at the root stays the last resort it has always been, for a
-    // server on which two folders answer to a Sent name.
+    // ImapFlow's `specialUse` is not read on its own. Where no folder carries
+    // the flag it is a guess from the leaf name at any depth, and it once
+    // sent the owner's copy into a project folder called Sent. It settles a
+    // tie alone: when two folders where a mail client puts Sent answer to a
+    // Sent name, the copy goes where ImapFlow, and so 0.20.2, put it, if
+    // that is one of the two. The scan reads neither. A folder literally
+    // named Sent at the root stays the last resort it has always been.
+    const resolved = resolveImapMailboxRole("sent", mailboxes);
     const path =
-      selectImapMailboxPath("sent", mailboxes) ??
+      resolved.path ??
+      resolved.tied.find((entry) => entry.specialUse === "\\Sent")?.path ??
       mailboxes.find(
         (entry) => typeof entry.path === "string" && entry.path === "Sent",
       )?.path;

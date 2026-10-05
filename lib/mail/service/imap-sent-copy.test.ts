@@ -273,10 +273,32 @@ describe("where the Sent copy goes", () => {
     ).resolves.toEqual({ outcome: "sent_mailbox_missing", path: null });
   });
 
-  it("goes to the folder named Sent at the root when two folders answer to a Sent name", async () => {
+  // ImapFlow names one folder per role when no folder states it, the first
+  // of those its own list knows in alphabetical order of path. The fixtures
+  // below put its guess where it would put it.
+  it("goes to the folder ImapFlow names when two folders at the root answer to a Sent name", async () => {
     await expect(
-      appendedTo([entry("Sent Items", [], "\\Sent"), entry("Sent")]),
+      appendedTo([entry("Sent Items", [], "\\Sent"), entry("Sent Messages")]),
+    ).resolves.toEqual({ outcome: "appended", path: "Sent Items" });
+    await expect(
+      appendedTo([entry("Sent Items"), entry("Sent", [], "\\Sent")]),
     ).resolves.toEqual({ outcome: "appended", path: "Sent" });
+  });
+
+  it("does not take ImapFlow's guess when it names a folder outside the two that answer", async () => {
+    await expect(
+      appendedTo([
+        entry("Projects/Clients/Sent", [], "\\Sent"),
+        entry("Sent Items"),
+        entry("Sent Messages"),
+      ]),
+    ).resolves.toEqual({ outcome: "sent_mailbox_missing", path: null });
+  });
+
+  it("does not file a copy under a namespace prefix that is not the Inbox", async () => {
+    await expect(
+      appendedTo([entry("Mail/Sent", [], "\\Sent"), entry("Mail/Trash")]),
+    ).resolves.toEqual({ outcome: "sent_mailbox_missing", path: null });
   });
 
   it("goes to the folder the server itself marks, before any name", async () => {

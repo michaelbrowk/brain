@@ -91,7 +91,15 @@ words ImapFlow's own list holds for them (forty-one, thirty-one and
 ninety-eight, `Gelöschte Elemente`, `Удаленные`, `Courrier indésirable` and
 `Éléments envoyés` among them), so a localized folder at the root resolves as
 it did. What no longer resolves is a folder named for its role deeper than
-that, and one of two that answer. The role is resolved in
+that, and one of two that answer. A name is compared composed, lowercased and
+trimmed, without the left-to-right marks and without the combining dot a
+Turkish capital `İ` leaves when it is lowercased, so `Envoyés` listed with a
+combining accent and `SİLİNMİŞ ÖĞELER` both resolve. Some words on those lists
+are ordinary ones, `Bin`, `Deleted` and `Lasa` among them, and a root folder the
+owner made under one counts as the role: beside a folder that really is the
+role it makes two that answer and the role is refused, and alone, or beside a
+folder whose name no list holds (`Papierkorb` and `Bin` resolve to `Bin`), it
+is taken, as ImapFlow took it in 0.20.2. That is accepted. The role is resolved in
 tiers: `\Archive`, then a mailbox named `Archive` or `Archives`, then
 `\All` and XLIST's `\AllMail`, then `All Mail`; `\Trash` then a trash name;
 `\Junk` and XLIST's `\Spam` then a junk name; `\Sent` then a sent name. A name
@@ -110,7 +118,14 @@ The copy of a sent letter is appended to the folder the same reading finds
 (`locateSentPath` in
 [`imap-sent-copy.ts`](../lib/mail/service/imap-sent-copy.ts)), with a folder
 literally named `Sent` at the root as its last resort; until 0.20.3 it read
-ImapFlow's guess, and the copy could land in a project folder called Sent. A server
+ImapFlow's guess, and the copy could land in a project folder called Sent. That
+guess settles one case still. When two folders at the root or under the Inbox
+answer to a Sent name (`Sent Items` and `Sent Messages`), the copy goes to the
+one of the two ImapFlow picks, the first path in alphabetical order, where
+0.20.2 filed it, and a pick outside the two is not taken. The scan reads
+neither. A server that keeps its folders under a namespace prefix other than
+the Inbox (`Mail/Sent`) and states no `\Sent` gets no copy filed, as the
+lookup answers `sent_mailbox_missing`. That residual is accepted. A server
 that advertises nothing and names nothing has no mailbox for that role, and the
 mutation is refused with `mail_provider_mutation_unsupported` — a 409, not a
 retryable 503, because retrying cannot conjure a folder. Nothing is moved on a

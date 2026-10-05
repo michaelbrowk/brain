@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MailDnsResolverPort, ValidatedMailDialTarget } from "../ports";
 import {
   ImapMailSyncAdapter,
+  resolveImapMailboxRole,
   selectImapMailboxPath,
 } from "../providers/imap/sync-adapter";
 import type { MultiMailAccountStore } from "./account-store";
@@ -596,6 +597,36 @@ describe("mailbox roles against a real ImapFlow LIST", () => {
         ])
       ).roles,
     ).toEqual({ archive: "Archive", trash: null, junk: null, sent: null });
+  });
+
+  it("hands the Sent copy ImapFlow's own pick among two root Sent folders, and no pick from elsewhere", async () => {
+    const pick = async (paths: readonly string[]) => {
+      const { client } = await connectedImapFlow({
+        capability: "IMAP4rev1",
+        folders: paths.map((path) => ({ flags: "\\HasNoChildren", path })),
+      });
+      const listed = await client.list();
+      client.close();
+      const resolved = resolveImapMailboxRole("sent", listed);
+      return {
+        path: resolved.path,
+        tied: resolved.tied.map((entry) => entry.path).sort(),
+        guessed: listed.find((entry) => entry.specialUse === "\\Sent")?.path ?? null,
+      };
+    };
+
+    await expect(pick(["Sent Messages", "Sent Items"])).resolves.toEqual({
+      path: null,
+      tied: ["Sent Items", "Sent Messages"],
+      guessed: "Sent Items",
+    });
+    // ImapFlow's pick is the first path in alphabetical order, here a
+    // project folder the tie does not hold.
+    await expect(pick(["Sent Items", "Sent Messages", "Projects/Clients/Sent"])).resolves.toEqual({
+      path: null,
+      tied: ["Sent Items", "Sent Messages"],
+      guessed: "Projects/Clients/Sent",
+    });
   });
 
   it("takes \\Spam and \\AllMail as the attributes an XLIST server states them", async () => {

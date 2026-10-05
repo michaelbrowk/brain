@@ -143,6 +143,13 @@ export interface GmailHistoryOptions {
   readonly startHistoryId: string;
   readonly pageToken?: string;
   readonly maxItems?: number;
+  /** `historyTypes`: only these kinds of record. Absent, every kind. */
+  readonly types?: readonly (
+    | "messageAdded"
+    | "messageDeleted"
+    | "labelAdded"
+    | "labelRemoved"
+  )[];
 }
 
 export interface GmailHistoryMessage {

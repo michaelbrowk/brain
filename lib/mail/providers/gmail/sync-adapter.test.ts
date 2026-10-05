@@ -685,6 +685,250 @@ describe("Gmail sync adapter projection", () => {
   });
 });
 
+describe("Gmail batch archive", () => {
+  const signal = new AbortController().signal;
+  const ids = Array.from({ length: 15 }, (_value, index) => `thread-${index}`);
+  /** Two cached messages a thread, both unread. */
+  const cachedThreads = ids.map((threadId) => ({
+    threadId,
+    messages: [
+      { messageId: `${threadId}-m1`, unread: true },
+      { messageId: `${threadId}-m2`, unread: true },
+    ],
+  }));
+  const emptyHistory = { items: [], nextPageToken: null, historyId: "300" };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  type Answer = (...args: any[]) => unknown;
+
+  /** A client whose every call lands in one log, in order. */
+  function loggedClient(
+    overrides: Partial<Record<"batchModifyMessages" | "listHistory" | "getThread", Answer>> = {},
+  ) {
+    const log: string[] = [];
+    const answers: Record<string, Answer> = {
+      batchModifyMessages: async () => undefined,
+      listHistory: async () => emptyHistory,
+      getThread: async (threadId: string) =>
+        threadFixture(threadId, ["UNREAD"], [`${threadId}-m1`, `${threadId}-m2`]),
+      ...overrides,
+    };
+    const names: Record<string, string> = {
+      batchModifyMessages: "batchModify",
+      listHistory: "history",
+      getThread: "getThread",
+    };
+    const client = Object.fromEntries(
+      Object.entries(answers).map(([method, answer]) => [
+        method,
+        vi.fn((...args: unknown[]) => {
+          log.push(names[method]!);
+          return answer(...args);
+        }),
+      ]),
+    ) as unknown as Record<"batchModifyMessages" | "listHistory" | "getThread", ReturnType<typeof vi.fn>>;
+    return { log, client, adapter: mutationAdapterWith(client as unknown as Partial<GmailApiClient>) };
+  }
+
+  it("archives and marks read fifteen threads in four calls, naming every cached message", async () => {
+    const { log, client, adapter } = loggedClient();
+
+    const outcomes = await adapter.archiveThreads(
+      { threads: cachedThreads, read: true, cursor: "200" },
+      signal,
+    );
+
+    // The per-thread path is an archive, a read back, a flag and a read back
+    // per thread: sixty calls for these fifteen.
+    expect(log).toEqual(["batchModify", "history", "batchModify", "history"]);
+    const named = cachedThreads.flatMap((thread) => thread.messages.map((m) => m.messageId));
+    expect(client.batchModifyMessages).toHaveBeenNthCalledWith(1, named, [], ["INBOX"], signal);
+    expect(client.batchModifyMessages).toHaveBeenNthCalledWith(2, named, [], ["UNREAD"], signal);
+    expect(client.listHistory).toHaveBeenCalledWith(
+      { startHistoryId: "200", types: ["messageAdded", "messageDeleted"] },
+      signal,
+    );
+    expect([...outcomes.keys()]).toEqual(ids);
+    expect(outcomes.get("thread-0")).toEqual({
+      status: "applied",
+      messageIds: ["thread-0-m1", "thread-0-m2"],
+      markedRead: true,
+    });
+  });
+
+  it("archives without a read flag in two calls, and sends no flag for threads already read", async () => {
+    const { log, adapter } = loggedClient();
+    const read = cachedThreads.map((thread) => ({
+      ...thread,
+      messages: thread.messages.map((message) => ({ ...message, unread: false })),
+    }));
+
+    await adapter.archiveThreads({ threads: cachedThreads, read: false, cursor: "200" }, signal);
+    await adapter.archiveThreads({ threads: read, read: true, cursor: "200" }, signal);
+
+    expect(log).toEqual(["batchModify", "history", "batchModify", "history"]);
+  });
+
+  it("reads back only a thread that got a message the cache did not name, and leaves it unread", async () => {
+    const { log, client, adapter } = loggedClient({
+      listHistory: vi
+        .fn()
+        .mockResolvedValueOnce({
+          items: [
+            {
+              id: "201",
+              messagesAdded: [
+                // Already named: the cache read it after the cursor.
+                { id: "thread-1-m2", threadId: "thread-1", labelIds: ["INBOX"] },
+                { id: "thread-3-m3", threadId: "thread-3", labelIds: ["INBOX", "UNREAD"] },
+                { id: "other-m1", threadId: "other", labelIds: ["INBOX"] },
+              ],
+              messagesDeleted: [],
+              labelsAdded: [],
+              labelsRemoved: [],
+            },
+          ],
+          nextPageToken: null,
+          historyId: "300",
+        })
+        .mockResolvedValue(emptyHistory),
+      getThread: vi.fn(async (threadId: string) =>
+        threadFixture(threadId, ["INBOX", "UNREAD"], [`${threadId}-m1`, `${threadId}-m2`, `${threadId}-m3`]),
+      ),
+    });
+
+    const outcomes = await adapter.archiveThreads(
+      { threads: cachedThreads, read: true, cursor: "200" },
+      signal,
+    );
+
+    expect(client.getThread).toHaveBeenCalledTimes(1);
+    expect(client.getThread).toHaveBeenCalledWith("thread-3", signal);
+    expect(outcomes.get("thread-3")).toMatchObject({
+      status: "done",
+      markedRead: false,
+      thread: { thread: { threadId: "thread-3", messageCount: 3, unread: true } },
+    });
+    // The renewed thread's messages are not in the read flag's ids.
+    const flagged = vi.mocked(client.batchModifyMessages).mock.calls[1]![0] as string[];
+    expect(flagged).not.toContain("thread-3-m1");
+    expect(flagged).toHaveLength(28);
+    expect(outcomes.get("thread-1")).toMatchObject({ status: "applied", markedRead: true });
+    expect(log.filter((call) => call !== "getThread")).toEqual([
+      "batchModify",
+      "history",
+      "batchModify",
+      "history",
+    ]);
+  });
+
+  it("reads back a thread whose reply landed between the archive and the read flag", async () => {
+    const reply = {
+      items: [
+        {
+          id: "205",
+          messagesAdded: [{ id: "thread-4-m3", threadId: "thread-4", labelIds: ["INBOX", "UNREAD"] }],
+          messagesDeleted: [],
+          labelsAdded: [],
+          labelsRemoved: [],
+        },
+      ],
+      nextPageToken: null,
+      historyId: "305",
+    };
+    const { client, adapter } = loggedClient({
+      listHistory: vi.fn().mockResolvedValueOnce(emptyHistory).mockResolvedValue(reply),
+      getThread: vi.fn(async (threadId: string) =>
+        threadFixture(threadId, ["UNREAD"], [`${threadId}-m1`, `${threadId}-m2`, `${threadId}-m3`]),
+      ),
+    });
+
+    const outcomes = await adapter.archiveThreads(
+      { threads: cachedThreads, read: true, cursor: "200" },
+      signal,
+    );
+
+    expect(client.getThread).toHaveBeenCalledTimes(1);
+    expect(outcomes.get("thread-4")).toMatchObject({ status: "done", markedRead: true });
+  });
+
+  it("reads every thread back when the change log is gone or too long, and stops at four pages", async () => {
+    const gone = loggedClient({
+      listHistory: vi.fn().mockRejectedValue(new GmailApiError("gmail_not_found")),
+    });
+    await gone.adapter.archiveThreads(
+      { threads: cachedThreads.slice(0, 3), read: false, cursor: "200" },
+      signal,
+    );
+    expect(gone.client.getThread).toHaveBeenCalledTimes(3);
+
+    const long = loggedClient({
+      listHistory: vi.fn().mockResolvedValue({ ...emptyHistory, nextPageToken: "more" }),
+    });
+    await long.adapter.archiveThreads(
+      { threads: cachedThreads.slice(0, 3), read: false, cursor: "200" },
+      signal,
+    );
+    expect(long.client.listHistory).toHaveBeenCalledTimes(4);
+    expect(long.client.getThread).toHaveBeenCalledTimes(3);
+  });
+
+  it("leaves to the per-thread path what it cannot name, and everything when Gmail refuses the ids", async () => {
+    const partial = loggedClient();
+    const outcomes = await partial.adapter.archiveThreads(
+      {
+        threads: [cachedThreads[0]!, { threadId: "thread-unnamed", messages: null }],
+        read: false,
+        cursor: "200",
+      },
+      signal,
+    );
+    expect([...outcomes.keys()]).toEqual(["thread-0"]);
+
+    const noCursor = loggedClient();
+    expect(
+      (await noCursor.adapter.archiveThreads({ threads: cachedThreads, read: false, cursor: null }, signal))
+        .size,
+    ).toBe(0);
+    expect(noCursor.log).toEqual([]);
+
+    const refused = loggedClient({
+      batchModifyMessages: vi.fn().mockRejectedValue(new GmailApiError("gmail_not_found")),
+    });
+    expect(
+      (await refused.adapter.archiveThreads({ threads: cachedThreads, read: true, cursor: "200" }, signal))
+        .size,
+    ).toBe(0);
+  });
+
+  it("keeps an archive that landed when the read flag or the change log fails", async () => {
+    const { adapter } = loggedClient({
+      batchModifyMessages: vi
+        .fn()
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValue(new GmailApiError("gmail_service_unavailable")),
+    });
+    const outcomes = await adapter.archiveThreads(
+      { threads: cachedThreads.slice(0, 2), read: true, cursor: "200" },
+      signal,
+    );
+    expect(outcomes.get("thread-0")).toEqual({
+      status: "applied",
+      messageIds: ["thread-0-m1", "thread-0-m2"],
+      markedRead: false,
+    });
+
+    const silent = loggedClient({
+      listHistory: vi.fn().mockRejectedValue(new GmailApiError("gmail_service_unavailable")),
+    });
+    const archivedOnly = await silent.adapter.archiveThreads(
+      { threads: cachedThreads.slice(0, 2), read: true, cursor: "200" },
+      signal,
+    );
+    expect(silent.log).toEqual(["batchModify", "history"]);
+    expect(archivedOnly.get("thread-1")).toMatchObject({ status: "applied", markedRead: false });
+  });
+});
+
 describe("Gmail list-message classification and size", () => {
   it.each([
     { name: "List-Id", value: "<news.example.test>", category: "newsletter" },

@@ -4,6 +4,8 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { MailThreadListItem } from "../message-types";
+import type { GmailApiClient } from "../providers/gmail/api-client";
+import { GmailMailSyncAdapter } from "../providers/gmail/sync-adapter";
 import { MAIL_CHANGE_ALL_MAILBOXES, type MailServiceChange } from "./change-feed-ring";
 import {
   type CachedProviderMessage,
@@ -1515,6 +1517,79 @@ describe("account mail message service batch archive", () => {
     expect(fixture.provider.getThread).not.toHaveBeenCalledWith("thread-a", expect.anything());
     expect(changes).toHaveLength(1);
     fixture.cache.close();
+  });
+
+  it("costs a fifteen-thread Gmail Done four provider calls, where the per-thread path costs sixty", async () => {
+    const ids = Array.from({ length: 15 }, (_value, index) => `thread-${index}`);
+    const flagged = new Set<string>();
+    const calls: string[] = [];
+    const gmailThread = (threadId: string) => ({
+      id: threadId,
+      snippet: null,
+      historyId: "300",
+      messages: [
+        {
+          id: `message-${threadId}`,
+          threadId,
+          labelIds: flagged.has(threadId) ? [] : ["UNREAD"],
+          snippet: null,
+          historyId: "300",
+          internalDate: "1000",
+          sizeEstimate: null,
+          payload: null,
+        },
+      ],
+    });
+    const client = {
+      batchModifyMessages: vi.fn(async () => void calls.push("messages.batchModify")),
+      listHistory: vi.fn(async () => {
+        calls.push("history.list");
+        return { items: [], nextPageToken: null, historyId: "300" };
+      }),
+      getThread: vi.fn(async (threadId: string) => {
+        calls.push("threads.get");
+        return gmailThread(threadId);
+      }),
+      archiveThread: vi.fn(async () => void calls.push("threads.modify")),
+      markThreadRead: vi.fn(async (threadId: string) => {
+        calls.push("threads.modify");
+        flagged.add(threadId);
+      }),
+    } as unknown as GmailApiClient;
+    const gmail = new GmailMailSyncAdapter(ACCOUNT_ID, client);
+    // The same adapter with its batch taken away: what 0.20.3 sent.
+    const perThread: Partial<MailProviderSyncPort> = {
+      getThread: (threadId, signal) => gmail.getThread(threadId, signal),
+      archiveThread: (threadId, signal) => gmail.archiveThread(threadId, signal),
+      setThreadRead: (threadId, read, signal) => gmail.setThreadRead(threadId, read, signal),
+    };
+    const input = { accountId: ACCOUNT_ID, threadIds: ids, archive: true as const, read: true as const };
+
+    const before = await seeded(perThread, ids);
+    await before.service.archiveThreads(input, signal());
+    const beforeCalls = calls.splice(0).length;
+    before.cache.close();
+    flagged.clear();
+
+    const after = await seeded(
+      {
+        getThread: (threadId, signal) => gmail.getThread(threadId, signal),
+        archiveThreads: (batch, signal) => gmail.archiveThreads(batch, signal),
+      },
+      ids,
+    );
+    const result = await after.service.archiveThreads(input, signal());
+
+    expect(beforeCalls).toBe(60);
+    expect(calls).toEqual([
+      "messages.batchModify",
+      "history.list",
+      "messages.batchModify",
+      "history.list",
+    ]);
+    expect(result.results.every((item) => item.status === "done" && item.markedRead)).toBe(true);
+    expect((await after.service.listThreads({ accountId: ACCOUNT_ID, limit: 20 })).items).toEqual([]);
+    after.cache.close();
   });
 });
 

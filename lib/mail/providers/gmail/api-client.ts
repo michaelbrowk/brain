@@ -32,6 +32,9 @@ const MAX_ACCESS_TOKEN_BYTES = 16 * 1024;
 const MAX_MESSAGE_SIZE_ESTIMATE = GMAIL_API_LIMITS.rawMessageBytes;
 const SAFE_RESOURCE_ID = /^[A-Za-z0-9_-]{1,255}$/;
 const SAFE_LABEL_ID = /^[A-Za-z0-9_-]{1,255}$/;
+/** Gmail's own ceiling on the ids one `messages.batchModify` names. */
+export const GMAIL_BATCH_MODIFY_IDS = 1_000;
+const HISTORY_TYPES = new Set(["messageAdded", "messageDeleted", "labelAdded", "labelRemoved"]);
 const RATE_LIMIT_REASONS = new Set([
   "dailyLimitExceeded",
   "rateLimitExceeded",
@@ -183,6 +186,7 @@ export class GmailApiClient {
     if (normalized.pageToken !== null) {
       url.searchParams.set("pageToken", normalized.pageToken);
     }
+    for (const type of normalized.types) url.searchParams.append("historyTypes", type);
     return this.requestJson(
       url,
       { method: "GET" },
@@ -267,6 +271,41 @@ export class GmailApiClient {
     signal?: AbortSignal,
   ): Promise<GmailMutationResult> {
     return this.modify("messages", id, [], ["INBOX"], signal);
+  }
+
+  /**
+   * `users.messages.batchModify`: one call for up to a thousand messages,
+   * named one by one, so a message that arrived after the ids were read is
+   * not touched. Gmail answers success with no body.
+   */
+  async batchModifyMessages(
+    ids: readonly string[],
+    addLabelIds: readonly string[],
+    removeLabelIds: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (
+      ids.length < 1 ||
+      ids.length > GMAIL_BATCH_MODIFY_IDS ||
+      new Set(ids).size !== ids.length
+    ) {
+      throw new GmailApiError("gmail_request_invalid");
+    }
+    const safeIds = ids.map(validateResourceId);
+    validateMutationLabels(addLabelIds, removeLabelIds);
+    const url = new URL(`${GMAIL_API_ROOT}/messages/batchModify`);
+    await this.requestJson(
+      url,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify({ ids: safeIds, addLabelIds, removeLabelIds }),
+      },
+      GMAIL_API_LIMITS.errorResponseBytes,
+      () => undefined,
+      signal,
+      true,
+    );
   }
 
   async trashThread(
@@ -543,6 +582,7 @@ export class GmailApiClient {
     maxResponseBytes: number,
     validate: (value: unknown) => T,
     callerSignal?: AbortSignal,
+    emptyBody = false,
   ): Promise<T> {
     validateGmailApiUrl(url);
     const signal = callerSignal ?? new AbortController().signal;
@@ -574,6 +614,12 @@ export class GmailApiClient {
           await discardResponse(response, GMAIL_API_LIMITS.errorResponseBytes);
           if (attempt === 0) continue;
           throw new GmailApiError("gmail_reauth_required");
+        }
+        if (emptyBody && (response.status === 200 || response.status === 204)) {
+          // A call whose success has no body to read (batchModify): what
+          // arrives anyway is bounded and thrown away.
+          await discardResponse(response, maxResponseBytes);
+          return validate(undefined);
         }
         if (response.status !== 200) {
           throw await mapHttpError(response);
@@ -788,9 +834,10 @@ function validateHistoryOptions(value: GmailHistoryOptions): {
   readonly startHistoryId: string;
   readonly pageToken: string | null;
   readonly maxItems: number;
+  readonly types: readonly string[];
 } {
   if (!isRecord(value)) throw new GmailApiError("gmail_request_invalid");
-  const allowed = new Set(["startHistoryId", "pageToken", "maxItems"]);
+  const allowed = new Set(["startHistoryId", "pageToken", "maxItems", "types"]);
   if (Object.keys(value).some((key) => !allowed.has(key))) {
     throw new GmailApiError("gmail_request_invalid");
   }
@@ -808,7 +855,20 @@ function validateHistoryOptions(value: GmailHistoryOptions): {
   ) {
     throw new GmailApiError("gmail_request_invalid");
   }
-  return Object.freeze({ startHistoryId, pageToken, maxItems });
+  const types = value.types ?? [];
+  if (
+    !Array.isArray(types) ||
+    types.some((type) => typeof type !== "string" || !HISTORY_TYPES.has(type)) ||
+    new Set(types).size !== types.length
+  ) {
+    throw new GmailApiError("gmail_request_invalid");
+  }
+  return Object.freeze({
+    startHistoryId,
+    pageToken,
+    maxItems,
+    types: Object.freeze([...(types as string[])]),
+  });
 }
 
 function validateListPage<T>(

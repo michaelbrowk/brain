@@ -10323,6 +10323,9 @@ describe("MailSurface", () => {
         );
         expect(onToast.mock.calls.at(-1)?.[1]?.actionLabel).toBeUndefined();
         expect(onToast.mock.calls.at(-1)?.[1]?.onAction).toBeUndefined();
+        // Nor the Done pill's id, which may belong to a later Done by now:
+        // the report would take that one's way back.
+        expect(onToast.mock.calls.at(-1)?.[1]?.id).toBeUndefined();
       });
 
       it("empties the column at the press with the ring already counting, and sends nothing inside the window", async () => {
@@ -10928,6 +10931,63 @@ describe("MailSurface", () => {
         expect(onToast.mock.calls[0]?.[1]?.actionLabel).toBeUndefined();
         expect(pill.onAction?.()).toBe(false);
         expect(updateThread).toHaveBeenCalledTimes(3);
+      });
+
+      it("sends each thread once under StrictMode and beside a second Mail, and hears the page leave once", async () => {
+        // The holds, the queue and the page listener are the page's. A
+        // development double mount, and two surfaces on screen at once, must
+        // not add a second listener or send any thread twice.
+        const items = [0, 1, 2].map((index) =>
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: `a-${index}`,
+            unread: false,
+            lastMessageAt: 1_700_000_000_000 - index,
+          }),
+        );
+        const updateThread = vi.fn().mockResolvedValue(undefined);
+        const onToast = vi.fn();
+        const listening = vi.spyOn(window, "addEventListener");
+        const client = unifiedClient(items, { updateThread });
+        await act(async () =>
+          root.render(
+            <StrictMode>
+              <MailSurface client={client} onOpenSettings={() => {}} onToast={onToast} />
+              <MailSurface client={client} onOpenSettings={() => {}} />
+            </StrictMode>,
+          ),
+        );
+        await settle();
+
+        const lists = () =>
+          [...document.body.querySelectorAll('[aria-label="All inboxes threads"]')].map(
+            (list) => list.textContent ?? "",
+          );
+        const pageListeners = () =>
+          listening.mock.calls.filter(([type]) => type === "pagehide").length;
+        const mounted = pageListeners();
+        expect(lists()).toHaveLength(2);
+        for (const list of lists()) expect(list).toContain("3 threads, nothing unread");
+        await click(findButton("Done — archive all 3 in Seen"));
+        // The store's own listener, added at the first Done and only then.
+        expect(pageListeners() - mounted).toBe(1);
+        // Both surfaces read the one overlay: neither draws the section.
+        expect(document.body.textContent).not.toContain("3 threads, nothing unread");
+
+        const pill = donePill(onToast);
+        act(() => {
+          window.dispatchEvent(new Event("pagehide"));
+        });
+        await drain();
+        // Its window closing after the page left finds nothing left to send.
+        await act(async () => pill.onExpire?.());
+        await drain();
+        expect(sent(updateThread).map((mutation) => mutation.threadId)).toEqual([
+          "a-0",
+          "a-1",
+          "a-2",
+        ]);
+        expect(pageListeners() - mounted).toBe(1);
       });
 
       it("lets a waiting Done go when the Mail surface unmounts, and the pill loses its Undo", async () => {
@@ -11574,6 +11634,81 @@ describe("MailSurface", () => {
         expect(readMailboxThread).toHaveBeenCalledWith(
           expect.objectContaining({ mailboxId: "all", threadId: "a-0" }),
         );
+      });
+
+      it("opens a held letter from the list of another mailbox that draws it", async () => {
+        // The hold is the Inboxes' alone. All Mail lists the archived letter,
+        // so a request that ends there opens the row it draws at once, as
+        // for any row, and does not wait on a fetch of the letter first.
+        const items = [
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: "a-0",
+            unread: false,
+            lastMessageAt: 1_700_000_000_000,
+          }),
+        ];
+        const archived = new Set<string>();
+        const updateThread = vi
+          .fn()
+          .mockImplementation(async ({ threadId }: { threadId: string }) => {
+            archived.add(threadId);
+          });
+        const listThreads = vi.fn().mockImplementation(({ accountId }) =>
+          Promise.resolve(
+            pageOf(
+              accountId === accountA.accountId
+                ? items.filter((item) => !archived.has(item.threadId))
+                : [],
+            ),
+          ),
+        );
+        const listMailboxThreads = vi
+          .fn()
+          .mockImplementation(({ mailboxId }) =>
+            Promise.resolve(mailboxThreadPage(mailboxId, mailboxId === "all" ? items : [])),
+          );
+        const letter = deferred<MailThreadDetail>();
+        const readMailboxThread = vi.fn().mockReturnValue(letter.promise);
+        const onToast = vi.fn();
+        await act(async () =>
+          root.render(
+            <MailSurface
+              client={unifiedClient(items, {
+                updateThread,
+                listThreads,
+                listMailboxThreads,
+                readMailboxThread,
+              })}
+              onOpenSettings={() => {}}
+              onToast={onToast}
+            />,
+          ),
+        );
+        await settle();
+        await click(findButton("Done — archive all 1 in Seen"));
+        // Into the account's All Mail inside the window, so no Inbox read
+        // begins after the archive and the hold stands when the request comes.
+        await enterSingleAccount(accountA);
+        await drain();
+        await goTo("All Mail");
+        await drain();
+        await closeWindow(onToast);
+        expect(sent(updateThread)).toHaveLength(1);
+
+        await act(async () => {
+          requestOpenThread(accountA.accountId, "a-0", "all");
+        });
+        await drain();
+        expect(navTrigger()?.getAttribute("aria-label")).toContain("All Mail");
+        expect(pendingOpenThread()).toBeNull();
+        expect(
+          document.body.querySelector('section[aria-label="Mailbox"] [aria-current="true"]')
+            ?.textContent,
+        ).toContain("a-0");
+        await act(async () => letter.resolve({ ...detail, thread: items[0]! }));
+        await drain();
+        expect(readMailboxThread).toHaveBeenCalledTimes(1);
       });
 
       it("does not archive a letter that got a reply inside the window, and says so", async () => {

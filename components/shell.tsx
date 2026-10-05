@@ -1013,9 +1013,12 @@ export function Shell({
    * lived only under the pointer — the pill is a `role="status"`, focus never
    * moves there, and the Tab order does not pass through it — so the ten
    * seconds a bulk archive offers were mouse-only. With two undos up, the
-   * newest is the one the reader just did; a second ⌘Z reaches the one under
-   * it. A pill whose own action is still settling is passed over, so no
-   * reversal is started twice.
+   * newest is the one the reader just did; once it has gone, a second ⌘Z
+   * reaches the one under it. While the newest's own undo is still going out,
+   * ⌘Z is swallowed and does nothing: a second press inside that moment is the
+   * same gesture twice, and passing it to the pill underneath would take back
+   * something the reader never asked about. A held key's repeats are ignored
+   * for the same reason.
    *
    * Not while the caret is in a typing surface. The window listener runs
    * AFTER the field or ProseMirror has done its own undo, so ⌘Z to fix a typo
@@ -1023,7 +1026,7 @@ export function Shell({
    * threads back with it — the pill leaving looking spent, with nothing said.
    */
   useEffect(() => {
-    const newest = toasts.findLast((pill) => pill.toast.onAction && !pill.pending);
+    const newest = toasts.findLast((pill) => pill.toast.onAction);
     if (!newest) return;
     const onKey = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "z") {
@@ -1031,6 +1034,7 @@ export function Shell({
       }
       if (isEditableEventTarget(event.target)) return;
       event.preventDefault();
+      if (event.repeat || newest.pending) return;
       runToastAction(newest.toast);
     };
     window.addEventListener("keydown", onKey);

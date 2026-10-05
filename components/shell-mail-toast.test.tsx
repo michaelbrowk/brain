@@ -379,6 +379,53 @@ describe("shell toast channels, as mail uses them", () => {
       expect(pills()).toEqual([]);
     });
 
+    it("⌘Z while the newest pill's undo is going out is swallowed, and reaches nothing under it", async () => {
+      let settle: () => void = () => {};
+      const settled = new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+      const doneUndo = vi.fn();
+      const blockUndo = vi.fn(() => settled);
+      await say("Newsletters cleared", doneReport(doneUndo));
+      await say("Blocked Lena Okafor", blockReport(blockUndo));
+      await act(async () => {
+        undoOf("Blocked Lena Okafor")!.click();
+      });
+      const event = new KeyboardEvent("keydown", { key: "z", metaKey: true, cancelable: true });
+      await act(async () => {
+        window.dispatchEvent(event);
+      });
+      // A second ⌘Z inside the moment the first is going out is the same
+      // gesture twice, not a request for the undo under it.
+      expect(event.defaultPrevented).toBe(true);
+      expect(blockUndo).toHaveBeenCalledTimes(1);
+      expect(doneUndo).not.toHaveBeenCalled();
+      await act(async () => {
+        settle();
+        await settled;
+      });
+    });
+
+    it("⌘Z held down undoes once, not once per key repeat", async () => {
+      const blockUndo = vi.fn(() => true as const);
+      const doneUndo = vi.fn(() => true as const);
+      await say("Blocked Lena Okafor", { ...blockReport(() => Promise.resolve()), onAction: blockUndo });
+      await say("Newsletters cleared", doneReport(doneUndo));
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true }));
+      });
+      for (let i = 0; i < 3; i += 1) {
+        await act(async () => {
+          window.dispatchEvent(
+            new KeyboardEvent("keydown", { key: "z", metaKey: true, repeat: true }),
+          );
+        });
+      }
+      expect(doneUndo).toHaveBeenCalledTimes(1);
+      expect(blockUndo).not.toHaveBeenCalled();
+      expect(pillOf("Blocked Lena Okafor")).not.toBeNull();
+    });
+
     it("commits Done at the end of ITS window, not the Block's", async () => {
       const blockExpired = vi.fn();
       const doneExpired = vi.fn();

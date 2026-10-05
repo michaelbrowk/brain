@@ -90,8 +90,10 @@ export type ToastOptions = {
    */
   readonly onAction?: () => boolean | void | Promise<unknown>;
   /**
-   * The pill left WITHOUT its action being spent: its window ran out, or a
-   * message wearing its `id` took its place. A caller that parked real work
+   * The pill left WITHOUT its action being spent: its window ran out, a
+   * message wearing its `id` took its place, or a fourth undo committed it.
+   * An action that has begun and not settled counts as spent, so a pill
+   * whose Undo is still going out never hears this. A caller that parked real work
    * behind the way back (the compose sheet's Discard holds the provider
    * delete behind its Undo, a section's Done holds its archives) does that
    * work here, and only here — the shell

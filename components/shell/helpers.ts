@@ -96,6 +96,11 @@ export type ToastAdmission = {
  * report slid in among live undos would push the one the reader is reaching
  * for out from under the pointer.
  *
+ * A pill whose own action is still settling (`pending`) is spent as far as
+ * the column goes: a fourth undo never commits it, since that would run its
+ * `onExpire` after its `onAction`. The oldest settled undo goes instead, and
+ * while all three standing are settling the fourth waits for a place.
+ *
  * A REFUSAL never comes here. Waiting is right for a report and wrong for an
  * answer to a gesture, so `showToast` routes an urgent message to its own pill
  * before this function is reached — see `ToastOptions.urgent`.
@@ -104,6 +109,7 @@ export function toastAdmit(
   standing: readonly ShellToast[],
   waiting: readonly ShellToast[],
   next: ShellToast,
+  pending: (toast: ShellToast) => boolean = () => false,
 ): ToastAdmission {
   const same = next.id != null ? standing.findIndex((entry) => entry.id === next.id) : -1;
   if (same >= 0 && !next.onAction) {
@@ -119,6 +125,7 @@ export function toastAdmit(
       standing.filter((_, index) => index !== same),
       waiting,
       next,
+      pending,
     );
     return { ...admitted, left: [standing[same], ...admitted.left], replaced: null };
   }
@@ -126,43 +133,58 @@ export function toastAdmit(
     return { present: [next], waiting, left: standing, replaced: standing.at(-1) ?? null };
   }
   if (!next.onAction) {
-    const at = next.id ? waiting.findIndex((entry) => entry.id === next.id) : -1;
-    return {
-      present: standing,
-      waiting:
-        at >= 0
-          ? waiting.map((entry, index) => (index === at ? next : entry))
-          : [...waiting, next],
-      left: [],
-      replaced: null,
-    };
+    return { present: standing, waiting: toastWait(waiting, next), left: [], replaced: null };
   }
-  const present = [...standing, next];
+  const present = [...standing];
   const left: ShellToast[] = [];
-  while (present.filter((entry) => entry.onAction).length > TOAST_UNDO_LIMIT) {
-    const oldest = present.findIndex((entry) => entry.onAction);
+  while (present.filter((entry) => entry.onAction).length >= TOAST_UNDO_LIMIT) {
+    const oldest = present.findIndex((entry) => entry.onAction && !pending(entry));
+    if (oldest < 0) {
+      return { present, waiting: toastWait(waiting, next), left, replaced: null };
+    }
     left.push(...present.splice(oldest, 1));
   }
-  return { present, waiting, left, replaced: null };
+  return { present: [...present, next], waiting, left, replaced: null };
+}
+
+/** The queue with `next` in it: in the place of a waiting message of its id,
+ *  or at the end. */
+function toastWait(waiting: readonly ShellToast[], next: ShellToast): readonly ShellToast[] {
+  const at = next.id ? waiting.findIndex((entry) => entry.id === next.id) : -1;
+  return at >= 0
+    ? waiting.map((entry, index) => (index === at ? next : entry))
+    : [...waiting, next];
 }
 
 /**
  * The column after one pill has gone — its window closed, or its action was
  * spent. The pill that went is the caller's to settle (`onExpire` or not);
- * this only says who stands now. The first waiting report gets the column
- * once no undo is left standing, and not before.
+ * this only says who stands now. An undo that waited for a place takes the
+ * one just freed. The first waiting report gets the column once no undo is
+ * left standing, and not before.
  */
 export function toastRelease(
   standing: readonly ShellToast[],
   waiting: readonly ShellToast[],
   gone: ShellToast,
+  pending: (toast: ShellToast) => boolean = () => false,
 ): ToastAdmission {
   const rest = standing.filter((entry) => entry !== gone);
-  if (rest.some((entry) => entry.onAction) || waiting.length === 0) {
+  const undos = rest.filter((entry) => entry.onAction).length;
+  const queued = waiting.findIndex((entry) => entry.onAction);
+  if (queued >= 0 && undos < TOAST_UNDO_LIMIT) {
+    return toastAdmit(
+      rest,
+      waiting.filter((_, index) => index !== queued),
+      waiting[queued],
+      pending,
+    );
+  }
+  if (undos > 0 || waiting.length === 0) {
     return { present: rest, waiting, left: [], replaced: null };
   }
   const [head, ...queue] = waiting;
-  return toastAdmit(rest, queue, head);
+  return toastAdmit(rest, queue, head, pending);
 }
 
 /** The canvas surface: notes (a page or the hub), mail, settings, or tasks. */

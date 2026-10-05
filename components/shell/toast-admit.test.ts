@@ -92,6 +92,27 @@ describe("toastAdmit", () => {
     expect(admitted.left).toEqual([first]);
   });
 
+  it("never commits a pill whose own action is still settling: the oldest settled one goes", () => {
+    // An undo already under way is spent as far as the column is concerned;
+    // committing it would run `onExpire` after `onAction`.
+    const first = undo("First", "a");
+    const second = undo("Second", "b");
+    const third = undo("Third", "c");
+    const fourth = undo("Fourth", "d");
+    const admitted = toastAdmit([first, second, third], [], fourth, (toast) => toast === first);
+    expect(admitted.present).toEqual([first, third, fourth]);
+    expect(admitted.left).toEqual([second]);
+  });
+
+  it("makes a fourth undo wait while all three standing are settling", () => {
+    const standing = [undo("First", "a"), undo("Second", "b"), undo("Third", "c")];
+    const fourth = undo("Fourth", "d");
+    const admitted = toastAdmit(standing, [], fourth, () => true);
+    expect(admitted.present).toEqual(standing);
+    expect(admitted.waiting).toEqual([fourth]);
+    expect(admitted.left).toEqual([]);
+  });
+
   it("still makes a report wait behind a standing undo", () => {
     const second: ShellToast = { title: "Newsletters cleared", id: "done:2" };
     const admitted = toastAdmit([undoable], [], second);
@@ -134,6 +155,17 @@ describe("toastRelease", () => {
     const released = toastRelease([undoable], [first, second], undoable);
     expect(released.present).toEqual([first]);
     expect(released.waiting).toEqual([second]);
+  });
+
+  it("lets a waiting undo in as soon as a place is free, before any waiting report", () => {
+    const first = undo("First", "a");
+    const second = undo("Second", "b");
+    const third = undo("Third", "c");
+    const report: ShellToast = { title: "Saved" };
+    const fourth = undo("Fourth", "d");
+    const released = toastRelease([first, second, third], [report, fourth], first);
+    expect(released.present).toEqual([second, third, fourth]);
+    expect(released.waiting).toEqual([report]);
   });
 
   it("leaves an empty column empty", () => {

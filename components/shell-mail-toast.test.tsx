@@ -836,10 +836,11 @@ describe("shell toast channels, as mail uses them", () => {
       expect(pills().join(" | ")).not.toContain("Draft discarded");
     });
 
-    it("still fires when the window runs out while the action is pending", async () => {
-      // A pending action hands the spend back until it settles. The window
-      // that runs out meanwhile takes the pill unspent and says so, and the
-      // late settle takes nothing down and owes nothing a second time.
+    it("never fires when the window runs out while the action is pending", async () => {
+      // An action under way is the way back being taken. Its window running
+      // out meanwhile is not the way back being lost: `onExpire` after
+      // `onAction` would flush the delete the Undo is bringing back. The pill
+      // stands, saying what it is doing, until the action settles.
       const onExpire = vi.fn();
       let settle: () => void = () => {};
       const undo = vi.fn(
@@ -858,14 +859,98 @@ describe("shell toast channels, as mail uses them", () => {
       await act(async () => {
         vi.advanceTimersByTime(9_001);
       });
-      expect(onExpire).toHaveBeenCalledTimes(1);
-      expect(pills().join(" | ")).not.toContain("Draft discarded");
+      expect(onExpire).not.toHaveBeenCalled();
+      expect(pills().join(" | ")).toContain("Draft discarded");
       await act(async () => {
         settle();
         await Promise.resolve();
         await Promise.resolve();
       });
-      expect(onExpire).toHaveBeenCalledTimes(1);
+      expect(pills().join(" | ")).not.toContain("Draft discarded");
+      expect(onExpire).not.toHaveBeenCalled();
+    });
+
+    it("never fires for a pending pill a same-id message takes", async () => {
+      const onExpire = vi.fn();
+      let settle: () => void = () => {};
+      const settled = new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+      await say("Blocked Lena Okafor", { ...blockReport(() => settled), onExpire });
+      await say("Newsletters cleared", doneReport(() => {}));
+      await act(async () => {
+        [...document.body.querySelectorAll<HTMLElement>(".brain-toast")]
+          .find((pill) => pill.textContent?.includes("Blocked Lena Okafor"))!
+          .querySelector<HTMLButtonElement>("button")!
+          .click();
+      });
+      await say("Blocked Lena Okafor again", blockReport(() => Promise.resolve()));
+      expect(onExpire).not.toHaveBeenCalled();
+      await act(async () => {
+        settle();
+        await settled;
+      });
+      // The settle takes down the pill it spent, which is already gone, and
+      // nothing else.
+      expect(pills().join(" | ")).toContain("Blocked Lena Okafor again");
+      expect(onExpire).not.toHaveBeenCalled();
+    });
+
+    it("a fourth undo commits the oldest settled pill, never the one whose action is out", async () => {
+      let settle: () => void = () => {};
+      const settled = new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+      const firstExpired = vi.fn();
+      const secondExpired = vi.fn();
+      await say("U1", { ...blockReport(() => settled), onExpire: firstExpired, id: "u1" });
+      await act(async () => {
+        document.body.querySelector<HTMLButtonElement>(".brain-toast button")!.click();
+      });
+      await say("U2", { ...doneReport(() => {}, secondExpired), id: "u2" });
+      await say("U3", { ...doneReport(() => {}), id: "u3" });
+      await say("U4", { ...doneReport(() => {}), id: "u4" });
+      expect(firstExpired).not.toHaveBeenCalled();
+      expect(secondExpired).toHaveBeenCalledTimes(1);
+      expect(pills().map((pill) => pill.slice(0, 2))).toEqual(["U4", "U3", "U1"]);
+      await act(async () => {
+        settle();
+        await settled;
+      });
+      expect(firstExpired).not.toHaveBeenCalled();
+    });
+
+    it("a fourth undo waits while all three standing are settling, and enters when one has", async () => {
+      const settles: Array<() => void> = [];
+      const promises = [0, 1, 2].map(
+        () =>
+          new Promise<void>((resolve) => {
+            settles.push(resolve);
+          }),
+      );
+      const expired = [vi.fn(), vi.fn(), vi.fn()];
+      for (const index of [0, 1, 2]) {
+        await say(`P${index + 1}`, {
+          ...blockReport(() => promises[index]),
+          onExpire: expired[index],
+          id: `p${index + 1}`,
+        });
+        await act(async () => {
+          [...document.body.querySelectorAll<HTMLElement>(".brain-toast")]
+            .find((pill) => pill.textContent?.startsWith(`P${index + 1}`))!
+            .querySelector<HTMLButtonElement>("button")!
+            .click();
+        });
+      }
+      await say("P4", { ...doneReport(() => {}), id: "p4" });
+      expect(pills()).toHaveLength(3);
+      expect(pills().join(" | ")).not.toContain("P4");
+      await act(async () => {
+        settles[1]();
+        await promises[1];
+      });
+      expect(pills().map((pill) => pill.slice(0, 2))).toEqual(["P4", "P3", "P1"]);
+      expect(expired.every((each) => each.mock.calls.length === 0)).toBe(true);
     });
   });
 });

@@ -773,6 +773,12 @@ export function Shell({
     new Map<string, PageRefNestingOperation>(),
   );
 
+  /** Whether a pill's own action has begun and not yet settled. */
+  const toastPending = useCallback(
+    (toast: ShellToast) => toastClocks.current.get(toast)?.pending ?? false,
+    [],
+  );
+
   /** Hands the overlay what stands now. */
   const publishToasts = useCallback(() => {
     setToasts(
@@ -792,6 +798,9 @@ export function Shell({
     clock.leftMs = ms;
     clock.timer = setTimeout(() => {
       clock.timer = null;
+      // An undo under way is the way back being taken, not lost: the pill
+      // stands, saying so, and the settle takes it down.
+      if (clock.pending) return;
       leaveToastRef.current(toast, false);
     }, ms);
   }, []);
@@ -815,8 +824,14 @@ export function Shell({
   const applyToasts = useCallback(
     (admitted: ToastAdmission) => {
       const clocks = toastClocks.current;
-      const owed = admitted.left.filter((toast) => !clocks.get(toast)?.spent);
-      const inherited = admitted.replaced ? clocks.get(admitted.replaced)?.key : undefined;
+      // A pill whose action is settling is spent as far as `onExpire` goes:
+      // the way back is being taken, and flushing behind it would undo the
+      // Undo.
+      const owed = admitted.left.filter((toast) => {
+        const clock = clocks.get(toast);
+        return !clock?.spent && !clock?.pending;
+      });
+      let inherited = admitted.replaced ? clocks.get(admitted.replaced)?.key : undefined;
       for (const toast of toastsRef.current) {
         if (admitted.present.includes(toast)) continue;
         const clock = clocks.get(toast);
@@ -827,8 +842,10 @@ export function Shell({
       toastQueue.current = [...admitted.waiting];
       for (const toast of admitted.present) {
         if (clocks.has(toast)) continue;
+        const key = inherited ?? ++toastKeys.current;
+        inherited = undefined;
         clocks.set(toast, {
-          key: inherited ?? ++toastKeys.current,
+          key,
           timer: null,
           endsAt: 0,
           leftMs: 0,
@@ -850,11 +867,11 @@ export function Shell({
     (toast: ShellToast, spent: boolean) => {
       const clock = toastClocks.current.get(toast);
       if (!clock || !toastsRef.current.includes(toast)) return;
-      const owes = !spent && !clock.spent;
-      applyToasts(toastRelease(toastsRef.current, toastQueue.current, toast));
+      const owes = !spent && !clock.spent && !clock.pending;
+      applyToasts(toastRelease(toastsRef.current, toastQueue.current, toast, toastPending));
       if (owes) toast.onExpire?.();
     },
-    [applyToasts],
+    [applyToasts, toastPending],
   );
   useEffect(() => {
     leaveToastRef.current = leaveToast;
@@ -894,10 +911,15 @@ export function Shell({
         return;
       }
       applyToasts(
-        toastAdmit(toastsRef.current, toastQueue.current, { title, ...options }),
+        toastAdmit(
+          toastsRef.current,
+          toastQueue.current,
+          { title, ...options },
+          toastPending,
+        ),
       );
     },
-    [applyToasts],
+    [applyToasts, toastPending],
   );
 
   /**
@@ -936,8 +958,9 @@ export function Shell({
       /* The action has begun but cannot finish yet — an undo whose own
          request is still out (a Block taken back, a letter archived again).
          The pill stands, its button out of reach, until the promise settles;
-         only THEN is it spent. A pill that left meanwhile (its own window ran
-         out, or a same-id correction took its place) is not taken down. */
+         only THEN is it spent. Its window closing meanwhile does not take it
+         down and owes no `onExpire`. A pill that left meanwhile (a same-id
+         message took it) is not taken down a second time. */
       clock.pending = true;
       publishToasts();
       void outcome.then(

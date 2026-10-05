@@ -86,9 +86,11 @@ a green pull request is not yet a green `main`. The full local gate
 (`pnpm ci:local`) still runs the browser journeys before a merge.
 
 A push to `main` uses one runner for the code gate, Linux build, standalone
-smokes, and the compact `@release` browser gate. It produces no artifact:
-releases are cut with `pnpm release <version>` and built by the `Release`
-workflow (see `docs/release-checklist.md`).
+smokes, and the compact `@release` browser gate. That run is never cancelled
+and never displaced by the next merge: each commit on `main` is its own
+concurrency group, while a pull request's superseded run is still stopped. It
+produces no artifact: releases are cut with `pnpm release <version>` and built
+by the `Release` workflow (see `docs/release-checklist.md`).
 
 A push of a `v*` tag runs the separate `Release` workflow: the same
 operational gate (`scripts/verify-ops.sh`), `pnpm check`, the compact browser

@@ -2046,4 +2046,87 @@ describe("Escape peels one layer at a time", () => {
 
     expect(capsule.hasAttribute("data-expanded")).toBe(false);
   });
+
+  it("folds nothing on a surface that is leaving", async () => {
+    await mount([task("a", { when: TODAY })]);
+    await expand("a");
+    const capsule = capsuleOf("a");
+
+    host.setAttribute("inert", "");
+    await escape();
+    expect(capsule.hasAttribute("data-expanded")).toBe(true);
+
+    host.removeAttribute("inert");
+    await escape();
+    expect(capsule.hasAttribute("data-expanded")).toBe(false);
+  });
+});
+
+/** A SURFACE ON ITS WAY OUT TAKES NO KEY.
+ *
+ *  The shell keeps the leaving canvas mounted through its exit and makes it
+ *  inert (`shell/canvas-presence.tsx`). Inert takes the focus out of it and
+ *  leaves every listener on the window bound, and this column's keys are all
+ *  on the window: a `t` pressed as Tasks left sent the selected task to Today
+ *  from a list the reader was no longer looking at. `host` stands in for the
+ *  canvas here, since the attribute is all the column reads. */
+describe("keys on a surface that is leaving", () => {
+  const select = async () => {
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+    });
+  };
+
+  it("moves no selection while an ancestor is inert, and moves it again after", async () => {
+    await mount([
+      task("first", { when: TODAY, created: "2026-09-05T09:00:00.000Z" }),
+      task("second", { when: TODAY, created: "2026-09-04T09:00:00.000Z" }),
+    ]);
+    await select();
+    expect(rowFor("first").querySelector("[data-selected]")).not.toBeNull();
+
+    host.setAttribute("inert", "");
+    await select();
+    expect(rowFor("first").querySelector("[data-selected]")).not.toBeNull();
+    expect(rowFor("second").querySelector("[data-selected]")).toBeNull();
+
+    host.removeAttribute("inert");
+    await select();
+    expect(rowFor("second").querySelector("[data-selected]")).not.toBeNull();
+  });
+
+  it("sends the selected task nowhere and completes nothing", async () => {
+    const a = task("a", { when: TODAY });
+    await mount([a]);
+    apiFetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.startsWith("/api/tasks?")) return response({ tasks: [a] });
+      return response({ task: { ...a, when: dayFrom(1) } });
+    });
+    await select();
+
+    host.setAttribute("inert", "");
+    for (const init of [
+      { key: "]", metaKey: true },
+      { key: "s" },
+      { key: "Enter", metaKey: true },
+      { key: "Enter" },
+    ]) {
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", init));
+      });
+    }
+    await settle();
+    expect(writes()).toHaveLength(0);
+    expect(rowFor("a").querySelector("[data-expanded]")).toBeNull();
+    expect(toasts).toEqual([]);
+
+    // And the guard lets go with the attribute: the same chord moves the row.
+    host.removeAttribute("inert");
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "]", metaKey: true }));
+    });
+    await settle();
+    expect(JSON.parse(String(writes().at(-1)?.[1]?.body))).toEqual({ when: dayFrom(1) });
+  });
 });

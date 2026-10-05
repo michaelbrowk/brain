@@ -11,6 +11,7 @@ import type {
   MailMimeWorkerRequest,
   MailProtocol,
   MailProtocolSessionOpenRequest,
+  MailSendTransportKind,
   MailServiceHealth,
   MailSystemUsage,
   MailTlsProof,
@@ -1744,13 +1745,19 @@ const MAIL_SERVICE_HEALTH_FIELDS = Object.freeze([
   "lastErrorCode",
 ] as const satisfies readonly (keyof MailServiceHealth)[]);
 const MAIL_SERVICE_HEALTH_FIELD_SET = new Set<string>(MAIL_SERVICE_HEALTH_FIELDS);
+const MAIL_SERVICE_HEALTH_SEND_TRANSPORT_FIELD =
+  "sendTransport" satisfies keyof MailServiceHealth;
 const MAIL_SERVICE_BUILD_FIELDS = Object.freeze(["commit", "builtAt"] as const);
 
 export function validateMailServiceHealth(health: MailServiceHealth): MailServiceHealth {
   if (!isPlainRecord(health)) throw new Error("mail service health is invalid");
   const descriptors = Object.getOwnPropertyDescriptors(health);
   for (const field of Reflect.ownKeys(health)) {
-    if (typeof field !== "string" || !MAIL_SERVICE_HEALTH_FIELD_SET.has(field)) {
+    if (
+      typeof field !== "string" ||
+      (!MAIL_SERVICE_HEALTH_FIELD_SET.has(field) &&
+        field !== MAIL_SERVICE_HEALTH_SEND_TRANSPORT_FIELD)
+    ) {
       throw new Error("mail service health contains an unknown field");
     }
   }
@@ -1758,6 +1765,20 @@ export function validateMailServiceHealth(health: MailServiceHealth): MailServic
     const descriptor = descriptors[field];
     if (!descriptor || !("value" in descriptor)) {
       throw new Error("mail service health fields must be own data properties");
+    }
+  }
+  // The one field a health answer may leave out: a receive-only service has
+  // no SMTP transport to name.
+  const sendTransport = descriptors[MAIL_SERVICE_HEALTH_SEND_TRANSPORT_FIELD];
+  if (sendTransport !== undefined) {
+    if (!("value" in sendTransport)) {
+      throw new Error("mail service health fields must be own data properties");
+    }
+    if (
+      sendTransport.value !== "direct" &&
+      sendTransport.value !== "authenticated_byte_relay"
+    ) {
+      throw new Error("mail health send transport is invalid");
     }
   }
   if (health.apiVersion !== 1) {
@@ -1867,6 +1888,9 @@ export function validateMailServiceHealth(health: MailServiceHealth): MailServic
     lastSuccessfulSyncAgeMs: health.lastSuccessfulSyncAgeMs,
     cachePressure: health.cachePressure,
     lastErrorCode: health.lastErrorCode,
+    ...(sendTransport === undefined
+      ? {}
+      : { sendTransport: sendTransport.value as MailSendTransportKind }),
   });
 }
 

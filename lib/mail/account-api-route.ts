@@ -7,7 +7,9 @@ import {
 import { MAIL_ATTACHMENT_CONTENT_SECURITY_POLICY } from "./content-types";
 import { writeMailLogRecord } from "./security";
 import {
+  exceedsMailJsonStructure,
   MAIL_SEND_ATTACHMENT_LIMITS,
+  MAIL_SEND_BODY_MAX_STRUCTURAL_TOKENS,
   mailSendAttachmentBytes,
   validateMailSendAttachments,
 } from "./send-attachment-codec";
@@ -205,6 +207,16 @@ export async function readBoundedMailJson(
         offset,
       );
       offset += chunk.byteLength;
+    }
+    // A body read past the small cap is a send or a draft, and megabytes of
+    // JSON that are all structure cost hundreds of megabytes to parse. It is
+    // refused by its structure here, before it is decoded. A body under the
+    // small cap costs nothing to parse and is left to its own route's shape.
+    if (
+      maxBytes > MAX_ACCOUNT_REQUEST_BYTES &&
+      exceedsMailJsonStructure(joined, MAIL_SEND_BODY_MAX_STRUCTURAL_TOKENS)
+    ) {
+      throw new MailApiBodyError(400);
     }
     const text = new TextDecoder("utf-8", { fatal: true }).decode(joined);
     return JSON.parse(text) as unknown;

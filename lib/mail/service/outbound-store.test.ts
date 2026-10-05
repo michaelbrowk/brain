@@ -882,6 +882,13 @@ describe("private durable mail outbox", () => {
   // written by the store and then put back into the shape schema 2 wrote. Both
   // hazards of a rebuild live in that file — the state row's foreign key into
   // the outbox, and the two drafts triggers that fire on an outbox insert.
+  //
+  // The timeout is this case's own. The message at the cap is about 14 MiB,
+  // and it is written by the store, rewritten as base64 inside JSON to make
+  // the schema 2 file, and moved back into its column by the migration: three
+  // passes over it on a real SQLite file. That is 0.6 s on an idle machine,
+  // 2.7 s on a busy one, and 5.3 s under a full gate with other gates beside
+  // it, which the default 5 s called a failure.
   it("moves a schema 2 outbox into the message column, message for message", async () => {
     const fixture = await createStore();
     const draft = storedDraftFixture({
@@ -971,7 +978,7 @@ describe("private durable mail outbox", () => {
     } finally {
       database.close();
     }
-  });
+  }, 30_000);
 
   // ONE MESSAGE IS THE CASUALTY, NOT THE ACCOUNT.
   //

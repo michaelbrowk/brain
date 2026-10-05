@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { referencedAttachmentNames } from "@/lib/attachments";
+import type { MailSendTransportKind } from "@/lib/mail/ports";
 import { MAIL_RESOURCE_LIMITS } from "@/lib/mail/security";
 import {
   isSafeAttachmentFilename,
@@ -56,14 +57,26 @@ const RELAY_CAP_MIB =
 /** What this account may carry in files.
  *
  *  A Gmail account hands its message to a provider API and carries the whole
- *  outgoing cap. An IMAP account's SMTP session leaves through the Cloudflare
- *  relay, whose tunnel holds `egressTunnelClientBytes` of finished message,
- *  and `egressTunnelAttachmentBytes` is what that ceiling leaves for files.
+ *  outgoing cap. An IMAP account's SMTP session leaves by the transport the
+ *  mail service composed, which its health names. A direct session carries
+ *  the whole cap too. Through the Cloudflare relay the tunnel holds
+ *  `egressTunnelClientBytes` of finished message, and
+ *  `egressTunnelAttachmentBytes` is what that ceiling leaves for files.
  *  Without this the difference is learned as a relay failure, after the bytes
  *  are read, the MIME is built and the message is in the outbox, and the
- *  answer names neither the account nor a size. */
-export function attachmentBudgetOf(providerKind: "gmail" | "imap"): number {
-  return providerKind === "imap"
+ *  answer names neither the account nor a size.
+ *
+ *  A service that does not say how it sends (`null`: an older one, or one
+ *  that could not be asked) is read as the relay. The smaller budget refuses
+ *  a set a direct session would have carried; the larger one, wrong, strands
+ *  a message in the outbox. Every IMAP account was given the relay's budget
+ *  until the service could send directly, which is how a 3 MiB file came to
+ *  be refused on a host whose SMTP no longer went near the relay. */
+export function attachmentBudgetOf(
+  providerKind: "gmail" | "imap",
+  sendTransport: MailSendTransportKind | null,
+): number {
+  return providerKind === "imap" && sendTransport !== "direct"
     ? MAIL_RESOURCE_LIMITS.egressTunnelAttachmentBytes
     : MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes;
 }
@@ -211,7 +224,7 @@ export async function resolveOutgoingAttachments(
       return budget < MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes
         ? refuse(
             "those attachments are too large for this account",
-            `${RELAY_CAP_MIB} MiB is the limit for one message from an IMAP account, whose relay carries ${MAIL_RESOURCE_LIMITS.egressTunnelClientBytes / (1024 * 1024)} MiB of finished message, against ${TOTAL_CAP_MIB} MiB from a Gmail account`,
+            `${RELAY_CAP_MIB} MiB is the limit for one message from this account, whose SMTP session leaves through a relay that carries ${MAIL_RESOURCE_LIMITS.egressTunnelClientBytes / (1024 * 1024)} MiB of finished message, against ${TOTAL_CAP_MIB} MiB from an account that sends directly`,
             "attachments_too_large_for_account",
           )
         : refuse(

@@ -293,13 +293,18 @@ sudo curl --fail --silent --show-error \
 sudo journalctl -u brain-mail.service -n 50 --no-pager | grep '"event":"mail_service_started"'
 ```
 
-The health answer proves the service came up on the new environment. It does
-not say which transport was composed: `sendReadiness` follows the send door,
-which exists whenever Gmail send is compiled in, and `egress_blocked` is not
-emitted by any code path today. The start record is what says it: the line
-must read `"phase":"running"` and `"transport":"direct"`. A line without a
-`transport` field means the flag was not read (the edit landed in the wrong
-file, or the restart did not happen). Per account, `capabilities.send` on the
+The health answer proves the service came up on the new environment, and its
+`sendTransport` field says which transport was composed: `"direct"` here,
+`"authenticated_byte_relay"` on the relay, and no field at all on a
+receive-only service. `sendReadiness` does not say it: it follows the send
+door, which exists whenever Gmail send is compiled in, and `egress_blocked` is
+not emitted by any code path today. The start record says the same thing: the
+line must read `"phase":"running"` and `"transport":"direct"`. A line without
+a `transport` field, like a health answer without `sendTransport`, means the
+flag was not read (the edit landed in the wrong file, or the restart did not
+happen). Brain reads `sendTransport` for one thing: an agent's send from a
+custom-domain account may carry 10 MiB of files over a direct session and
+1 MiB through the relay. Per account, `capabilities.send` on the
 accounts list turns true only once the account has an outgoing server saved
 and the worker is started and healthy; the Mail settings page shows the same
 state.

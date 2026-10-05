@@ -15,10 +15,10 @@ allowBuilds:
 ignoredOptionalDependencies:
   - "@napi-rs/canvas"
 
-# Security floors (audits 2026-08-19, 2026-09-21): parents of these transitive
-# deps pin vulnerable ranges. Selectors are version-scoped so future majors are
-# never hijacked. postcss stays an exact pin (was 8.5.16 since the July
-# reliability rollout), bumped along the same 8.5.x line.
+# Security floors (audits 2026-08-19, 2026-09-21, 2026-10-04): parents of these
+# transitive deps pin vulnerable ranges. Selectors are version-scoped so future
+# majors are never hijacked. postcss stays an exact pin (was 8.5.16 since the
+# July reliability rollout), bumped along the same 8.5.x line.
 #
 # The 2026-09-21 additions, and why each is a floor rather than a parent bump:
 # nodemailer is pinned to 9.0.3 by both imapflow@1.4.7 and mailparser@3.9.14,
@@ -36,6 +36,18 @@ ignoredOptionalDependencies:
 # it is the HTTP layer of @modelcontextprotocol/sdk, and /api/mcp is a route
 # this app serves, so GHSA-crvj-82cr-hjcx (a query-parser cache-key and proxy
 # interpretation differential) is reachable rather than theoretical.
+#
+# The 2026-10-04 raises, from the day the audit gate went red on every branch
+# at once. nodemailer goes from 10.0.2 to 10.0.9, a floor for the reason given
+# above: 10.0.5 and 10.0.6 make two quadratic walks in its addressparser linear
+# (GHSA-prgh-xp8r-p3m5, GHSA-v53p-9fqp-m79j), and mailparser hands that parser
+# the address headers of inbound mail, so both sat on the path of every letter
+# received. 10.0.9 stops the text after a comment from riding into a quoted
+# local-part address (GHSA-g57g-f23g-4646). hono goes to 4.13.7 for
+# GHSA-hxh3-vqpv-xpqv, still inside the ^4 its parents declare. dompurify is new
+# in this list: @milkdown declares ^3.2.5 and isomorphic-dompurify ^3.4.12, the
+# lockfile had frozen 3.4.13, and 3.4.16 closes GHSA-p98j-92pf-mc4p inside both
+# ranges.
 overrides:
   postcss: 8.5.26
   "js-yaml@>=3.0.0 <3.15.2": 3.15.2
@@ -45,13 +57,14 @@ overrides:
   "nanoid@>=3.0.0 <3.3.18": 3.3.18
   "brace-expansion@>=1.0.0 <1.1.18": 1.1.18
   "brace-expansion@>=5.0.0 <5.0.9": 5.0.9
-  "nodemailer@>=5.0.0 <10.0.2": 10.0.2
+  "nodemailer@>=5.0.0 <10.0.9": 10.0.9
   "fast-uri@>=3.0.0 <3.1.8": 3.1.8
   "browserslist@>=4.0.0 <4.28.7": 4.28.7
   "deepmerge-ts@>=7.0.0 <8.0.0": 8.0.2
   "baseline-browser-mapping@>=2.0.0 <2.11.0": 2.11.0
-  "hono@>=4.0.0 <4.13.5": 4.13.5
+  "hono@>=4.0.0 <4.13.7": 4.13.7
   "qs@>=6.0.0 <6.16.0": 6.16.0
+  "dompurify@>=3.0.0 <3.4.16": 3.4.16
 patchedDependencies:
   '@zone-eu/mailsplit@5.4.14': patches/@zone-eu__mailsplit@5.4.14.patch
   mailparser@3.9.14: patches/mailparser@3.9.14.patch

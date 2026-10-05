@@ -274,7 +274,7 @@ describe("production mail content runner", () => {
     });
   });
 
-  it("gives up on a parser that keeps dropping the connection after three tries", async () => {
+  it("gives up on a parser that keeps dropping a prefetch's connection after three tries", async () => {
     const fixture = await createFixture();
     const parse = vi.fn<IsolatedMailParserPort["parse"]>(async () => ({
       kind: "transient_failure" as const,
@@ -326,6 +326,76 @@ describe("production mail content runner", () => {
       MailContentWorkError,
     );
     expect(parse).toHaveBeenCalledTimes(1);
+  });
+
+  it("waits once more for a letter an owner took over mid-run, and stops waiting when the fetch is aborted", async () => {
+    const fixture = await createFixture();
+    const controller = new AbortController();
+    // The prefetch's letter until the first parse has been dropped, the
+    // owner's from then on, as the queue's lane reads after a promotion.
+    const lane = { background: true };
+    let droppedAt = 0;
+    const parse = vi.fn<IsolatedMailParserPort["parse"]>(async () => {
+      lane.background = false;
+      if (parse.mock.calls.length === 3) {
+        droppedAt = performance.now();
+        setTimeout(() => controller.abort(), 60);
+      }
+      return {
+        kind: "transient_failure" as const,
+        errorCode: "mail_mime_worker_dropped" as const,
+      };
+    });
+    const runner = new ProductionMailContentWorkRunner({
+      sourceFactory: sourceFactoryFor(Buffer.from("raw")),
+      parser: {
+        isolation: { networkAccess: false, credentialAccess: false, sandboxVersion: 1 },
+        parse,
+      },
+      now: () => fixture.now,
+    });
+    // A prefetch's third drop is its failure, reported as the drop it was.
+    // The owner's is waited out, and the abort is what ends that wait.
+    await expect(
+      runner.run({ ...fixture.input, lane }, controller.signal),
+    ).rejects.toEqual(
+      new MailContentWorkError("transient", "mail_content_source_transient"),
+    );
+    expect(parse).toHaveBeenCalledTimes(3);
+    const waitedMs = performance.now() - droppedAt;
+    expect(waitedMs).toBeGreaterThanOrEqual(55);
+    expect(waitedMs).toBeLessThan(2_000);
+  });
+
+  it("does not take a wait its lease would not outlive", async () => {
+    const fixture = await createFixture();
+    const parse = vi.fn<IsolatedMailParserPort["parse"]>(async () => ({
+      kind: "transient_failure" as const,
+      errorCode: "mail_mime_worker_dropped" as const,
+    }));
+    const runner = new ProductionMailContentWorkRunner({
+      sourceFactory: sourceFactoryFor(Buffer.from("raw")),
+      parser: {
+        isolation: { networkAccess: false, credentialAccess: false, sandboxVersion: 1 },
+        parse,
+      },
+      now: () => fixture.now,
+    });
+    const startedAt = performance.now();
+    // Two seconds are left: room for the two short waits, not for the
+    // owner's long one.
+    await expect(
+      runner.run(
+        {
+          ...fixture.input,
+          lane: { background: false },
+          deadlineAt: fixture.now + 2_000,
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toEqual(new MailContentWorkError("transient", "mail_mime_worker_dropped"));
+    expect(parse).toHaveBeenCalledTimes(3);
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
   });
 
   it("creates a provider-matched source and stops reauthentication-required accounts", async () => {
@@ -473,6 +543,8 @@ async function createFixture(): Promise<{
       cache,
       blobStore,
       deadlineAt: claim.lease.expiresAt,
+      // The prefetch's lane. A test of an owner's letter says so itself.
+      lane: { background: true },
     },
   };
 }

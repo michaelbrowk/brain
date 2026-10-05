@@ -673,6 +673,118 @@ test("Mail keyboard selects the first conversation with j and toggles read with 
   });
 });
 
+/* THE KEY THAT ARRIVES WITH THE COMMIT.
+ *
+ * The case above waits for "Mark unread" and presses u, and now and then the
+ * u it pressed marked the letter read a second time. Mail's key listener read
+ * the open letter out of a ref that was written in a passive effect, which is
+ * a task after the commit that draws the word, so a key landing between the
+ * two toggled the letter as it had been one commit earlier. Playwright only
+ * lands there when the machine is busy. This case lands there every time: the
+ * key is pressed from inside the page, in the microtask after the mutation
+ * that draws the word, which is the earliest a reader could ever be shown it. */
+test("Mail keyboard u marks the letter unread in the turn it is drawn as read", async ({
+  page,
+}) => {
+  await login(page);
+  const { mutationBodies } = await installMailRoutes(page);
+  await page.goto("/mail");
+  await enterSingleAccount(page);
+  await expect(page.getByText(thread.subject, { exact: true })).toBeVisible();
+
+  await page.evaluate(() => {
+    const observer = new MutationObserver(() => {
+      const drawn = [...document.querySelectorAll("button")].some(
+        (button) => button.textContent === "Mark unread",
+      );
+      if (!drawn) return;
+      observer.disconnect();
+      document.body.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "u", bubbles: true, cancelable: true }),
+      );
+    });
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+  });
+
+  await page.keyboard.press("j");
+  await expect.poll(() => mutationBodies.length).toBeGreaterThan(1);
+  expect(mutationBodies.slice(0, 2)).toEqual([
+    { accountId: account.accountId, read: true },
+    { accountId: account.accountId, read: false },
+  ]);
+});
+
+/* A KEY PRESSED AS MAIL LEAVES.
+ *
+ * The shell keeps the leaving canvas mounted through its exit and makes it
+ * inert, which takes the focus out of Mail and leaves its listener on the
+ * window bound. An e pressed in those frames archived the open letter from a
+ * surface the reader had already left. The exit is a tenth of a second, so
+ * the key is pressed from inside the page, in the microtask after the canvas
+ * turns inert, rather than raced against it from here.
+ *
+ * Nothing archived is an absence, and an absence needs an end: the last
+ * request is a marker of the spec's own to the same route, and the route
+ * hears requests in the order the page made them. */
+test("Mail takes no key on its way out: an e pressed as the canvas leaves archives nothing", async ({
+  page,
+}) => {
+  await login(page);
+  const { mutationBodies } = await installMailRoutes(page);
+  await page.goto("/mail");
+  await enterSingleAccount(page);
+  await expect(page.getByText(thread.subject, { exact: true })).toBeVisible();
+  await page.keyboard.press("j");
+  await expect(page.getByRole("button", { name: "Mark unread" })).toBeVisible();
+
+  await page.evaluate(() => {
+    const reader = document.querySelector('section[aria-label="Message reader"]');
+    const main = document.querySelector("main");
+    if (!reader || !main) throw new Error("Mail is not on screen");
+    const observer = new MutationObserver(() => {
+      if (reader.closest("[inert]") === null) return;
+      observer.disconnect();
+      document.body.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "e", bubbles: true, cancelable: true }),
+      );
+      (window as typeof window & { __pressedWhileLeaving?: boolean }).__pressedWhileLeaving =
+        true;
+    });
+    observer.observe(main, {
+      attributes: true,
+      attributeFilter: ["inert"],
+      subtree: true,
+    });
+  });
+
+  await page.getByRole("button", { name: "Home" }).click();
+  await expect(page).toHaveURL("/");
+  await expect(page.locator('section[aria-label="Message reader"]')).toHaveCount(0);
+  expect(
+    await page.evaluate(
+      () =>
+        (window as typeof window & { __pressedWhileLeaving?: boolean })
+          .__pressedWhileLeaving,
+    ),
+  ).toBe(true);
+
+  await page.evaluate(() =>
+    fetch("/api/mail/threads/thread-1", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ marker: true }),
+    }),
+  );
+  expect(mutationBodies).toEqual([
+    { accountId: account.accountId, read: true },
+    { marker: true },
+  ]);
+});
+
 /** Reads the three-pane promise off the DOM: which panes are on screen, how
  *  wide the reader's own head is, and whether its pill still sits on §4's one
  *  inset. */
@@ -1083,9 +1195,121 @@ test("@release Mail's nav menu stays reachable in a window shorter than itself",
     );
     expect(focused?.onScreen, `focus is off screen at ${height}`).toBe(true);
 
+    // Row by row as well. An arrow key scrolls the next row in to the nearest
+    // edge of the scroller, which is where the fade is, and the scroller
+    // clips whatever a row draws outside itself. So every stop has to stand
+    // clear of the mask with its ring inside the row. The menu moves focus on
+    // a timer after the keydown, so each press waits for the one before it.
+    await page.keyboard.press("Home");
+    await page.waitForFunction(
+      () => document.activeElement === document.querySelector('[role="menuitemradio"]'),
+    );
+    const total = await page.getByRole("menuitemradio").count();
+    for (let step = 1; step < total; step += 1) {
+      await page.keyboard.press("ArrowDown");
+      await page.waitForFunction(
+        (index) =>
+          document.activeElement ===
+          document.querySelectorAll('[role="menuitemradio"]')[index],
+        step,
+      );
+      const stop = await page.evaluate(() => {
+        const active = document.activeElement as HTMLElement;
+        const scroller = active.closest(".edge-fade") as HTMLElement;
+        const row = active.getBoundingClientRect();
+        const box = scroller.getBoundingClientRect();
+        // 12px of mask at the top once scrolled, 20px at the bottom while
+        // content continues (`.edge-fade` in globals.css).
+        const top = scroller.scrollTop > 0 ? 12 : 0;
+        const bottom =
+          scroller.scrollTop + scroller.clientHeight < scroller.scrollHeight - 1 ? 20 : 0;
+        return {
+          label: active.textContent?.trim() ?? "",
+          clear: row.top >= box.top + top - 0.5 && row.bottom <= box.bottom - bottom + 0.5,
+          ringInside: parseFloat(getComputedStyle(active).outlineOffset) < 0,
+        };
+      });
+      expect(stop.clear, `${stop.label} sits under the fade at ${height}`).toBe(true);
+      expect(stop.ringInside, `the scroller clips ${stop.label}'s ring at ${height}`).toBe(
+        true,
+      );
+    }
+
     await page.keyboard.press("Escape");
     await expect(menu).toHaveCount(0);
   }
+});
+
+/* THE RING IN THE MENU BELONGS TO THE KEYS. `html[data-kbd]` is set by an
+   arrow key and cleared only by a pointer down, and Radix focuses the row
+   under the pointer as it moves, so after one arrow key the ring followed the
+   mouse from row to row. The menu says which of the two moved focus last and
+   draws the ring only for the keys, and the row under the keys keeps its own
+   radius instead of the square one the global ring's `inherit` handed it. */
+test("@release Mail's nav menu rings a row for the keys and never for the pointer", async ({
+  page,
+}) => {
+  await login(page);
+  await installMailRoutes(page);
+  await page.goto("/mail");
+  await navTrigger(page).click();
+  const menu = page.locator(".brain-menu");
+  await expect(menu).toBeVisible();
+  const rows = page.getByRole("menuitemradio");
+  const focused = () =>
+    page.evaluate(() => {
+      const style = getComputedStyle(document.activeElement as HTMLElement);
+      return { ring: style.outlineStyle, radius: style.borderTopLeftRadius };
+    });
+  const resting = await rows
+    .nth(5)
+    .evaluate((node) => getComputedStyle(node).borderTopLeftRadius);
+  expect(resting).not.toBe("0px");
+
+  await page.keyboard.press("ArrowDown");
+  await expect(rows.nth(0)).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await expect(rows.nth(1)).toBeFocused();
+  expect(await focused()).toEqual({ ring: "solid", radius: resting });
+
+  // The pointer crosses from the trigger to a row, in one event. Radix hands
+  // that row the focus, and it wears the hover and no ring: coming into the
+  // menu is a move, and its first event is not spent on learning where the
+  // pointer is.
+  const box = await rows.nth(3).boundingBox();
+  if (!box) throw new Error("row not on screen");
+  await page.mouse.move(box.x + 24, box.y + box.height / 2);
+  await expect(rows.nth(3)).toBeFocused();
+  expect((await focused()).ring).toBe("none");
+
+  // And the next key takes the ring back, on the row it moves to.
+  await page.keyboard.press("ArrowDown");
+  await expect(rows.nth(4)).toBeFocused();
+  expect(await focused()).toEqual({ ring: "solid", radius: resting });
+
+  // A pen passing over the menu moves no focus (Radix moves it for a mouse
+  // only), so it does not take the ring off the keyboard's row either.
+  await rows.nth(6).evaluate((row) => {
+    const at = row.getBoundingClientRect();
+    for (const dx of [10, 14, 18]) {
+      row.dispatchEvent(
+        new PointerEvent("pointermove", {
+          bubbles: true,
+          pointerType: "pen",
+          clientX: at.x + dx,
+          clientY: at.y + 8,
+        }),
+      );
+    }
+  });
+  await expect(rows.nth(4)).toBeFocused();
+  expect((await focused()).ring).toBe("solid");
+
+  // The mouse, already inside, moves on: one move, and the ring is gone.
+  await page.mouse.move(box.x + 40, box.y + box.height / 2 + 2);
+  await expect(rows.nth(3)).toBeFocused();
+  expect((await focused()).ring).toBe("none");
+  await page.keyboard.press("Escape");
 });
 
 /* The pane can hold three things, and below the breakpoint only one of them is

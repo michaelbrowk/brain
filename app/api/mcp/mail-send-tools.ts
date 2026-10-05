@@ -12,6 +12,7 @@ import type {
   MailSendInput,
   MailSendResult,
 } from "@/lib/mail/message-types";
+import type { MailSendTransportKind } from "@/lib/mail/ports";
 import {
   deriveReplyAllRecipients,
   deriveReplyRecipients,
@@ -213,6 +214,24 @@ type CarriedSend =
   | { readonly unknown: unknown }
   | { readonly result: MailSendResult };
 
+/** How the service's SMTP leaves, asked only when the answer chooses a
+ *  budget: an IMAP account with files to carry. A Gmail account's message
+ *  goes to the provider's API, and a message without files has nothing to
+ *  size. A service that cannot be asked is not a reason to refuse the send:
+ *  it reads as one that does not say, and the files get the relay's budget. */
+async function sendTransportFor(
+  client: BrainMailClient,
+  refs: readonly OutgoingAttachmentRef[],
+  account: PublicMailAccountV3,
+): Promise<MailSendTransportKind | null> {
+  if (refs.length === 0 || account.providerKind !== "imap") return null;
+  try {
+    return await client.readSendTransport();
+  } catch {
+    return null;
+  }
+}
+
 /** The files and the wire, inside one turn of the gate above.
  *
  *  Everything before this either never reached the service or told it nothing
@@ -229,7 +248,10 @@ async function carrySend(
   return inAttachmentSendTurn(refs.length, async () => {
     const resolved = await resolveOutgoingAttachments(
       refs,
-      attachmentBudgetOf(account.providerKind),
+      attachmentBudgetOf(
+        account.providerKind,
+        await sendTransportFor(client, refs, account),
+      ),
     );
     if ("refused" in resolved) return resolved;
     try {

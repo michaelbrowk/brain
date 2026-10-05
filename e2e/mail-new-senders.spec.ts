@@ -392,6 +392,49 @@ test("a stranger's first letter waits under New senders, Accept sends it to Peop
   await expect.poll(() => world.deleted.length).toBe(1);
 });
 
+/* On a phone the waiting row is the name and its two buttons. The decision
+   keeps 128 of the row, and what that left of the domain was a stub of three
+   or four letters, so below the column's phone breakpoint (`md`, where the
+   sidebar gives way to the tab bar) the domain is not drawn at all. Held at
+   the two widths either side of it. */
+test("a waiting row drops the sender's domain where the column is a phone's", async ({
+  page,
+}) => {
+  await login(page);
+  await install(page);
+  await page.setViewportSize({ width: 768, height: 900 });
+  await page.goto("/mail");
+
+  const row = waitingGroup(page).locator('[role="listitem"]').filter({ hasText: "Lena Okafor" });
+  await expect(row.getByText("Lena Okafor")).toBeVisible();
+  await expect(row.getByText("okafor.example")).toBeVisible();
+
+  await page.setViewportSize({ width: 767, height: 900 });
+  await expect(row.getByText("Lena Okafor")).toBeVisible();
+  await expect(row.getByText("okafor.example")).toBeHidden();
+  await expect(row.getByRole("button", { name: "Block Lena Okafor" })).toBeVisible();
+  await expect(row.getByRole("button", { name: "Accept Lena Okafor" })).toBeVisible();
+});
+
+test("@mobile a waiting row on a phone is the name and its decision, with no domain", async ({
+  page,
+}) => {
+  await login(page);
+  await install(page);
+  await page.goto("/mail");
+
+  const row = waitingGroup(page).locator('[role="listitem"]').filter({ hasText: "Lena Okafor" });
+  await expect(row.getByText("Lena Okafor")).toBeVisible();
+  await expect(row.getByText("okafor.example")).toBeHidden();
+  // The name has the row to itself up to the buttons: it is not cut short.
+  const cut = await row
+    .getByText("Lena Okafor")
+    .evaluate((node) => node.scrollWidth > node.clientWidth + 0.5);
+  expect(cut).toBe(false);
+  await expect(row.getByRole("button", { name: "Block Lena Okafor" })).toBeVisible();
+  await expect(row.getByRole("button", { name: "Accept Lena Okafor" })).toBeVisible();
+});
+
 test("Block takes the letter out of the column and Undo puts it back", async ({ page }) => {
   await login(page);
   const world = await install(page);

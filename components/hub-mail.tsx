@@ -17,11 +17,24 @@
 // own fetch, its own pending state and its own failure row. The last answer is
 // kept in `sessionStorage` and revalidated on mount and on `visibilitychange`,
 // the pattern the visit marker at the head of Home already uses.
+//
+// IT FOLLOWS THE MAIL EVENTS TOO. Home used to learn of a new letter only when
+// the reader left the tab and came back, while the Mail column had it within
+// a second. The shell hands every `mail` event from the change feed to the
+// window (`lib/mail/mail-events.ts`), and the block reads again a debounce
+// after the last one. Mount and `visibilitychange` stay as the net under the
+// feed, and a stream that reconnects sends a `reset`, which is read like any
+// other event.
 
 import { motion, useReducedMotion } from "framer-motion";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { formatAgo } from "@/lib/format-ago";
+import {
+  MAIL_CHANGED_EVENT,
+  MAIL_EVENT_DEBOUNCE_MS,
+  parseBrainMailEvent,
+} from "@/lib/mail/mail-events";
 import type { MailThreadListItem } from "@/lib/mail/message-types";
 import { DUR, EASE_OUT } from "@/lib/motion";
 
@@ -93,8 +106,20 @@ export function HubMail({
   const reduce = useReducedMotion() ?? false;
   const [state, setState] = useState<MailBlockState>({ kind: "unknown" });
   const alive = useRef(true);
+  // Events make reads frequent enough to overlap, and an older answer landing
+  // after a newer one would put back the rows it had replaced. So every read
+  // takes a number, and a read may write unless a LATER one has already
+  // landed. Landed, not started: comparing with the read started last threw
+  // an answer away the moment another read began, whether or not that one
+  // ever answered, and a mailbox syncing in batches (an event every half
+  // second, a read that takes longer) left Home on its skeleton for as long
+  // as the sync ran.
+  const startedRead = useRef(0);
+  const landedRead = useRef(0);
 
   const revalidate = useCallback(async () => {
+    const read = (startedRead.current += 1);
+    const stale = () => !alive.current || read < landedRead.current;
     // The last answer this tab had, so walking back to Home draws the block
     // it drew a moment ago instead of a skeleton. Read here and not in the
     // effect body: the server has no session storage, so the first render has
@@ -124,7 +149,7 @@ export function HubMail({
       //
       // With no answer ever, there is no mailbox to name and the block stays
       // away, which is the same thing it does when there is no account.
-      if (!alive.current) return;
+      if (stale()) return;
       setState((current) => {
         const known = current.kind === "ready" ? current.data : cached;
         if (!known || known.accounts.length === 0) return current;
@@ -132,8 +157,9 @@ export function HubMail({
       });
       return;
     }
-    if (!alive.current) return;
+    if (stale()) return;
     if (accounts.length === 0) {
+      landedRead.current = read;
       forgetSnapshot();
       setState({ kind: "absent" });
       return;
@@ -151,7 +177,7 @@ export function HubMail({
         }),
       ),
     );
-    if (!alive.current) return;
+    if (stale()) return;
 
     const items: MailThreadListItem[] = [];
     const unreachable: string[] = [];
@@ -180,6 +206,7 @@ export function HubMail({
       unreachable,
       accounts: accounts.map((account) => account.emailAddress),
     };
+    landedRead.current = read;
     rememberSnapshot(data);
     setState({ kind: "ready", data });
   }, [client]);
@@ -193,11 +220,37 @@ export function HubMail({
     const onVisible = () => {
       if (document.visibilityState === "visible") void revalidate();
     };
+    // One timer for the whole block, where the surface keeps one per account:
+    // a read here asks every account, so a burst about any of them is one
+    // read. What cannot change an unread Inbox row lets pass: a body that
+    // became ready, and a change that names no Inbox. A hidden tab lets
+    // everything pass, because coming back to it reads the block anyway, and
+    // that is asked again when the timer comes due: the tab can hide inside
+    // the debounce.
+    let due: ReturnType<typeof setTimeout> | null = null;
+    const onMailChanged = (event: Event) => {
+      const change = parseBrainMailEvent((event as CustomEvent<unknown>).detail);
+      if (change === null || document.visibilityState !== "visible") return;
+      if (
+        change.changeKind !== "reset" &&
+        (change.changeKind === "content_ready" || !change.mailboxIds.includes("inbox"))
+      ) {
+        return;
+      }
+      if (due !== null) clearTimeout(due);
+      due = setTimeout(() => {
+        due = null;
+        if (document.visibilityState === "visible") void revalidate();
+      }, MAIL_EVENT_DEBOUNCE_MS);
+    };
     document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener(MAIL_CHANGED_EVENT, onMailChanged);
     return () => {
       alive.current = false;
       window.cancelAnimationFrame(frame);
       document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener(MAIL_CHANGED_EVENT, onMailChanged);
+      if (due !== null) clearTimeout(due);
     };
   }, [revalidate]);
 

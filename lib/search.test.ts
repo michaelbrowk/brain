@@ -6,13 +6,17 @@ import { describe, expect, it, vi } from "vitest";
 import {
   assertSearchReady,
   buildSearchTextTarget,
+  MAX_BYTES_READ,
+  MAX_LINES_READ,
   MAX_MATCH_LINES,
   rankSearchCandidate,
+  runBodySearch,
   runRipgrep,
   SearchBackendError,
   searchRunPlan,
   tokenizeSearchQuery,
 } from "./search";
+import { MANAGED_PAGE_META_KEYS } from "./store/frontmatter";
 
 const HAS_RIPGREP = (() => {
   try {
@@ -258,6 +262,11 @@ describe("the search plan", () => {
 });
 
 describe("bounded ripgrep output", () => {
+  /** One `match` line as `rg --json` prints it. */
+  const matchLine = (text: string) =>
+    '{"type":"match","data":{"path":{"text":"./note/index.md"},' +
+    `"lines":{"text":"${text}"},"line_number":1}}`;
+
   it("answers the first matches it has, stops the process, and logs nothing", async () => {
     const line =
       '{"type":"match","data":{"path":{"text":"./note/index.md"},' +
@@ -296,6 +305,177 @@ describe("bounded ripgrep output", () => {
     // SIGKILL carries a null code and ripgrep's warnings, and logging that
     // puts failures in the operator's log for searches that answered.
     expect(logged).toEqual([]);
+  });
+
+  it("neither answers nor counts a line the caller refuses", async () => {
+    // The cap is on what is answered. A run that drops frontmatter while it
+    // reads has to reach three hundred body lines, not three hundred lines.
+    const body = [
+      "i=0",
+      "while [ $i -lt 400 ]; do",
+      `printf '%s\\n' '${matchLine("created: 15")}'`,
+      `printf '%s\\n' '${matchLine("body 15")}'`,
+      "i=$((i+1))",
+      "done",
+      "sleep 30",
+    ].join("\n");
+
+    await withFakeRipgrep(body, async (cwd) => {
+      const lines = await runRipgrep(
+        ["needle"],
+        cwd,
+        (line) => !line.includes("created"),
+      );
+      expect(lines).toHaveLength(MAX_MATCH_LINES);
+      expect(lines.every((line) => line.includes("body 15"))).toBe(true);
+    });
+  });
+
+  it("stops reading at ten lines for every one it may answer, kept or not", async () => {
+    // A word in every page's `created` and `updated` and in no body: nothing
+    // is kept, so the cap on answers never fires, and without a second bound
+    // the run read the whole notebook, eighty thousand lines over twenty
+    // thousand pages where it had read six hundred.
+    expect(MAX_LINES_READ).toBe(10 * MAX_MATCH_LINES);
+    const body = [
+      "echo $$ > pid",
+      "i=0",
+      `while [ $i -lt 10000 ]; do printf '%s\\n' '${matchLine("created: 15")}'; i=$((i+1)); done`,
+      "exec sleep 30",
+    ].join("\n");
+
+    await withFakeRipgrep(body, async (cwd) => {
+      let asked = 0;
+      const lines = await runRipgrep(["needle"], cwd, () => {
+        asked += 1;
+        return false;
+      });
+      expect(lines).toEqual([]);
+      expect(asked).toBe(MAX_LINES_READ);
+      const pid = Number((await fs.readFile(path.join(cwd, "pid"), "utf8")).trim());
+      expect(await died(pid)).toBe(true);
+    });
+  });
+
+  it("answers what it kept when the time runs out, and refuses when it kept nothing", async () => {
+    // A run that is slow after its first matches has still found them. One
+    // that is slow before any is a search that did not happen, and saying
+    // "nothing found" for it would be a lie about the notes.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const some = [
+        `printf '%s\\n' '${matchLine("first")}'`,
+        `printf '%s\\n' '${matchLine("second")}'`,
+        "exec sleep 30",
+      ].join("\n");
+      await withFakeRipgrep(some, async (cwd) => {
+        let read = 0;
+        let bothRead: () => void = () => {};
+        const twoLines = new Promise<void>((resolve) => {
+          bothRead = resolve;
+        });
+        const run = runRipgrep(["needle"], cwd, () => {
+          read += 1;
+          if (read === 2) bothRead();
+          return true;
+        });
+        await twoLines;
+        await vi.advanceTimersByTimeAsync(3_000);
+        expect(await run).toHaveLength(2);
+      });
+
+      await withFakeRipgrep("exec sleep 30", async (cwd) => {
+        const run = runRipgrep(["needle"], cwd);
+        const refused = expect(run).rejects.toEqual(
+          expect.objectContaining<SearchBackendError>({
+            name: "SearchBackendError",
+            message: "ripgrep search timed out",
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(3_000);
+        await refused;
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it(
+    "stops reading at the byte ceiling, answers what it kept, and refuses when it kept nothing",
+    async () => {
+      // Lines are not a bound on bytes. A page of long lines offers every one
+      // of them up to the per-page budget, three are kept, and sixty such
+      // pages were 360 MB read for a run that had read 36 MB. Here: one short
+      // match, then 102 MB of lines 400 KB long, each under the line limit,
+      // so nothing but the ceiling ends the run. The clock is held still,
+      // since a run that ends on time proves nothing about bytes.
+      expect(MAX_BYTES_READ).toBe(64 * 1024 * 1024);
+      const body = [
+        "echo $$ > pid",
+        // One line in a file, doubled eight times: a shell that prints 400 KB
+        // two hundred times takes longer over it than the search does.
+        "head -c 399999 /dev/zero | tr '\\0' x > block",
+        "echo >> block",
+        "n=0",
+        "while [ $n -lt 8 ]; do cat block block > twice; mv twice block; n=$((n+1)); done",
+        `printf '%s\\n' '${matchLine("first")}'`,
+        "exec cat block",
+      ].join("\n");
+      const withoutTheClock = async (keep: (line: string) => boolean, cwd: string) => {
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        try {
+          return await runRipgrep(["needle"], cwd, keep);
+        } finally {
+          vi.useRealTimers();
+        }
+      };
+
+      await withFakeRipgrep(body, async (cwd) => {
+        let seen = 0;
+        const lines = await withoutTheClock((line) => {
+          seen += Buffer.byteLength(line) + 1;
+          return line.length < 1_000;
+        }, cwd);
+        expect(lines).toEqual([matchLine("first")]);
+        // Within a line and a pipe's worth of the ceiling, from either side.
+        expect(seen).toBeGreaterThan(MAX_BYTES_READ - 1_000_000);
+        expect(seen).toBeLessThanOrEqual(MAX_BYTES_READ + 1_000_000);
+        const pid = Number((await fs.readFile(path.join(cwd, "pid"), "utf8")).trim());
+        expect(await died(pid)).toBe(true);
+      });
+
+      await withFakeRipgrep(body, async (cwd) => {
+        await expect(withoutTheClock(() => false, cwd)).rejects.toEqual(
+          expect.objectContaining<SearchBackendError>({
+            name: "SearchBackendError",
+            message: "ripgrep search exceeded output limit",
+          }),
+        );
+      });
+    },
+    30_000,
+  );
+
+  it("skips a line past the limit once it has something to answer", async () => {
+    // The fourth match of a page, 600 KB of it. The three before it are an
+    // answer already, and the whole search used to be refused over a line it
+    // was never going to show.
+    const body = [
+      `printf '%s\\n' '${matchLine("one")}'`,
+      `printf '%s\\n' '${matchLine("two")}'`,
+      `printf '%s\\n' '${matchLine("three")}'`,
+      "head -c 600000 /dev/zero | tr '\\0' x",
+      "echo",
+      `printf '%s\\n' '${matchLine("after")}'`,
+      "exit 0",
+    ].join("\n");
+
+    await withFakeRipgrep(body, async (cwd) => {
+      const lines = await runRipgrep(["needle"], cwd);
+      expect(lines).toEqual(
+        ["one", "two", "three", "after"].map((text) => matchLine(text)),
+      );
+    });
   });
 
   it("still refuses one line past the output limit", async () => {
@@ -376,23 +556,7 @@ describe("searchNotes over a real notes root", () => {
       // whole query, and the sort that puts both first — lives in `doSearch`,
       // which every other suite mocks away. Real ripgrep, a real Store, four
       // pages in a temp notes root.
-      const root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-search-notes-"));
-      const globals = globalThis as {
-        __brainStore?: unknown;
-        __brainStoreInit?: unknown;
-      };
-      const heldStore = globals.__brainStore;
-      const heldInit = globals.__brainStoreInit;
-      try {
-        vi.stubEnv("NOTES_ROOT", root);
-        // `NOTES_ROOT` is read at import, so the modules under test are the
-        // ones loaded after the stub, not the ones at the top of this file.
-        vi.resetModules();
-        delete globals.__brainStore;
-        delete globals.__brainStoreInit;
-        const { getStore } = await import("./store");
-        const store = await getStore();
-
+      await withRealNotes(async (store, searchNotes) => {
         // The phrase, in a body. Rank 40.
         await store.createPage(null, "Дневник", {
           markdown: "Урок 15 сентября — пришли все.",
@@ -411,7 +575,6 @@ describe("searchNotes over a real notes root", () => {
           markdown: "Урок сентября без числа.",
         });
 
-        const { searchNotes } = await import("./search");
         const hits = await searchNotes("Урок 15 сентября");
 
         expect(hits.map((hit) => hit.title)).toEqual([
@@ -419,16 +582,204 @@ describe("searchNotes over a real notes root", () => {
           "Сентября 15 урок",
           "Заметки",
         ]);
-      } finally {
-        vi.unstubAllEnvs();
-        globals.__brainStore = heldStore;
-        globals.__brainStoreInit = heldInit;
-        await fs.rm(root, { recursive: true, force: true });
-      }
+      });
+    },
+    30_000,
+  );
+
+  it.skipIf(!HAS_RIPGREP)(
+    "finds a word in the body of a page whose own frontmatter holds it three times",
+    async () => {
+      // WHY THE CASE ABOVE FAILED ONCE A WEEK. ripgrep answers the first three
+      // matching lines of a file, and a page's frontmatter is the top of its
+      // file. "15" is in `created` and `updated` for one hour of the day and
+      // one minute and one second of every sixty, and in one random id in two
+      // hundred. When all three held it, the three lines ripgrep answered were
+      // frontmatter, the body line with the number in it was never read, and
+      // the page failed the intersection. It looked like load because nothing
+      // in the test said which clock and which id it had been dealt. Both are
+      // pinned here, to the worst a page can be dealt.
+      await withRealNotes(async (store, searchNotes) => {
+        vi.useFakeTimers({
+          toFake: ["Date"],
+          now: new Date("2026-09-15T15:15:15.150Z"),
+        });
+        try {
+          await store.createPage(null, "Заметки", {
+            id: "page15page",
+            quickCaptureFingerprint: "a".repeat(64),
+            markdown: "Урок прошёл.\n\nПятнадцатое? нет, 15.\n\nБыло в сентября.",
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+
+        const hits = await searchNotes("Урок 15 сентября");
+
+        expect(hits.map((hit) => hit.title)).toEqual(["Заметки"]);
+        // The lines a reader sees are the page's, never its metadata.
+        expect(hits[0]?.snippet.before + hits[0]?.snippet.match).not.toMatch(
+          /^(id|created|updated):/,
+        );
+      });
+    },
+    30_000,
+  );
+
+  it.skipIf(!HAS_RIPGREP)(
+    "never answers a share password hash, or any other line the store wrote",
+    async () => {
+      // A shared page keeps its password hash, its link version and its
+      // expiry in frontmatter. None of the three was on the list of keys the
+      // search refused, so a query the hash happened to hold was answered
+      // with `sharePass: $2a$10$…` as the snippet, in the palette and through
+      // the MCP `search` tool alike.
+      await withRealNotes(async (store, searchNotes) => {
+        const page = await store.createPage(null, "Заметки", {
+          markdown: "Урок прошёл.\n\nПятнадцатое? нет, 15.\n\nБыло в сентября.",
+        });
+        // Written the way `serializePage` writes them, straight into the
+        // file: a real hash cannot be made to hold a chosen word.
+        const file = path.join(store.resolve(page.id), "index.md");
+        const shared = (await fs.readFile(file, "utf8")).replace(
+          /\n---\n/,
+          "\nsharePass: $2a$10$abc15defghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQ\n" +
+            "shareVersion: 15\nshareExpiresAt: '2026-10-15T10:00:00.000Z'\n---\n",
+        );
+        await fs.writeFile(file, shared);
+
+        const hits = await searchNotes("15");
+        expect(hits.map((hit) => hit.snippet)).toEqual([
+          { before: "Пятнадцатое? нет, ", match: "15", after: "." },
+        ]);
+
+        // And a word only the hash holds answers nothing at all.
+        expect(await searchNotes("defghijklmnopqrstuvwxyz")).toEqual([]);
+      });
     },
     30_000,
   );
 });
+
+/** ONE RUN, ON FILES WRITTEN BY HAND.
+ *
+ *  What a run asks ripgrep for and what it keeps of the answer are two
+ *  numbers that have to agree: a line for every key the store manages, and
+ *  three more, of which the three are kept. Either one wrong is silent. Too
+ *  few lines asked for and a page whose frontmatter holds the word loses its
+ *  body, too many kept and one long note takes the whole answer. So the page
+ *  here holds the word on every managed key and on five lines of its body. */
+describe("one search run over a page", () => {
+  const WORD = "a1b2";
+
+  async function withPage(
+    index: string,
+    run: (root: string) => Promise<void>,
+  ) {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-search-run-"));
+    try {
+      await fs.mkdir(path.join(root, "note"));
+      await fs.writeFile(path.join(root, "note", "index.md"), index);
+      await run(root);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }
+
+  const texts = (lines: string[]) =>
+    lines.map(
+      (line) =>
+        (JSON.parse(line) as { data: { lines: { text: string } } }).data.lines.text,
+    );
+
+  const everyManagedKey = [...MANAGED_PAGE_META_KEYS]
+    .map((key) => `${key}: ${WORD}`)
+    .join("\n");
+
+  it.skipIf(!HAS_RIPGREP)(
+    "reads past every managed key to the body, and keeps three lines of it",
+    async () => {
+      const body = [1, 2, 3, 4, 5].map((n) => `body ${n} ${WORD}`).join("\n");
+      await withPage(`---\n${everyManagedKey}\n---\n${body}\n`, async (root) => {
+        expect(texts(await runBodySearch(WORD, root))).toEqual([
+          `body 1 ${WORD}\n`,
+          `body 2 ${WORD}\n`,
+          `body 3 ${WORD}\n`,
+        ]);
+      });
+    },
+  );
+
+  it.skipIf(!HAS_RIPGREP)(
+    "keeps three lines of a page that holds the word on ten, with ripgrep offering them all",
+    async () => {
+      // No key holds the word here, so the whole budget is body and ripgrep
+      // hands over all ten. The three are this side's to count.
+      const body = Array.from({ length: 10 }, (_unused, n) => `body ${n + 1} ${WORD}`);
+      await withPage(`---\nid: p1\ntitle: Plain\n---\n${body.join("\n")}\n`, async (root) => {
+        expect(texts(await runBodySearch(WORD, root))).toEqual(
+          body.slice(0, 3).map((line) => `${line}\n`),
+        );
+      });
+    },
+  );
+
+  it.skipIf(!HAS_RIPGREP)("answers no managed key, whichever one it is", async () => {
+    await withPage(`---\n${everyManagedKey}\n---\nnothing here\n`, async (root) => {
+      expect(await runBodySearch(WORD, root)).toEqual([]);
+    });
+    // A key whose value is on the lines under it is a line of its own, and a
+    // query for the word the key is spelled with must not be answered by it.
+    await withPage("---\nid: p1\ntags:\n  - work\n---\nnothing here\n", async (root) => {
+      expect(await runBodySearch("tags", root)).toEqual([]);
+    });
+  });
+
+  it("asks ripgrep for exactly a line a key and three more", async () => {
+    // The number itself, off the command line: asking for more is as silent
+    // as asking for fewer, and costs a read of every long note in full.
+    await withFakeRipgrep('printf "%s\\n" "$@" > args\nexit 1', async (cwd) => {
+      await runBodySearch(WORD, cwd);
+      const args = (await fs.readFile(path.join(cwd, "args"), "utf8")).split("\n");
+      expect(args[args.indexOf("--max-count") + 1]).toBe(
+        String(MANAGED_PAGE_META_KEYS.size + 3),
+      );
+    });
+  });
+});
+
+/** A real Store over a temp notes root, and the search module that reads it.
+ *
+ *  `NOTES_ROOT` is read at import, so the modules under test are the ones
+ *  loaded after the stub, not the ones at the top of this file. */
+async function withRealNotes(
+  run: (
+    store: Awaited<ReturnType<typeof import("./store").getStore>>,
+    searchNotes: typeof import("./search").searchNotes,
+  ) => Promise<void>,
+) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-search-notes-"));
+  const globals = globalThis as {
+    __brainStore?: unknown;
+    __brainStoreInit?: unknown;
+  };
+  const heldStore = globals.__brainStore;
+  const heldInit = globals.__brainStoreInit;
+  try {
+    vi.stubEnv("NOTES_ROOT", root);
+    vi.resetModules();
+    delete globals.__brainStore;
+    delete globals.__brainStoreInit;
+    const { getStore } = await import("./store");
+    const { searchNotes } = await import("./search");
+    await run(await getStore(), searchNotes);
+  } finally {
+    vi.unstubAllEnvs();
+    globals.__brainStore = heldStore;
+    globals.__brainStoreInit = heldInit;
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
 
 /** True once the process is gone. Polled: the kill is a signal, and the reap
  *  that makes the pid unknown again happens on this process's own event

@@ -43,6 +43,7 @@ import {
   mailRequestPhase,
   writeMailLogRecord,
 } from "./security";
+import type { MailSendTransportKind } from "./ports";
 import { MAIL_SERVICE_HTTP_LIMITS } from "./service/limits";
 import {
   MAIL_CHANGE_FEED_CAPACITY,
@@ -112,6 +113,7 @@ import type {
 const DEFAULT_SOCKET_PATH = "/run/brain-mail/brain-mail.sock";
 const ACCOUNT_PATH = "/v1/account";
 const ACCOUNTS_PATH = "/v2/accounts";
+const HEALTH_PATH = "/v1/health";
 const THREADS_PATH = "/v1/threads";
 const MAILBOXES_PATH = "/v1/mailboxes";
 const SYNC_PATH = "/v1/sync";
@@ -394,6 +396,13 @@ export interface BrainMailClient {
   listAccountCapabilities(
     signal?: AbortSignal,
   ): Promise<MailAccountsCapabilitiesStatus>;
+  /**
+   * Which byte transport the service's SMTP submission leaves by, read off
+   * its health answer: direct, the relay, or null when the service does not
+   * say (a receive-only service, or one older than the field). The agent's
+   * send tools size a custom-domain account's attachments by it.
+   */
+  readSendTransport(signal?: AbortSignal): Promise<MailSendTransportKind | null>;
   createAccount(
     input: MailAccountCreateInputV2,
     signal?: AbortSignal,
@@ -604,6 +613,16 @@ export function createBrainMailClient(options?: {
           [MAIL_ACCOUNT_CAPABILITIES_CONTRACT_HEADER]:
             MAIL_ACCOUNT_CAPABILITIES_CONTRACT_VALUE,
         },
+      ),
+    readSendTransport: async (signal?: AbortSignal) =>
+      requestMailService(
+        socketPath,
+        requestTimeoutMs,
+        HEALTH_PATH,
+        "GET",
+        undefined,
+        readHealthSendTransport,
+        signal,
       ),
     createAccount: async (
       input: MailAccountCreateInputV2,
@@ -2397,6 +2416,22 @@ function validatePublicAccountV3(value: unknown): PublicMailAccountV3 {
   );
   validateCapabilities(value.capabilities, capabilities);
   return Object.freeze({ ...account, capabilities });
+}
+
+/**
+ * The one field of the service's health this client reads. The answer is the
+ * service's own status, checked by the service and read by the deploy
+ * scripts, and it may say more in a later release, so nothing else in it is
+ * held to a shape here: a version this client does not know, an absent field
+ * and a transport it has no name for all read as "the service does not say".
+ */
+function readHealthSendTransport(value: unknown): MailSendTransportKind | null {
+  if (!isPlainRecord(value)) throw invalidResponse();
+  if (value.apiVersion !== 1) return null;
+  return value.sendTransport === "direct" ||
+    value.sendTransport === "authenticated_byte_relay"
+    ? value.sendTransport
+    : null;
 }
 
 function validateCapabilities(

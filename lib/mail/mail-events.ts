@@ -32,6 +32,12 @@ export type BrainMailEvent =
  *  a reconnect of the stream itself, which it sends as a `reset`. */
 export const MAIL_CHANGED_EVENT = "brain:mail-changed";
 
+/** A burst of events about one account is one page-1 read, this long after
+ *  the last of them. Here rather than in the Mail surface because Home's mail
+ *  block waits the same time, and importing it from the surface would put the
+ *  whole surface in Home's bundle for one number. */
+export const MAIL_EVENT_DEBOUNCE_MS = 400;
+
 export function dispatchMailChange(event: BrainMailEvent): void {
   if (typeof window === "undefined") return;
   window.dispatchEvent(new CustomEvent(MAIL_CHANGED_EVENT, { detail: event }));

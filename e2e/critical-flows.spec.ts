@@ -6628,6 +6628,47 @@ test("slash menu creates a page at the cursor and saves before opening it", asyn
   expect(parentResponse.ok).toBeTruthy();
   const parent = parentResponse.body as { id: string };
 
+  // Both routes go in before the page opens, for the reason the failed-create
+  // case below gives: installed between the menu and the Enter, a route was a
+  // few milliseconds ahead of the request it has to catch, and now and then
+  // it was not ahead at all. The tree route is only armed there, because the
+  // page asks for the tree as it opens and that answer has to be the real one.
+  let releaseRefSave!: () => void;
+  const refSaveGate = new Promise<void>((resolve) => {
+    releaseRefSave = resolve;
+  });
+  let markRefSaveSeen!: () => void;
+  const refSaveSeen = new Promise<void>((resolve) => {
+    markRefSaveSeen = resolve;
+  });
+  let sawRefSave = false;
+  await page.route(`**/api/page/${parent.id}`, async (route) => {
+    if (route.request().method() === "PUT") {
+      const body = route.request().postDataJSON() as { markdown?: string };
+      if (body.markdown?.includes("/p/")) {
+        if (!sawRefSave) {
+          sawRefSave = true;
+          markRefSaveSeen();
+        }
+        await refSaveGate;
+      }
+    }
+    await route.continue();
+  });
+  let failNextTreeRefresh = false;
+  await page.route("**/api/tree", async (route) => {
+    if (failNextTreeRefresh) {
+      failNextTreeRefresh = false;
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "temporary tree failure" }),
+      });
+      return;
+    }
+    await route.continue();
+  });
+
   await page.goto(`/p/${parent.id}`);
   const content = page.getByRole("textbox", { name: "Page content" });
   await expect(content).toBeVisible();
@@ -6659,41 +6700,6 @@ test("slash menu creates a page at the cursor and saves before opening it", asyn
     slashMenu.getByRole("button").first(),
   ).toHaveText(/New page/);
 
-  let releaseRefSave!: () => void;
-  const refSaveGate = new Promise<void>((resolve) => {
-    releaseRefSave = resolve;
-  });
-  let markRefSaveSeen!: () => void;
-  const refSaveSeen = new Promise<void>((resolve) => {
-    markRefSaveSeen = resolve;
-  });
-  let sawRefSave = false;
-  await page.route(`**/api/page/${parent.id}`, async (route) => {
-    if (route.request().method() === "PUT") {
-      const body = route.request().postDataJSON() as { markdown?: string };
-      if (body.markdown?.includes("/p/")) {
-        if (!sawRefSave) {
-          sawRefSave = true;
-          markRefSaveSeen();
-        }
-        await refSaveGate;
-      }
-    }
-    await route.continue();
-  });
-  let failNextTreeRefresh = true;
-  await page.route("**/api/tree", async (route) => {
-    if (failNextTreeRefresh) {
-      failNextTreeRefresh = false;
-      await route.fulfill({
-        status: 503,
-        contentType: "application/json",
-        body: JSON.stringify({ error: "temporary tree failure" }),
-      });
-      return;
-    }
-    await route.continue();
-  });
   const failedTreeRefresh = page.waitForResponse(
     (response) =>
       new URL(response.url()).pathname === "/api/tree" &&
@@ -6712,6 +6718,7 @@ test("slash menu creates a page at the cursor and saves before opening it", asyn
   });
 
   try {
+    failNextTreeRefresh = true;
     await page.keyboard.press("Enter");
     const response = await createdResponse;
     expect(response.ok()).toBeTruthy();

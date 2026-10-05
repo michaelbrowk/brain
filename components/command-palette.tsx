@@ -15,9 +15,15 @@ import type { ReactNode } from "react";
 import { emitMailCommand, type MailCommand } from "./mail-commands";
 import { renderTaskCheck } from "./tasks-checkbox";
 import { emitTaskCommand, type TaskCommand } from "./tasks-commands";
+import {
+  MAIL_CHANGED_EVENT,
+  MAIL_EVENT_DEBOUNCE_MS,
+  parseBrainMailEvent,
+} from "@/lib/mail/mail-events";
 import { sanitizeSnippet } from "@/lib/mail/reader-content";
 import { normalizeMailSearchQueryText } from "@/lib/mail/search-query";
 import type {
+  MailSearchAllAccountStatus,
   MailSearchAllResponse,
   MailSystemMailbox,
   MailThreadListItem,
@@ -48,6 +54,15 @@ interface MailResults {
   readonly ownAddresses: ReadonlyMap<string, string>;
   readonly mailboxes: ReadonlyMap<string, MailSystemMailbox>;
   readonly indexBuilding: boolean;
+  /** The line for the mailboxes this answer could not read, or null when
+   *  every account was searched. It is worded as the answer lands and kept
+   *  with it, so the next answer replaces it with its own. */
+  readonly unsearched: string | null;
+  /** Whether a sync could make this answer whole: an index still building,
+   *  or a mailbox left out for anything but a lapsed sign-in. It is what the
+   *  quiet re-ask listens on. "needs to be reconnected" waits for the reader,
+   *  and no event from the change feed takes it away. */
+  readonly syncClears: boolean;
 }
 
 const NO_MAIL: MailResults = {
@@ -55,7 +70,73 @@ const NO_MAIL: MailResults = {
   ownAddresses: new Map(),
   mailboxes: new Map(),
   indexBuilding: false,
+  unsearched: null,
+  syncClears: false,
 };
+
+/** Why an account's letters are not in an answer. An account can answer 200
+ *  with no rows because its cache is not readable yet, which the route says
+ *  per account and the palette used to drop: a mailbox that was never read
+ *  drew the same bare "No results" as one that held no match.
+ *
+ *  Three wordings and no more. Everything the cache will finish on its own
+ *  (the first sync, a resync, a generation it has not caught up with) is
+ *  "still syncing". A lapsed sign-in is the one thing the reader has to act
+ *  on, so it is named. A sync that is backing off, a cache that is full and a
+ *  search that threw are not syncing and the palette is not where they are
+ *  explained, so they only say the mailbox was not searched. */
+type MailGap = "syncing" | "reconnect" | "failed";
+
+function mailGapOf(account: MailSearchAllAccountStatus): MailGap | null {
+  if ("error" in account) {
+    return account.reason === "mail_account_reauth_required" ? "reconnect" : "failed";
+  }
+  if (account.availability.status === "available") return null;
+  const { reason } = account.availability;
+  if (reason === "mailbox_reauth_required") return "reconnect";
+  if (reason === "mailbox_backoff" || reason === "mailbox_cache_capacity") return "failed";
+  return "syncing";
+}
+
+/** Whether a sync can bring back what an answer left out. A mailbox still
+ *  syncing will finish, one that failed its last sync will try again, and a
+ *  search that threw may answer the next time. A lapsed sign-in is the one
+ *  gap only the reader can close. */
+function syncClearsGaps(accounts: readonly MailSearchAllAccountStatus[]): boolean {
+  return accounts.some((account) => {
+    const gap = mailGapOf(account);
+    return gap !== null && gap !== "reconnect";
+  });
+}
+
+/** The Mail group's one line about mailboxes it could not search, or null
+ *  when the answer covers every account. Two addresses are both named, a
+ *  longer run is counted, and accounts left out for different reasons share
+ *  the one thing true of all of them. */
+export function mailUnsearchedLine(
+  accounts: readonly MailSearchAllAccountStatus[],
+): string | null {
+  const gaps: { address: string; gap: MailGap }[] = [];
+  for (const account of accounts) {
+    const gap = mailGapOf(account);
+    if (gap !== null) gaps.push({ address: account.emailAddress, gap });
+  }
+  if (gaps.length === 0) return null;
+  const one = gaps.length === 1;
+  const names = one
+    ? gaps[0].address
+    : gaps.length === 2
+      ? `${gaps[0].address} and ${gaps[1].address}`
+      : `${gaps[0].address} and ${gaps.length - 1} more`;
+  const shared = gaps.every(({ gap }) => gap === gaps[0].gap) ? gaps[0].gap : "failed";
+  const what =
+    shared === "syncing"
+      ? `${one ? "is" : "are"} still syncing`
+      : shared === "reconnect"
+        ? `${one ? "needs" : "need"} to be reconnected`
+        : "could not be searched";
+  return `${names} ${what}. Some letters may be missing.`;
+}
 
 interface FlatPage {
   id: string;
@@ -362,6 +443,71 @@ async function mailErrorCode(response: Response): Promise<string | null> {
   }
 }
 
+/** One ask of the mail route for one query. Two callers read it: the search
+ *  the reader's typing starts, and the quiet re-ask a mail event starts while
+ *  the answer on screen is short of the whole.
+ *
+ *  It resolves with the answer to draw, or with null for an answer that means
+ *  "no Mail group". A paused module answers 409 from the gate and a query the
+ *  route will not search answers 400, and neither is a failure to report: a
+ *  module that is off or a query with nothing to look for has no group, the
+ *  same as when the shell never asked. Brain without its mail container
+ *  answers every mail route with 503 mail_service_unavailable, which is an
+ *  install that has no mail, and it has no group either. Everything else that
+ *  is not an answer throws, a lapsed session (401, 403) included, and the
+ *  caller says so. The caller owns the abort too: a signal aborted while this
+ *  was out makes whatever it returns an answer to drop. */
+async function askMail(query: string, signal: AbortSignal): Promise<MailResults | null> {
+  const response = await fetch("/api/mail/search/all", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query, limit: MAIL_LIMIT }),
+    signal,
+  });
+  if (
+    response.status >= 400 &&
+    response.status < 500 &&
+    response.status !== 401 &&
+    response.status !== 403
+  ) {
+    return null;
+  }
+  if (
+    response.status === 503 &&
+    (await mailErrorCode(response)) === "mail_service_unavailable"
+  ) {
+    return null;
+  }
+  if (!response.ok) throw new Error("mail search unavailable");
+  const body = (await response.json()) as Partial<MailSearchAllResponse>;
+  if (!Array.isArray(body.threads)) throw new Error("invalid mail search response");
+  const ownAddresses = new Map<string, string>();
+  const mailboxes = new Map<string, MailSystemMailbox>();
+  for (const account of body.accounts ?? []) {
+    ownAddresses.set(account.accountId, account.emailAddress);
+    // An account whose search failed reports no mailbox, and has no rows to
+    // pick either.
+    if ("mailboxId" in account) mailboxes.set(account.accountId, account.mailboxId);
+  }
+  return {
+    threads: body.threads,
+    ownAddresses,
+    mailboxes,
+    indexBuilding: body.indexBuilding === true,
+    unsearched: mailUnsearchedLine(body.accounts ?? []),
+    syncClears: body.indexBuilding === true || syncClearsGaps(body.accounts ?? []),
+  };
+}
+
+/** The cmdk value of a mail row, which is what the keyboard's cursor holds
+ *  while it stands on one. */
+function mailRowValue(thread: MailThreadListItem): string {
+  return `mail-${thread.accountId}-${thread.threadId}`;
+}
+
+const MAIL_SHOW_ALL_VALUE = "mail-show-all";
+
 export function rankTasks(tasks: readonly TaskView[], query: string): TaskView[] {
   if (query.length < 2) return [];
   return tasks
@@ -538,6 +684,10 @@ export function CommandPalette({
   // put it on the first row it reveals. Left to itself cmdk sends the cursor
   // back to the top of the list once the Show all row it stood on goes away.
   const [cursor, setCursor] = useState("");
+  // Where the cursor stands and whether the Mail group is open, for the one
+  // reader that is not a render: an answer landing from the quiet re-ask.
+  const cursorRef = useRef(cursor);
+  const mailExpandedRef = useRef(false);
   // The shell can close the palette through `open` without passing through
   // `handleOpenChange`, so the expansions fold back on the edge of `open`
   // itself, adjusted during render the way React's docs adjust state to a
@@ -834,62 +984,11 @@ export function CommandPalette({
     mailDebounce.current = setTimeout(async () => {
       setMailState("loading");
       try {
-        const response = await fetch("/api/mail/search/all", {
-          method: "POST",
-          credentials: "same-origin",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query: q, limit: MAIL_LIMIT }),
-          signal: controller.signal,
-        });
-        // A paused module answers 409 from the gate, and a query the route
-        // will not search answers 400. Neither is a failure to report: a
-        // module that is off or a query with nothing to look for has no
-        // group, the same as when the shell never asked. A lapsed session
-        // (401, 403) is a failure, and says so.
-        if (
-          response.status >= 400 &&
-          response.status < 500 &&
-          response.status !== 401 &&
-          response.status !== 403
-        ) {
-          setMail(NO_MAIL);
-          setMailResolvedQuery(q);
-          setMailState("ready");
-          return;
-        }
-        // Brain without its mail container answers every mail route with 503
-        // mail_service_unavailable. That is an install that has no mail, and
-        // it has no group, the way a paused module has none.
-        if (
-          response.status === 503 &&
-          (await mailErrorCode(response)) === "mail_service_unavailable"
-        ) {
-          if (controller.signal.aborted) return;
-          setMail(NO_MAIL);
-          setMailResolvedQuery(q);
-          setMailState("ready");
-          return;
-        }
-        if (!response.ok) throw new Error("mail search unavailable");
-        const body = (await response.json()) as Partial<MailSearchAllResponse>;
+        const answer = await askMail(q, controller.signal);
         // An answer that lands after the query moved on is dropped, not kept
         // as the rows of a query the reader has left.
         if (controller.signal.aborted) return;
-        if (!Array.isArray(body.threads)) throw new Error("invalid mail search response");
-        const ownAddresses = new Map<string, string>();
-        const mailboxes = new Map<string, MailSystemMailbox>();
-        for (const account of body.accounts ?? []) {
-          ownAddresses.set(account.accountId, account.emailAddress);
-          // An account whose search failed reports no mailbox, and has no
-          // rows to pick either.
-          if ("mailboxId" in account) mailboxes.set(account.accountId, account.mailboxId);
-        }
-        setMail({
-          threads: body.threads,
-          ownAddresses,
-          mailboxes,
-          indexBuilding: body.indexBuilding === true,
-        });
+        setMail(answer ?? NO_MAIL);
         setMailResolvedQuery(q);
         setMailState("ready");
       } catch (error) {
@@ -910,6 +1009,135 @@ export function CommandPalette({
       }
     };
   }, [q, open, mailWanted, mailRetry]);
+
+  // THE LINE FOLLOWS THE MAIL EVENTS. The palette asks once per query, so a
+  // mailbox that finished syncing while the reader looked at "is still
+  // syncing" never took the line away: the same query had to be typed again.
+  // While the answer on screen is short of the whole, a sync or a reset from
+  // the change feed (`lib/mail/mail-events.ts`) asks the same query again, one
+  // debounce after the last of a burst, and the answer replaces the one on
+  // screen in place. A whole answer ends the listening with the line.
+  //
+  // It is a quiet ask. The reader did not start it, so it shows no Searching
+  // and takes no row away while it is out, and a failure or a refusal leaves
+  // the answer and its line standing for the next event to try again. (A
+  // refusal is the route's 409, 400 or 503 mail_service_unavailable. The
+  // shell takes the group away itself when Mail is paused, through
+  // `searchMail`, so there is nothing for this ask to conclude from one.)
+  // One ask is out at a time: a mailbox syncing in batches sends events
+  // faster than a search answers, and an ask that restarted on each of them
+  // would never land. What arrived meanwhile is one more ask once it has.
+  //
+  // It listens only under a line a sync can clear (`syncClears`). "needs to
+  // be reconnected" waits for the reader, and under it every sync of any
+  // account asked again for as long as the palette stood open.
+  //
+  // A hidden tab lets events pass, so coming back to one is an ask of its
+  // own: the sync the line was waiting for may have finished meanwhile.
+  const mailShort =
+    mailWanted && mailResolvedQuery === q && mailState === "ready" && mail.syncClears;
+  useEffect(() => {
+    cursorRef.current = cursor;
+    mailExpandedRef.current = mailExpandedFor === q;
+  }, [cursor, mailExpandedFor, q]);
+  useEffect(() => {
+    if (!open || !mailShort) return;
+    const controller = new AbortController();
+    let due: ReturnType<typeof setTimeout> | null = null;
+    let asking = false;
+    let missed = false;
+    const arm = () => {
+      if (due !== null) clearTimeout(due);
+      due = setTimeout(() => {
+        due = null;
+        // The tab can hide inside the debounce, and nobody reads a palette
+        // in a hidden tab.
+        if (document.visibilityState === "visible") void ask();
+      }, MAIL_EVENT_DEBOUNCE_MS);
+    };
+    // THE ANSWER LANDS UNDER THE READER'S HAND. They may have the cursor on
+    // a letter and a finger on Enter, and the new answer can take that row
+    // out from under it: five newer letters fold it past Show all, or the
+    // letter is gone. cmdk sends a cursor whose row unmounted to the top of
+    // the list, which here is a page, and Enter opened that. So a row that
+    // is still in the answer keeps the cursor, with the group opened for it
+    // if that is what it takes, and a row that is gone hands the cursor to
+    // the first letter, which is at least what the reader was choosing among.
+    const land = (answer: MailResults) => {
+      const at = cursorRef.current;
+      if (!at.startsWith("mail-")) {
+        setMail(answer);
+        return;
+      }
+      const expanded = mailExpandedRef.current;
+      const within = (count: number) =>
+        answer.threads.slice(0, count).some((thread) => mailRowValue(thread) === at);
+      const stays =
+        at === MAIL_SHOW_ALL_VALUE
+          ? !expanded && answer.threads.length > GROUP_FOLD
+          : within(expanded ? MAIL_LIMIT : GROUP_FOLD);
+      if (stays) {
+        setMail(answer);
+        return;
+      }
+      if (at !== MAIL_SHOW_ALL_VALUE && within(MAIL_LIMIT)) {
+        setMailExpandedFor(q);
+        setMail(answer);
+        return;
+      }
+      // The row goes. cmdk moves the cursor to the top in the commit that
+      // unmounts it, so that commit runs first, on its own, and the cursor is
+      // set after it.
+      flushSync(() => setMail(answer));
+      const first = answer.threads[0];
+      if (first !== undefined) flushSync(() => setCursor(mailRowValue(first)));
+    };
+    const ask = async () => {
+      if (asking) {
+        missed = true;
+        return;
+      }
+      asking = true;
+      try {
+        const answer = await askMail(q, controller.signal);
+        if (!controller.signal.aborted && answer !== null) land(answer);
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          console.warn("Mail search refresh failed", error);
+        }
+      } finally {
+        asking = false;
+        if (missed && !controller.signal.aborted) {
+          missed = false;
+          arm();
+        }
+      }
+    };
+    const onMailChanged = (event: Event) => {
+      const change = parseBrainMailEvent((event as CustomEvent<unknown>).detail);
+      if (change === null || document.visibilityState !== "visible") return;
+      // A mark-read or an archive and a body becoming ready finish no sync
+      // and index nothing.
+      if (change.changeKind !== "sync" && change.changeKind !== "reset") return;
+      arm();
+    };
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      // At once, and in place of whatever was armed: nobody is typing, and
+      // the reader is looking at the line now.
+      if (due !== null) clearTimeout(due);
+      due = null;
+      void ask();
+    };
+    window.addEventListener(MAIL_CHANGED_EVENT, onMailChanged);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      controller.abort();
+      if (due !== null) clearTimeout(due);
+      window.removeEventListener(MAIL_CHANGED_EVENT, onMailChanged);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [open, q, mailShort]);
 
   const handleOpenChange = (nextOpen: boolean) => {
     if (!nextOpen) {
@@ -1007,8 +1235,20 @@ export function CommandPalette({
   // status line at a time, so a screen reader hears the search once.
   const panelSearching = effectiveSearchState === "loading";
   const mailSearching = effectiveMailState === "loading" && !panelSearching;
+  // What the answer could not cover, in one line: a mailbox that was not
+  // searched says more than an index that is not finished, so it speaks for
+  // both. The line stands with rows or without them. An answer that is short
+  // of the whole and has no row yet must not read as "No results".
+  const mailNote =
+    effectiveMailState === "ready" && !panelSearching
+      ? (mail.unsearched ??
+        (mail.indexBuilding ? "Older mail is still being indexed" : null))
+      : null;
   const mailGroupShown =
-    mailSearching || effectiveMailState === "error" || mailThreads.length > 0;
+    mailSearching ||
+    effectiveMailState === "error" ||
+    mailThreads.length > 0 ||
+    mailNote !== null;
   const nothing =
     effectiveSearchState !== "loading" &&
     effectiveSearchState !== "error" &&
@@ -1230,9 +1470,17 @@ export function CommandPalette({
               </Command.Item>
             </>
           )}
-          {effectiveMailState === "ready" && mail.indexBuilding && !panelSearching && (
-            <div role="status" className="px-2.5 pt-2 text-[12px] text-ink-2">
-              Older mail is still being indexed
+          {mailNote !== null && (
+            <div
+              role="status"
+              // Said out loud rather than left to the role's default: the line
+              // lands after the rest of the panel, and it must wait its turn.
+              aria-live="polite"
+              // With no row under it the line closes the group, so it takes
+              // the bottom padding the searching row has.
+              className={`break-words px-2.5 pt-2 text-[12px] text-ink-2${mailThreads.length === 0 ? " pb-2" : ""}`}
+            >
+              {mailNote}
             </div>
           )}
           {visibleMail.map((t) => {
@@ -1243,8 +1491,8 @@ export function CommandPalette({
             const snippet = sanitizeSnippet(t.snippet);
             return (
               <Command.Item
-                key={`mail-${t.accountId}-${t.threadId}`}
-                value={`mail-${t.accountId}-${t.threadId}`}
+                key={mailRowValue(t)}
+                value={mailRowValue(t)}
                 onSelect={() => pickMail(t)}
                 className="brain-palette-item flex cursor-pointer flex-col gap-0.5 px-2.5 py-2"
               >
@@ -1270,13 +1518,11 @@ export function CommandPalette({
           })}
           {!mailExpanded && mailThreads.length > GROUP_FOLD && (
             <Command.Item
-              value="mail-show-all"
+              value={MAIL_SHOW_ALL_VALUE}
               onSelect={() => {
-                const last = mailThreads[GROUP_FOLD - 1];
-                const next = mailThreads[GROUP_FOLD];
                 showAll(
-                  `mail-${last.accountId}-${last.threadId}`,
-                  `mail-${next.accountId}-${next.threadId}`,
+                  mailRowValue(mailThreads[GROUP_FOLD - 1]),
+                  mailRowValue(mailThreads[GROUP_FOLD]),
                   () => setMailExpandedFor(q),
                 );
               }}

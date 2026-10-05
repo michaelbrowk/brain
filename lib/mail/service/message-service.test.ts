@@ -1628,6 +1628,86 @@ describe("account mail message service batch archive", () => {
     fixture.cache.close();
   });
 
+  /** A reply lands between the read flag and the read back after it. */
+  function replyAfterTheFlag(order: string[]) {
+    let reads = 0;
+    return {
+      archiveThread: vi.fn(async () => {
+        order.push("archive");
+      }),
+      setThreadRead: vi.fn(async (_threadId: string, read: boolean) => {
+        order.push(`read ${read}`);
+      }),
+      getThread: vi.fn(async (threadId: string) => {
+        reads += 1;
+        order.push("get");
+        if (reads === 1) return archivedFixture(threadId, true);
+        if (reads === 2) return archivedFixture(threadId, false, 2000);
+        return threadFixture(threadId, 2000);
+      }),
+    };
+  }
+
+  it("takes the read flag off before it puts back a thread a reply reached after the flag", async () => {
+    const order: string[] = [];
+    const fixture = await seeded(
+      {
+        ...replyAfterTheFlag(order),
+        unarchiveThread: vi.fn(async () => {
+          order.push("unarchive");
+        }),
+      },
+      ["thread-a"],
+    );
+
+    const result = await fixture.service.archiveThreads(
+      { accountId: ACCOUNT_ID, threads: pressed(["thread-a"]), archive: true, read: true },
+      signal(),
+    );
+
+    // The reply first: it is the one a reader would miss.
+    expect(order).toEqual([
+      "archive",
+      "get",
+      "read true",
+      "get",
+      "read false",
+      "unarchive",
+      "get",
+    ]);
+    expect(result.results[0]).toMatchObject({
+      status: "renewed",
+      thread: { lastMessageAt: 2000, unread: true },
+    });
+    fixture.cache.close();
+  });
+
+  it("answers done, read flag and new mail in it, when putting the thread back fails", async () => {
+    const order: string[] = [];
+    const fixture = await seeded(
+      {
+        ...replyAfterTheFlag(order),
+        unarchiveThread: vi
+          .fn()
+          .mockRejectedValue(new MailProviderSyncError("mail_provider_unavailable")),
+      },
+      ["thread-a"],
+    );
+
+    const result = await fixture.service.archiveThreads(
+      { accountId: ACCOUNT_ID, threads: pressed(["thread-a"]), archive: true, read: true },
+      signal(),
+    );
+
+    // Brain's take-back is the last word: it needs to see both.
+    expect(result.results[0]).toMatchObject({
+      status: "done",
+      markedRead: true,
+      thread: { lastMessageAt: 2000 },
+    });
+    fixture.cache.close();
+  });
+
   it("does not claim a read flag that failed, and keeps the archive that landed", async () => {
     const fixture = await seeded(
       {

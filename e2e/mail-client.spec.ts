@@ -1636,6 +1636,25 @@ test("Mail unified inbox sections two accounts, and Done clears People behind an
     }
     return fulfill(route, { apiVersion: 1, thread: target, messages: [] });
   });
+  await page.route("**/api/mail/threads/batch", (route) => {
+    const body = route.request().postDataJSON() as {
+      readonly threadIds: readonly string[];
+      readonly read?: true;
+    };
+    patched.push({ url: new URL(route.request().url()).pathname, body });
+    return fulfill(route, {
+      apiVersion: 1,
+      results: body.threadIds.map((threadId) => ({
+        threadId,
+        status: "done",
+        thread: {
+          ...[threadA, threadB, noteB].find((candidate) => candidate.threadId === threadId),
+          unread: false,
+        },
+        markedRead: body.read === true,
+      })),
+    });
+  });
   await page.route(/\/api\/mail\/threads\?.*$/, (route) => {
     const url = new URL(route.request().url());
     const accountId = url.searchParams.get("accountId");
@@ -1699,18 +1718,21 @@ test("Mail unified inbox sections two accounts, and Done clears People behind an
   expect(patched).toEqual([]);
 
   // Pressed again and left alone, the archives go out once the window is
-  // spent: archive first, then the read flag archiving does not set.
+  // spent: one batch per account, each archiving and carrying the read flag
+  // archiving does not set.
   await page
     .getByRole("button", { name: "Done — archive all 2 in People" })
     .click();
   await expect(pill).toContainText("People cleared");
-  await expect.poll(() => patched.length, { timeout: 15_000 }).toBe(4);
-  for (const [url, accountId] of [
-    ["/api/mail/threads/unified-a", account.accountId],
-    ["/api/mail/threads/unified-b", secondAccount.accountId],
+  await expect.poll(() => patched.length, { timeout: 15_000 }).toBe(2);
+  for (const [threadId, accountId] of [
+    ["unified-a", account.accountId],
+    ["unified-b", secondAccount.accountId],
   ] as const) {
-    expect(patched).toContainEqual({ url, body: { accountId, archive: true } });
-    expect(patched).toContainEqual({ url, body: { accountId, read: true } });
+    expect(patched).toContainEqual({
+      url: "/api/mail/threads/batch",
+      body: { accountId, threadIds: [threadId], archive: true, read: true },
+    });
   }
   await expect(list.locator('section[aria-label="People"]')).toHaveCount(0);
   await expect(pill).toHaveCount(0);
@@ -1794,6 +1816,20 @@ test("@release @mobile the undo and the refusal stack clear of the tab bar at 39
       });
     }
     return fulfill(route, { apiVersion: 1, thread: target, messages: [] });
+  });
+  const batches: Array<readonly string[]> = [];
+  await page.route("**/api/mail/threads/batch", (route) => {
+    const body = route.request().postDataJSON() as { readonly threadIds: readonly string[] };
+    batches.push(body.threadIds);
+    return fulfill(route, {
+      apiVersion: 1,
+      results: body.threadIds.map((threadId) => ({
+        threadId,
+        status: "done",
+        thread: { ...people.find((candidate) => candidate.threadId === threadId), unread: false },
+        markedRead: true,
+      })),
+    });
   });
   await page.route(/\/api\/mail\/threads\?.*$/, (route) => {
     const url = new URL(route.request().url());
@@ -1930,8 +1966,10 @@ test("@release @mobile the undo and the refusal stack clear of the tab bar at 39
   await expect(list.getByText("Held thread 0", { exact: true })).toBeVisible();
   await expect(list.getByText("Gmail thread 0", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /in People$/ })).toHaveCount(0);
-  // The window closes, and only then do the eleven go out, two requests each.
-  await expect.poll(() => patched, { timeout: 25_000 }).toBe(22);
+  // The window closes, and only then do the eleven go out, in one request.
+  await expect.poll(() => batches.length, { timeout: 25_000 }).toBe(1);
+  expect(batches[0]).toHaveLength(11);
+  expect(patched).toBe(0);
   await expect(list.getByText("Held thread 0", { exact: true })).toBeVisible();
   await expect(list.getByText("Gmail thread 0", { exact: true })).toHaveCount(0);
 });
@@ -1972,6 +2010,7 @@ test("@release Done counts its window from the press, and its archives go out be
     lastMessageAt: 1_700_000_001_000,
   } as const;
   const all = [...seen, person];
+  let started = 0;
   let patched = 0;
   const personPatches: unknown[] = [];
   const fulfill = (route: Route, body: unknown) =>
@@ -1989,15 +2028,25 @@ test("@release Done counts its window from the press, and its archives go out be
     if (route.request().method() !== "PATCH") {
       return fulfill(route, { apiVersion: 1, thread: target, messages: [] });
     }
-    if (threadId === person.threadId) {
-      personPatches.push(route.request().postDataJSON());
-      return fulfill(route, { apiVersion: 1, thread: { ...target, unread: false } });
-    }
-    // A real mutation is a round trip, and on a custom-domain account its
-    // own connect and authenticate. Sixteen of them in sequence is the run.
-    await new Promise((resolve) => setTimeout(resolve, 600));
-    patched += 1;
-    return fulfill(route, { apiVersion: 1, thread: target });
+    personPatches.push(route.request().postDataJSON());
+    return fulfill(route, { apiVersion: 1, thread: { ...target, unread: false } });
+  });
+  await page.route("**/api/mail/threads/batch", async (route) => {
+    const body = route.request().postDataJSON() as { readonly threadIds: readonly string[] };
+    started += 1;
+    // The provider's round trips for the whole batch. The run is the one
+    // request now, and it is still out while the reader goes on.
+    await new Promise((resolve) => setTimeout(resolve, 8_000));
+    patched += body.threadIds.length;
+    return fulfill(route, {
+      apiVersion: 1,
+      results: body.threadIds.map((threadId) => ({
+        threadId,
+        status: "done",
+        thread: all.find((candidate) => candidate.threadId === threadId),
+        markedRead: false,
+      })),
+    });
   });
   await page.route(/\/api\/mail\/threads\?.*$/, (route) =>
     fulfill(route, {
@@ -2039,11 +2088,11 @@ test("@release Done counts its window from the press, and its archives go out be
 
   // Well inside the window: nothing has been sent.
   await page.waitForTimeout(4_000);
-  expect(patched).toBe(0);
+  expect(started).toBe(0);
   await expect(report).toContainText("Seen cleared");
 
-  // The window closes: the pill goes, and the archives start going out.
-  await expect.poll(() => patched, { timeout: 15_000 }).toBeGreaterThan(0);
+  // The window closes: the pill goes, and the batch goes out.
+  await expect.poll(() => started, { timeout: 15_000 }).toBe(1);
   await expect(report).toHaveCount(0);
 
   // Mid-run, another letter is opened, which reads it, and archived. Both
@@ -2057,11 +2106,13 @@ test("@release Done counts its window from the press, and its archives go out be
     .poll(() => personPatches)
     .toContainEqual({ accountId: account.accountId, archive: true });
   await expect(list.getByText("Still in People", { exact: true })).toHaveCount(0);
-  expect(patched).toBeLessThan(16);
+  expect(patched).toBe(0);
   await expect(refusal).toHaveCount(0);
 
-  // The run goes on to its end, and the section stays gone.
+  // The run goes on to its end in that one request, and the section stays
+  // gone.
   await expect.poll(() => patched, { timeout: 30_000 }).toBe(16);
+  expect(started).toBe(1);
   await expect(list.locator('section[aria-label="Seen"]')).toHaveCount(0);
   await expect(refusal).toHaveCount(0);
 });
@@ -2079,8 +2130,11 @@ test("@release a mutation nobody answers ends at the client's clock, and its row
 }) => {
   test.setTimeout(MAIL_MUTATION_TIMEOUT_MS + 60_000);
   await login(page);
+  // The first letter is on the second account, whose batch is answered; the
+  // other two are on the first account, whose batch is not.
   const seen = [0, 1, 2].map((index) => ({
     ...thread,
+    ...(index === 0 ? { accountId: secondAccount.accountId } : {}),
     threadId: `hung-${index}`,
     subject: `Hung thread ${index}`,
     category: "people",
@@ -2096,7 +2150,7 @@ test("@release a mutation nobody answers ends at the client's clock, and its row
     lastMessageAt: 1_700_000_001_000,
   } as const;
   const all = [...seen, person];
-  const patched: Array<{ readonly threadId: string; readonly body: Record<string, unknown> }> = [];
+  const patched: Array<readonly string[]> = [];
   const fulfill = (route: Route, body: unknown) =>
     route.fulfill({
       status: 200,
@@ -2109,19 +2163,34 @@ test("@release a mutation nobody answers ends at the client's clock, and its row
   await page.route(/\/api\/mail\/threads\/hung-[a-z0-9]+(?:\?.*)?$/, (route) => {
     const threadId = new URL(route.request().url()).pathname.split("/").at(-1)!;
     const target = all.find((candidate) => candidate.threadId === threadId);
-    if (route.request().method() !== "PATCH") {
-      return fulfill(route, { apiVersion: 1, thread: target, messages: [] });
-    }
-    const body = route.request().postDataJSON() as Record<string, unknown>;
-    patched.push({ threadId, body });
-    // The second archive is never answered — not refused, not slow: gone.
-    if (threadId === "hung-1" && body.archive === true) return undefined;
-    return fulfill(route, { apiVersion: 1, thread: { ...target, unread: false } });
+    return fulfill(route, { apiVersion: 1, thread: target, messages: [] });
+  });
+  await page.route("**/api/mail/threads/batch", (route) => {
+    const body = route.request().postDataJSON() as {
+      readonly accountId: string;
+      readonly threadIds: readonly string[];
+    };
+    patched.push(body.threadIds);
+    // The first account's batch is never answered — not refused, not slow:
+    // gone.
+    if (body.accountId === account.accountId) return undefined;
+    return fulfill(route, {
+      apiVersion: 1,
+      results: body.threadIds.map((threadId) => ({
+        threadId,
+        status: "done",
+        thread: all.find((candidate) => candidate.threadId === threadId),
+        markedRead: false,
+      })),
+    });
   });
   await page.route(/\/api\/mail\/threads\?.*$/, (route) =>
     fulfill(route, {
       apiVersion: 1,
-      items: forAccount(route, all),
+      items: all.filter(
+        (item) =>
+          item.accountId === new URL(route.request().url()).searchParams.get("accountId"),
+      ),
       nextCursor: null,
       sync: { status: "idle", lastSuccessfulAt: 1_700_000_000_000 },
     }),
@@ -2140,9 +2209,10 @@ test("@release a mutation nobody answers ends at the client's clock, and its row
   await expect(report).toContainText("Seen cleared");
   await expect(report).toContainText("3 threads out of your inbox");
   await expect(list.locator('section[aria-label="Seen"]')).toHaveCount(0);
-  // The window closes. The first archive lands, the second is hanging.
+  // The window closes. The second account's batch lands, the first
+  // account's is hanging.
   await expect.poll(() => patched.length, { timeout: 15_000 }).toBe(2);
-  expect(patched.map((entry) => entry.threadId)).toEqual(["hung-0", "hung-1"]);
+  expect(patched).toEqual([["hung-0"], ["hung-1", "hung-2"]]);
   await expect(report).toHaveCount(0);
 
   // Another Done over the hanging request is not refused: it takes the pill
@@ -2156,9 +2226,9 @@ test("@release a mutation nobody answers ends at the client's clock, and its row
   await expect(list.getByText("Still in People", { exact: true })).toBeVisible();
   expect(patched.length).toBe(2);
 
-  // The clock ends the request. The account is closed for the run, so the
-  // third thread is never sent, and the two that stayed are back in the
-  // column with one report that names the reason and offers no Undo.
+  // The clock ends the request. The account is closed for the run, and the
+  // two its batch held are back in the column with one report that names
+  // the reason and offers no Undo. Nothing is sent again.
   await expect(report).toContainText("Seen partly cleared", {
     timeout: MAIL_MUTATION_TIMEOUT_MS + 10_000,
   });
@@ -2167,7 +2237,7 @@ test("@release a mutation nobody answers ends at the client's clock, and its row
   );
   await expect(report.getByRole("button")).toHaveCount(0);
   await expect(list.locator('section[aria-label="Seen"]')).toContainText("2 threads");
-  expect(patched.map((entry) => entry.threadId)).toEqual(["hung-0", "hung-1"]);
+  expect(patched).toEqual([["hung-0"], ["hung-1", "hung-2"]]);
 });
 
 // ── The compose sheet ───────────────────────────────────────────────────────

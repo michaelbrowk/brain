@@ -382,6 +382,27 @@ describe("what the Sent-folder scan survives on a real ImapFlow session", () => 
     );
   });
 
+  it("returns the Inbox page when the Inbox took most of the session and the Sent STATUS hangs", async () => {
+    const options: FakeImapOptions = {
+      capability: "IMAP4rev1 SPECIAL-USE",
+      folders: [{ flags: "\\HasNoChildren \\Sent", path: "Sent" }],
+      uidNext: 13,
+      messages: [letter(11, "a"), letter(12, "b")],
+    };
+    const { adapter } = await sentScanAdapter(options, 3_000);
+    const signal = new AbortController().signal;
+    const anchor = await adapter.getSyncAnchor(signal);
+    await adapter.scanSentEnvelopes({ cursor: null }, signal);
+
+    // Two of the session's three seconds go on the Inbox. The STATUS wait is
+    // what is left then, less the margin, and not what was left at login.
+    options.inboxDelayMs = 2_000;
+    options.statusHangs = true;
+    await expect(
+      adapter.listChanges({ startHistoryId: anchor, pageToken: null, maxItems: 5 }, signal),
+    ).resolves.toMatchObject({ changedThreadIds: [] });
+  }, 10_000);
+
   it("asks which UIDs exist before it fetches mail far above the cursor", async () => {
     const { adapter, commands } = await sentScanAdapter({
       capability: "IMAP4rev1 SPECIAL-USE",
@@ -653,6 +674,8 @@ interface FakeImapOptions {
   dropFetches?: number;
   /** STATUS is never answered, as a server that stalls on it. */
   statusHangs?: boolean;
+  /** How long the Inbox's EXAMINE takes to answer, as a slow server's. */
+  inboxDelayMs?: number;
 }
 
 const imapAddress = (name: string, local: string, domain: string) =>
@@ -705,13 +728,18 @@ function serveSentImap(socket: TLSSocket, commands: string[], options: FakeImapO
       return;
     }
     if (command === "EXAMINE" && / EXAMINE "?INBOX"?$/.test(line)) {
-      socket.write(
+      const answer =
         "* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)\r\n" +
-          "* 0 EXISTS\r\n" +
-          "* OK [UIDVALIDITY 55] UIDs valid\r\n" +
-          "* OK [UIDNEXT 1] Predicted next UID\r\n" +
-          `${tag} OK [READ-ONLY] EXAMINE completed\r\n`,
-      );
+        "* 0 EXISTS\r\n" +
+        "* OK [UIDVALIDITY 55] UIDs valid\r\n" +
+        "* OK [UIDNEXT 1] Predicted next UID\r\n" +
+        `${tag} OK [READ-ONLY] EXAMINE completed\r\n`;
+      if (options.inboxDelayMs === undefined) socket.write(answer);
+      else {
+        setTimeout(() => {
+          if (!socket.destroyed) socket.write(answer);
+        }, options.inboxDelayMs);
+      }
       return;
     }
     if (command === "STATUS") {

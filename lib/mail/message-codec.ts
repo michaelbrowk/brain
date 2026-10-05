@@ -288,32 +288,52 @@ export function validateMailThreadMutationInput(
 }
 
 /**
- * `{ accountId, threadIds, archive: true, read?: true }` and nothing else:
- * one to fifty distinct thread ids, archived, and marked read when `read` is
- * there. Any other mutation, a `read: false`, or an `archive: false` is not a
- * batch this contract has.
+ * `{ accountId, threads, archive: true, read?: true }` and nothing else: one
+ * to fifty distinct threads, each with what the press saw of it, archived,
+ * and the ones unread at the press marked read when `read` is there. Any
+ * other mutation, a `read: false`, or an `archive: false` is not a batch this
+ * contract has.
  */
 export function validateMailThreadBatchInput(value: unknown): MailThreadBatchInput {
   const read = isPlainRecord(value) && Object.hasOwn(value, "read");
   if (
     !isRecordWithExactFields(
       value,
-      read ? ["accountId", "archive", "read", "threadIds"] : ["accountId", "archive", "threadIds"],
+      read ? ["accountId", "archive", "read", "threads"] : ["accountId", "archive", "threads"],
     ) ||
     value.archive !== true ||
     (read && value.read !== true) ||
-    !Array.isArray(value.threadIds) ||
-    value.threadIds.length < 1 ||
-    value.threadIds.length > MAIL_THREAD_BATCH_MAX
+    !Array.isArray(value.threads) ||
+    value.threads.length < 1 ||
+    value.threads.length > MAIL_THREAD_BATCH_MAX
   ) {
     throw requestInvalid();
   }
   const accountId = validateMailAccountId(value.accountId);
-  const threadIds = value.threadIds.map(validateMailResourceId);
-  if (new Set(threadIds).size !== threadIds.length) throw requestInvalid();
+  const threads = value.threads.map((entry: unknown) => {
+    if (
+      !isRecordWithExactFields(entry, ["lastMessageAt", "messageCount", "threadId", "unread"]) ||
+      !Number.isSafeInteger(entry.messageCount) ||
+      (entry.messageCount as number) < 0 ||
+      (entry.lastMessageAt !== null &&
+        (!Number.isSafeInteger(entry.lastMessageAt) || (entry.lastMessageAt as number) < 0)) ||
+      typeof entry.unread !== "boolean"
+    ) {
+      throw requestInvalid();
+    }
+    return Object.freeze({
+      threadId: validateMailResourceId(entry.threadId),
+      messageCount: entry.messageCount as number,
+      lastMessageAt: entry.lastMessageAt as number | null,
+      unread: entry.unread,
+    });
+  });
+  if (new Set(threads.map((thread) => thread.threadId)).size !== threads.length) {
+    throw requestInvalid();
+  }
   return Object.freeze({
     accountId,
-    threadIds: Object.freeze(threadIds),
+    threads: Object.freeze(threads),
     archive: true as const,
     ...(read ? { read: true as const } : {}),
   });
@@ -325,21 +345,28 @@ export function validateMailThreadBatchInput(value: unknown): MailThreadBatchInp
  */
 export function validateMailThreadBatchResult(
   value: unknown,
-  expected: Pick<MailThreadBatchInput, "accountId" | "threadIds">,
+  expected: Pick<MailThreadBatchInput, "accountId" | "threads">,
 ): MailThreadBatchResult {
   if (
     !isRecordWithExactFields(value, ["apiVersion", "results"]) ||
     value.apiVersion !== 1 ||
     !Array.isArray(value.results) ||
-    value.results.length !== expected.threadIds.length
+    value.results.length !== expected.threads.length
   ) {
     throw responseInvalid();
   }
   const results = value.results.map((entry, index): MailThreadBatchItem => {
-    const threadId = expected.threadIds[index];
+    const threadId = expected.threads[index]?.threadId;
     if (!isPlainRecord(entry) || entry.threadId !== threadId || threadId === undefined) {
       throw responseInvalid();
     }
+    const ownThread = (raw: unknown) => {
+      const thread = validateThreadListItem(raw);
+      if (thread.accountId !== expected.accountId || thread.threadId !== threadId) {
+        throw responseInvalid();
+      }
+      return thread;
+    };
     if (entry.status === "done") {
       if (
         !isRecordWithExactFields(entry, ["markedRead", "status", "thread", "threadId"]) ||
@@ -347,11 +374,18 @@ export function validateMailThreadBatchResult(
       ) {
         throw responseInvalid();
       }
-      const thread = validateThreadListItem(entry.thread);
-      if (thread.accountId !== expected.accountId || thread.threadId !== threadId) {
+      return Object.freeze({
+        threadId,
+        status: "done",
+        thread: ownThread(entry.thread),
+        markedRead: entry.markedRead,
+      });
+    }
+    if (entry.status === "renewed") {
+      if (!isRecordWithExactFields(entry, ["status", "thread", "threadId"])) {
         throw responseInvalid();
       }
-      return Object.freeze({ threadId, status: "done", thread, markedRead: entry.markedRead });
+      return Object.freeze({ threadId, status: "renewed", thread: ownThread(entry.thread) });
     }
     if (entry.status === "stale" && isRecordWithExactFields(entry, ["status", "threadId"])) {
       return Object.freeze({ threadId, status: "stale" });

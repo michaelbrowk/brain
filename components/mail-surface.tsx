@@ -5389,9 +5389,9 @@ export function MailSurface({
         /* THE TRANSPORT. One batch per account, and a single mutation for a
            take-back, every one of them with `keepalive`: a request in flight
            when the page leaves would otherwise be cut with the document. */
-        sendBatch: ({ accountId, threadIds, read }) =>
+        sendBatch: ({ accountId, threads, read }) =>
           client.archiveThreads(
-            { accountId, threadIds, archive: true, ...(read ? { read: true } : {}) },
+            { accountId, threads, archive: true, ...(read ? { read: true } : {}) },
             undefined,
             { keepalive: true },
           ),

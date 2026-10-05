@@ -5,6 +5,7 @@ import type {
   MailSystemMailbox,
   MailThreadBatchInput,
   MailThreadBatchItem,
+  MailThreadBatchPress,
   MailThreadBatchResult,
   MailThreadDetail,
   MailThreadListItem,
@@ -14,6 +15,7 @@ import type {
   MailThreadSort,
   MailThreadView,
 } from "../message-types";
+import { mailThreadHasNewMail } from "../message-types";
 import { validateMailThreadBatchInput } from "../message-codec";
 import {
   MAIL_CHANGE_ALL_MAILBOXES,
@@ -139,16 +141,15 @@ export interface MailProviderSyncPort {
   ): Promise<void>;
   /**
    * A section's Done in as few round trips as the provider allows: archive
-   * every thread, and mark read the ones that got no new mail when `read` is
-   * set. Optional, and partial by design: a thread absent from the answer is
-   * one this call did not touch, and the service takes it through the
+   * every thread, and mark read the ones whose `read` is set and that got no
+   * new mail. Optional, and partial by design: a thread absent from the answer
+   * is one this call did not touch, and the service takes it through the
    * per-thread path in the same request. A refusal that speaks for the whole
    * account (no folder to archive into) throws before anything moves.
    */
   archiveThreads?(
     input: {
       readonly threads: readonly MailProviderBatchThread[];
-      readonly read: boolean;
       /** The cache's sync cursor: where the provider's change log is read
        *  from to learn what reached these threads since the cache saw them. */
       readonly cursor: string | null;
@@ -158,12 +159,14 @@ export interface MailProviderSyncPort {
 }
 
 /** A thread a batch names, with every message the cache holds for it, or
- *  null when the cache does not hold it or cannot name every message. */
+ *  null when the cache does not hold it or cannot name every message, and
+ *  whether it is to be marked read: only one unread when it was pressed. */
 export interface MailProviderBatchThread {
   readonly threadId: string;
   readonly messages:
     | readonly { readonly messageId: string; readonly unread: boolean }[]
     | null;
+  readonly read: boolean;
 }
 
 /**
@@ -501,41 +504,62 @@ export class AccountMailMessageService implements MailMessageService {
       throw new MailCacheError("mail_cache_invalid");
     }
     this.assertAccount(batch.accountId);
-    const read = batch.read === true;
     try {
       return await this.mutate(signal, () =>
-        this.archiveThreadsUnlocked(batch.threadIds, read, signal),
+        this.archiveThreadsUnlocked(batch.threads, batch.read === true, signal),
       );
     } catch (error) {
       // The gate did not open before the deadline: nothing was reached.
       if (signal.aborted && error === signal.reason) {
         return batchResult(
-          batch.threadIds.map((threadId) => failedItem(threadId, NOT_REACHED)),
+          batch.threads.map(({ threadId }) => failedItem(threadId, NOT_REACHED)),
         );
       }
       throw error;
     }
   }
 
+  /*
+    The press is the measure. A thread whose cached copy already has more
+    mail, or newer mail, than the press saw is not sent to the provider at
+    all: the provider's batch names the messages the cache holds, and a reply
+    the background sync cached after the press would be among them, archived
+    and marked read before anyone saw it. Such a thread answers `renewed` with
+    the cached copy and nothing is done to it. What the provider reads back
+    after its archive is held to the same measure, and a thread that got mail
+    in the meantime is put back in the Inbox here, in this request, so the
+    guarantee does not rest on a take-back a closing page never sends.
+  */
   private async archiveThreadsUnlocked(
-    threadIds: readonly string[],
+    presses: readonly MailThreadBatchPress[],
     read: boolean,
     signal: AbortSignal,
   ): Promise<MailThreadBatchResult> {
+    const threadIds = presses.map((press) => press.threadId);
+    const pressOf = new Map(presses.map((press) => [press.threadId, press]));
+    const flag = (threadId: string) => read && pressOf.get(threadId)!.unread;
     const cached = this.cache.readBatchThreads(threadIds);
     const outcomes = new Map<string, MailProviderBatchOutcome>();
-    if (this.provider.archiveThreads !== undefined) {
+    const renewed = new Map<string, MailThreadListItem>();
+    for (const press of presses) {
+      const row = cached.get(press.threadId);
+      if (row !== undefined && mailThreadHasNewMail(press, row.thread)) {
+        renewed.set(press.threadId, row.thread);
+      }
+    }
+    const toSend = threadIds.filter((threadId) => !renewed.has(threadId));
+    if (this.provider.archiveThreads !== undefined && toSend.length > 0) {
       let handled: ReadonlyMap<string, MailProviderBatchOutcome>;
       try {
         handled = await this.provider.archiveThreads(
           {
-            threads: threadIds.map((threadId) =>
+            threads: toSend.map((threadId) =>
               Object.freeze({
                 threadId,
                 messages: cached.get(threadId)?.messages ?? null,
+                read: flag(threadId),
               }),
             ),
-            read,
             cursor: this.cache.readSyncState().historyId,
           },
           signal,
@@ -545,14 +569,14 @@ export class AccountMailMessageService implements MailMessageService {
         // The provider's batch never got going: a session that did not open,
         // a deadline already spent. The per-thread path would meet the same.
         handled = new Map(
-          threadIds.map((threadId) => [threadId, { status: "failed", error }] as const),
+          toSend.map((threadId) => [threadId, { status: "failed", error }] as const),
         );
       }
       for (const [threadId, outcome] of handled) {
-        if (threadIds.includes(threadId)) outcomes.set(threadId, outcome);
+        if (toSend.includes(threadId)) outcomes.set(threadId, outcome);
       }
     }
-    for (const threadId of threadIds) {
+    for (const threadId of toSend) {
       if (outcomes.has(threadId)) continue;
       if (signal.aborted) {
         outcomes.set(threadId, { status: "failed", error: signal.reason });
@@ -561,7 +585,7 @@ export class AccountMailMessageService implements MailMessageService {
       try {
         outcomes.set(
           threadId,
-          await this.archiveOneUnlocked(threadId, read, cached.get(threadId)?.thread, signal),
+          await this.archiveOneUnlocked(threadId, flag(threadId), pressOf.get(threadId)!, signal),
         );
       } catch (error) {
         const reachedAny = [...outcomes.values()].some(
@@ -578,6 +602,42 @@ export class AccountMailMessageService implements MailMessageService {
       }
     }
 
+    // Mail the press did not see reached a thread while it was archived. A
+    // thread still in the Inbox (Gmail left the new message there) is answered
+    // as it stands; one the archive took out goes back. If going back fails
+    // the archive stands, the answer says so, and Brain's take-back is the
+    // last word.
+    let touched = false;
+    for (const threadId of toSend) {
+      const outcome = outcomes.get(threadId);
+      if (
+        outcome?.status !== "done" ||
+        !mailThreadHasNewMail(pressOf.get(threadId)!, outcome.thread.thread)
+      ) {
+        continue;
+      }
+      touched = true;
+      if (outcome.thread.inInbox) {
+        renewed.set(threadId, outcome.thread.thread);
+        this.cacheWrite(outcome.thread);
+        outcomes.delete(threadId);
+        continue;
+      }
+      if (signal.aborted) continue;
+      try {
+        // The reply first: it is the one a reader would miss.
+        if (outcome.markedRead) await this.provider.setThreadRead(threadId, false, signal);
+        await this.provider.unarchiveThread(threadId, signal);
+        const back = await this.provider.getThread(threadId, signal);
+        if (back === null || back.thread.threadId !== threadId) continue;
+        renewed.set(threadId, back.thread);
+        this.cacheWrite(back);
+        outcomes.delete(threadId);
+      } catch {
+        // Answered `done` below with the new mail in it.
+      }
+    }
+
     const applied = threadIds.flatMap((threadId) => {
       const outcome = outcomes.get(threadId);
       return outcome?.status === "applied"
@@ -591,18 +651,16 @@ export class AccountMailMessageService implements MailMessageService {
       // The provider has the archive either way. The answer below is worked
       // out from the cached rows, and the next sync pass repairs the cache.
     }
-    let changed = false;
+    let changed = touched;
     const results = threadIds.map((threadId): MailThreadBatchItem => {
+      const kept = renewed.get(threadId);
+      if (kept !== undefined) return Object.freeze({ threadId, status: "renewed", thread: kept });
       const outcome = outcomes.get(threadId)!;
       if (outcome.status === "stale") return Object.freeze({ threadId, status: "stale" });
       if (outcome.status === "failed") return failedItem(threadId, batchErrorCode(outcome.error));
       changed = true;
       if (outcome.status === "done") {
-        try {
-          this.cache.replaceActiveThread(outcome.thread);
-        } catch {
-          // As above: the provider moved the thread, the sync repairs the row.
-        }
+        this.cacheWrite(outcome.thread);
         return Object.freeze({
           threadId,
           status: "done",
@@ -634,7 +692,7 @@ export class AccountMailMessageService implements MailMessageService {
   private async archiveOneUnlocked(
     threadId: string,
     read: boolean,
-    before: MailThreadListItem | undefined,
+    before: MailThreadBatchPress,
     signal: AbortSignal,
   ): Promise<MailProviderBatchOutcome> {
     const readBack = async (): Promise<CachedProviderThread | null> => {
@@ -650,11 +708,7 @@ export class AccountMailMessageService implements MailMessageService {
     await this.provider.archiveThread(threadId, signal);
     const archived = await readBack();
     if (archived === null) return { status: "stale" };
-    if (
-      !read ||
-      !archived.thread.unread ||
-      (before !== undefined && gotNewMail(before, archived.thread))
-    ) {
+    if (!read || !archived.thread.unread || mailThreadHasNewMail(before, archived.thread)) {
       return { status: "done", thread: archived, markedRead: false };
     }
     try {
@@ -669,6 +723,16 @@ export class AccountMailMessageService implements MailMessageService {
       // The flag is on; the thread as the archive left it still answers.
     }
     return { status: "done", thread: after ?? archived, markedRead: true };
+  }
+
+  /** The provider has the change either way; a row the cache will not take
+   *  now is repaired by the next sync pass. */
+  private cacheWrite(thread: CachedProviderThread): void {
+    try {
+      this.cache.replaceActiveThread(thread);
+    } catch {
+      // See above.
+    }
   }
 
   private async syncUnlocked(
@@ -1224,15 +1288,6 @@ async function applyThreadMutation(
 
 /** The code a batch thread the deadline left unreached answers with. */
 const NOT_REACHED = "request_deadline_exceeded";
-
-/**
- * Whether a thread has mail the cache did not hold: the count catches a
- * reply, the date a message that took another's place. The rule Brain's Done
- * queue applies to the press, applied here to the cache.
- */
-function gotNewMail(before: MailThreadListItem, now: MailThreadListItem): boolean {
-  return now.messageCount !== before.messageCount || now.lastMessageAt !== before.lastMessageAt;
-}
 
 /** A refusal that holds for every thread on the account: the server has no
  *  folder for an archive, or will not move mail at all. */

@@ -690,12 +690,13 @@ describe("brain-mail message HTTP surface", () => {
     const messages = messageServiceFixture();
     const socketPath = await startServer(messages, sendServiceFixture());
     const ids = ["thread_1", "thread_2"];
+    const threads = batchPresses(ids);
 
     const answer = await requestJson(
       socketPath,
       "POST",
       "/v1/threads/batch",
-      JSON.stringify({ accountId: ACCOUNT_ID, threadIds: ids, archive: true, read: true }),
+      JSON.stringify({ accountId: ACCOUNT_ID, threads, archive: true, read: true }),
     );
 
     expect(answer.status).toBe(200);
@@ -704,7 +705,7 @@ describe("brain-mail message HTTP surface", () => {
       results: ids.map((threadId) => ({ threadId, status: "done", markedRead: false })),
     });
     expect(messages.archiveThreads).toHaveBeenCalledWith(
-      { accountId: ACCOUNT_ID, threadIds: ids, archive: true, read: true },
+      { accountId: ACCOUNT_ID, threads, archive: true, read: true },
       expect.any(AbortSignal),
     );
     // `batch` is the route's own name, never a thread id on the PATCH route.
@@ -717,18 +718,33 @@ describe("brain-mail message HTTP surface", () => {
   it("refuses every batch but archive-with-optional-read before the service", async () => {
     const messages = messageServiceFixture();
     const socketPath = await startServer(messages, sendServiceFixture());
-    const fifty = Array.from({ length: 50 }, (_value, index) => `thread_${index}`);
+    // The longest ids there are: fifty of them, each with its press, still
+    // fit the batch's own body bound.
+    const fifty = batchPresses(
+      Array.from({ length: 50 }, (_value, index) => `thread_${index}`.padEnd(255, "x")),
+    );
+    const one = batchPresses(["thread_1"]);
     const refused = [
-      { accountId: ACCOUNT_ID, threadIds: ["thread_1"], archive: false },
-      { accountId: ACCOUNT_ID, threadIds: ["thread_1"], archive: true, read: false },
-      { accountId: ACCOUNT_ID, threadIds: ["thread_1"], read: true },
-      { accountId: ACCOUNT_ID, threadIds: ["thread_1"], archive: true, trash: true },
-      { accountId: ACCOUNT_ID, threadIds: [], archive: true },
-      { accountId: ACCOUNT_ID, threadIds: [...fifty, "thread_50"], archive: true },
-      { accountId: ACCOUNT_ID, threadIds: ["thread_1", "thread_1"], archive: true },
-      { accountId: ACCOUNT_ID, threadIds: ["thread/1"], archive: true },
-      { accountId: "account-x", threadIds: ["thread_1"], archive: true },
-      { accountId: ACCOUNT_ID, threadIds: "thread_1", archive: true },
+      { accountId: ACCOUNT_ID, threads: one, archive: false },
+      { accountId: ACCOUNT_ID, threads: one, archive: true, read: false },
+      { accountId: ACCOUNT_ID, threads: one, read: true },
+      { accountId: ACCOUNT_ID, threads: one, archive: true, trash: true },
+      { accountId: ACCOUNT_ID, threads: [], archive: true },
+      { accountId: ACCOUNT_ID, threads: [...fifty, ...batchPresses(["thread_50"])], archive: true },
+      { accountId: ACCOUNT_ID, threads: [...one, ...one], archive: true },
+      { accountId: ACCOUNT_ID, threads: batchPresses(["thread/1"]), archive: true },
+      { accountId: "account-x", threads: one, archive: true },
+      { accountId: ACCOUNT_ID, threads: "thread_1", archive: true },
+      // The old shape, ids without a press, is not a batch any more.
+      { accountId: ACCOUNT_ID, threadIds: ["thread_1"], archive: true },
+      { accountId: ACCOUNT_ID, threads: [{ threadId: "thread_1" }], archive: true },
+      {
+        accountId: ACCOUNT_ID,
+        threads: [{ ...one[0], messageCount: -1 }],
+        archive: true,
+      },
+      { accountId: ACCOUNT_ID, threads: [{ ...one[0], unread: "yes" }], archive: true },
+      { accountId: ACCOUNT_ID, threads: [{ ...one[0], lastMessageAt: 1.5 }], archive: true },
     ];
 
     for (const body of refused) {
@@ -745,7 +761,7 @@ describe("brain-mail message HTTP surface", () => {
         socketPath,
         "POST",
         "/v1/threads/batch",
-        JSON.stringify({ accountId: ACCOUNT_ID, threadIds: fifty, archive: true }),
+        JSON.stringify({ accountId: ACCOUNT_ID, threads: fifty, archive: true, read: true }),
       ),
     ).resolves.toMatchObject({ status: 200 });
   });
@@ -773,7 +789,7 @@ describe("brain-mail message HTTP surface", () => {
         socketPath,
         "POST",
         "/v1/threads/batch",
-        JSON.stringify({ accountId: ACCOUNT_ID, threadIds: [THREAD_ID], archive: true }),
+        JSON.stringify({ accountId: ACCOUNT_ID, threads: batchPresses([THREAD_ID]), archive: true }),
       );
 
       expect(answer).toEqual({
@@ -798,11 +814,11 @@ describe("brain-mail message HTTP surface", () => {
     const messages = messageServiceFixture();
     // The provider deadline aborts the signal; the service answers per thread.
     vi.mocked(messages.archiveThreads).mockImplementation(
-      async (input: { readonly threadIds: readonly string[] }, signal: AbortSignal) => {
+      async (input: { readonly threads: readonly { threadId: string }[] }, signal: AbortSignal) => {
         await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve()));
         return {
           apiVersion: 1,
-          results: input.threadIds.map((threadId) => ({
+          results: input.threads.map(({ threadId }) => ({
             threadId,
             status: "failed",
             errorCode: "request_deadline_exceeded",
@@ -817,7 +833,7 @@ describe("brain-mail message HTTP surface", () => {
         socketPath,
         "POST",
         "/v1/threads/batch",
-        JSON.stringify({ accountId: ACCOUNT_ID, threadIds: [THREAD_ID], archive: true }),
+        JSON.stringify({ accountId: ACCOUNT_ID, threads: batchPresses([THREAD_ID]), archive: true }),
       );
       await vi.waitFor(() => expect(messages.archiveThreads).toHaveBeenCalled());
       await vi.advanceTimersByTimeAsync(MAIL_SERVICE_HTTP_LIMITS.providerOperationDeadlineMs);
@@ -1477,9 +1493,9 @@ function messageServiceFixture(): MailMessageService & Record<string, ReturnType
       hasMore: false,
     })),
     updateThread: vi.fn(async () => ({ apiVersion: 1, thread })),
-    archiveThreads: vi.fn(async (input: { readonly threadIds: readonly string[] }) => ({
+    archiveThreads: vi.fn(async (input: { readonly threads: readonly { threadId: string }[] }) => ({
       apiVersion: 1,
-      results: input.threadIds.map((threadId) => ({
+      results: input.threads.map(({ threadId }) => ({
         threadId,
         status: "done",
         thread: { ...thread, threadId },
@@ -1487,6 +1503,16 @@ function messageServiceFixture(): MailMessageService & Record<string, ReturnType
       })),
     })),
   } as MailMessageService & Record<string, ReturnType<typeof vi.fn>>;
+}
+
+/** What a press saw of each thread: one unread message. */
+function batchPresses(ids: readonly string[]) {
+  return ids.map((threadId) => ({
+    threadId,
+    messageCount: 1,
+    lastMessageAt: 1_700_000_000_000,
+    unread: true,
+  }));
 }
 
 function sendServiceFixture(): MailSendService & Record<string, ReturnType<typeof vi.fn>> {

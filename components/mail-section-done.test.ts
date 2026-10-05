@@ -2,6 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  DONE_UNLOAD_BUDGET_BYTES,
   NO_DONE,
   beginDoneRead,
   doneBatchFailureOf,
@@ -97,7 +98,7 @@ function transport(
   const sendBatch = vi.fn(async (batch: DoneBatch): Promise<readonly MailThreadBatchItem[]> => {
     batches.push(batch);
     await options.before?.(batch);
-    return batch.threadIds.map((threadId) => {
+    return batch.threads.map(({ threadId }) => {
       const given = options.answer?.(threadId, batch);
       if (given !== undefined) return given;
       const copy = pressed.find(
@@ -126,7 +127,16 @@ const said = (sent: readonly DoneMutation[]) =>
       .join(",")}`;
   });
 
-const sentIds = (batches: readonly DoneBatch[]) => batches.map((batch) => batch.threadIds);
+const idsOf = (batch: DoneBatch) => batch.threads.map((press) => press.threadId);
+const sentIds = (batches: readonly DoneBatch[]) => batches.map(idsOf);
+/** What the press of these threads sends: each one as it was pressed. */
+const pressesOf = (threads: readonly MailThreadListItem[]) =>
+  threads.map(({ threadId, messageCount, lastMessageAt, unread }) => ({
+    threadId,
+    messageCount,
+    lastMessageAt,
+    unread,
+  }));
 
 describe("the Done overlay", () => {
   it("takes held threads out of an Inbox list and hands the same list back when it holds none", () => {
@@ -263,7 +273,10 @@ describe("the Done queue", () => {
     const { batches, sent, hooks } = transport(threads);
     const outcome = await doneQueue(failureOf).commit(threads, hooks);
 
-    expect(batches).toEqual([{ accountId: ACCOUNT_A, threadIds: ["1", "2", "3"], read: true }]);
+    // Each thread travels with what the press saw of it.
+    expect(batches).toEqual([
+      { accountId: ACCOUNT_A, threads: pressesOf(threads), read: true },
+    ]);
     expect(sent).toEqual([]);
     expect(ids(outcome.moved)).toEqual(["1", "2", "3"]);
     expect(outcome.stayed).toEqual([]);
@@ -274,7 +287,9 @@ describe("the Done queue", () => {
     const read = [thread("4", { unread: false })];
     const second = transport(read);
     await doneQueue(failureOf).commit(read, second.hooks);
-    expect(second.batches).toEqual([{ accountId: ACCOUNT_A, threadIds: ["4"], read: false }]);
+    expect(second.batches).toEqual([
+      { accountId: ACCOUNT_A, threads: pressesOf(read), read: false },
+    ]);
   });
 
   it("sends fifteen threads over two accounts as two requests, and no batch over fifty", async () => {
@@ -284,7 +299,7 @@ describe("the Done queue", () => {
     const { batches, hooks } = transport(threads);
     const outcome = await doneQueue(failureOf).commit(threads, hooks);
 
-    expect(batches.map((batch) => [batch.accountId, batch.threadIds.length])).toEqual([
+    expect(batches.map((batch) => [batch.accountId, batch.threads.length])).toEqual([
       [ACCOUNT_B, 5],
       [ACCOUNT_A, 10],
     ]);
@@ -293,7 +308,7 @@ describe("the Done queue", () => {
     const many = Array.from({ length: 120 }, (_value, index) => thread(`m${index}`));
     const big = transport(many);
     await doneQueue(failureOf).commit(many, big.hooks);
-    expect(big.batches.map((batch) => batch.threadIds.length)).toEqual([50, 50, 20]);
+    expect(big.batches.map((batch) => batch.threads.length)).toEqual([50, 50, 20]);
   });
 
   it("says a thread is archived when its batch answers", async () => {
@@ -523,7 +538,7 @@ describe("the Done queue", () => {
     const first = gate();
     const threads = [thread("a-1", { unread: false }), thread("b-1", { unread: false })];
     const { batches, hooks } = transport(threads, {
-      before: (batch) => (batch.threadIds[0] === "a-1" ? first.promise : undefined),
+      before: (batch) => (idsOf(batch)[0] === "a-1" ? first.promise : undefined),
     });
     const queue = doneQueue(failureOf);
     const one = queue.commit([threads[0]!], hooks);
@@ -569,7 +584,7 @@ describe("the Done queue", () => {
       thread("b-1", { unread: false }),
     ];
     const { batches, hooks } = transport(threads, {
-      before: (batch) => (batch.threadIds[0] === "a-1" ? first.promise : undefined),
+      before: (batch) => (idsOf(batch)[0] === "a-1" ? first.promise : undefined),
     });
     const queue = doneQueue(failureOf);
     const one = queue.commit([threads[0]!, threads[1]!], hooks);
@@ -588,6 +603,106 @@ describe("the Done queue", () => {
     expect(batches).toHaveLength(3);
     expect(ids(outcomes[0].moved).sort()).toEqual(["a-1", "a-2"]);
     expect(ids(outcomes[1].moved)).toEqual(["b-1"]);
+  });
+
+  it("puts a thread the service answers renewed back with no request of its own, the page leaving or not", async () => {
+    // The service found a reply its cache held that the press did not see,
+    // and left the thread alone. Nothing is left to take back, which matters
+    // most when the page is closing and a take-back would never be sent.
+    const threads = [thread("1"), thread("2", { accountId: ACCOUNT_B })];
+    const first = gate();
+    const { sent, hooks } = transport(threads, {
+      before: (batch) => (batch.accountId === ACCOUNT_A ? first.promise : undefined),
+      answer: (threadId) =>
+        threadId === "2"
+          ? {
+              threadId,
+              status: "renewed",
+              thread: { ...threads[1]!, messageCount: 2, lastMessageAt: 9 },
+            }
+          : undefined,
+    });
+    const renewed: string[] = [];
+    const archived: string[] = [];
+    const queue = doneQueue(failureOf);
+    const done = queue.commit(threads, {
+      ...hooks,
+      onRenewed: (item) => renewed.push(item.threadId),
+      onArchived: (item) => archived.push(item.threadId),
+    });
+    await flush();
+    queue.unload();
+    first.open();
+    const outcome = await done;
+    expect(sent).toEqual([]);
+    expect(ids(outcome.renewed)).toEqual(["2"]);
+    expect(renewed).toEqual(["2"]);
+    expect(archived).toEqual(["1"]);
+    expect(ids(outcome.moved)).toEqual(["1"]);
+  });
+
+  it("does not take back a thread whose answer has fewer messages than the press: a letter deleted elsewhere", async () => {
+    const threads = [thread("1", { messageCount: 2 })];
+    const { sent, hooks } = transport(threads, {
+      answer: (threadId) => ({
+        threadId,
+        status: "done",
+        thread: { ...threads[0]!, messageCount: 1, unread: false },
+        markedRead: true,
+      }),
+    });
+    const outcome = await doneQueue(failureOf).commit(threads, hooks);
+    expect(sent).toEqual([]);
+    expect(ids(outcome.moved)).toEqual(["1"]);
+  });
+
+  it("leaves a thread the answer says nothing about where it was", async () => {
+    const threads = [thread("1"), thread("2")];
+    const wire = transport(threads);
+    const outcome = await doneQueue(failureOf).commit(threads, {
+      ...wire.hooks,
+      sendBatch: async (batch) => (await wire.sendBatch(batch)).slice(0, 1),
+    });
+    expect(ids(outcome.moved)).toEqual(["1"]);
+    expect(ids(outcome.stayed)).toEqual(["2"]);
+  });
+
+  it("sends at pagehide only as many batches as a keepalive body may carry, and the rest later", async () => {
+    // Three accounts' batches of fifty of the longest ids: some 17 KiB each,
+    // so two fit the page's budget and the third does not go with the page.
+    const accounts = ["c", "d", "e"].map((letter) => `account-${letter}${"0".repeat(32)}`);
+    const first = gate();
+    const held = thread("held", { accountId: ACCOUNT_A });
+    const long = accounts.flatMap((accountId) =>
+      Array.from({ length: 50 }, (_value, index) =>
+        thread(`${accountId.slice(8, 9)}${index}`.padEnd(255, "x"), {
+          accountId,
+          messageCount: 200,
+          lastMessageAt: 1_700_000_000_000,
+        }),
+      ),
+    );
+    const { batches, hooks } = transport([held, ...long], {
+      before: (batch) => (batch.accountId === ACCOUNT_A ? first.promise : undefined),
+    });
+    const queue = doneQueue(failureOf);
+    const done = queue.commit([held, ...long], hooks);
+    await flush();
+    expect(batches).toHaveLength(1);
+
+    queue.unload();
+    expect(batches.map((batch) => batch.accountId)).toEqual([ACCOUNT_A, accounts[0], accounts[1]]);
+    const weight = (batch: DoneBatch) =>
+      new TextEncoder().encode(JSON.stringify({ ...batch, archive: true })).length;
+    expect(weight(batches[1]!) + weight(batches[2]!)).toBeLessThanOrEqual(
+      DONE_UNLOAD_BUDGET_BYTES,
+    );
+
+    // The page did not leave after all: the run goes on and sends the third.
+    first.open();
+    const outcome = await done;
+    expect(batches.map((batch) => batch.accountId)).toEqual([ACCOUNT_A, ...accounts]);
+    expect(outcome.moved).toHaveLength(151);
   });
 });
 
@@ -650,7 +765,9 @@ describe("the Done store", () => {
     expect(gone.send()).toBe(false);
     expect(gone.undo()).toBeNull();
     await flush();
-    expect(wire.batches).toEqual([{ accountId: ACCOUNT_A, threadIds: ["1"], read: false }]);
+    expect(wire.batches).toEqual([
+      { accountId: ACCOUNT_A, threads: pressesOf(items), read: false },
+    ]);
   });
 
   it("marks an archive landed against the reads begun so far, and ends the hold on that account's next read", async () => {
@@ -704,7 +821,7 @@ describe("the Done store", () => {
     ];
     const waiting = ["w-1", "w-2"].map((id) => thread(id, { unread: false }));
     const wire = transport([...queued, ...waiting], {
-      before: (batch) => (batch.threadIds[0] === "q-1" ? first.promise : undefined),
+      before: (batch) => (idsOf(batch)[0] === "q-1" ? first.promise : undefined),
     });
     holdSectionDone([...queued, ...waiting]);
     parkSectionDone(run(queued, wire)).send();
@@ -738,7 +855,7 @@ describe("the Done store", () => {
       thread("w-1", { unread: false }),
     ];
     const wire = transport(threads, {
-      before: (batch) => (batch.threadIds[0] === "q-1" ? first.promise : undefined),
+      before: (batch) => (idsOf(batch)[0] === "q-1" ? first.promise : undefined),
     });
     const queued = run(threads.slice(0, 2), wire);
     const waiting = run([threads[2]!], wire);

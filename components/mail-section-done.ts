@@ -27,7 +27,9 @@
 
 import {
   MAIL_THREAD_BATCH_MAX,
+  mailThreadHasNewMail,
   type MailThreadBatchItem,
+  type MailThreadBatchPress,
   type MailThreadListItem,
 } from "@/lib/mail/message-types";
 import { MailApiError, isMailMutationTimeout } from "./mail-surface-client";
@@ -168,19 +170,21 @@ export type DoneMutation =
 /** A take-back's transport: one mutation, one request. */
 export type DoneSend = (mutation: DoneMutation) => Promise<MailThreadListItem | void>;
 
-/** One account's threads, at most `MAIL_THREAD_BATCH_MAX`, to archive, and
- *  to mark read with `read`. */
+/** One account's threads, at most `MAIL_THREAD_BATCH_MAX`, each with what
+ *  the press saw of it, to archive, and the ones unread at the press to mark
+ *  read with `read`. */
 export type DoneBatch = {
   readonly accountId: string;
-  readonly threadIds: readonly string[];
+  readonly threads: readonly MailThreadBatchPress[];
   readonly read: boolean;
 };
 
 /**
- * THE TRANSPORT. One batch, one request, answered per thread with the thread
- * as the provider reads it afterwards and whether the read flag went on it.
- * The service flags only a thread that got no new mail, and the queue checks
- * every answer against the press all the same.
+ * THE TRANSPORT. One batch, one request, answered per thread. The service
+ * holds every thread to its press: one with mail the press did not see is
+ * left in the Inbox and answers `renewed`, and the read flag goes only on a
+ * thread unread at the press. The queue checks every `done` answer against
+ * the press all the same.
  */
 export type DoneSendBatch = (batch: DoneBatch) => Promise<readonly MailThreadBatchItem[]>;
 
@@ -305,15 +309,31 @@ type QueuedRun = {
 };
 
 /**
- * Whether a thread has mail the press did not see. The count catches a
- * reply, and the date catches a message that took another's place. A read
- * flag or a star set elsewhere since is not new mail.
+ * Whether a thread has mail the press did not see: more messages, or a newer
+ * one. A read flag or a star set elsewhere since is not new mail, and nor is
+ * a letter deleted elsewhere.
  */
-function gotNewMail(pressed: MailThreadListItem, now: MailThreadListItem): boolean {
-  return (
-    now.messageCount !== pressed.messageCount || now.lastMessageAt !== pressed.lastMessageAt
-  );
+const gotNewMail = mailThreadHasNewMail;
+
+/** What the press saw of a thread, as the service holds the batch to it. */
+function pressOf(thread: MailThreadListItem): MailThreadBatchPress {
+  return {
+    threadId: thread.threadId,
+    messageCount: thread.messageCount,
+    lastMessageAt: thread.lastMessageAt,
+    unread: thread.unread,
+  };
 }
+
+/**
+ * What the batches a closing page sends may weigh together. A `keepalive`
+ * request's body counts against a 64 KiB quota the browser shares with every
+ * other such request the page has in flight (a parked draft's, a pending
+ * delete's); past it the browser refuses the request outright. Batches past
+ * this much stay unsent and their threads stay in the Inbox, the safe way to
+ * fall short.
+ */
+export const DONE_UNLOAD_BUDGET_BYTES = 48 * 1024;
 
 export function doneQueue(failureOf: (error: unknown) => DoneFailure): DoneQueue {
   const open = new Set<QueuedRun>();
@@ -359,27 +379,33 @@ export function doneQueue(failureOf: (error: unknown) => DoneFailure): DoneQueue
     return null;
   };
 
-  /* Archive, then read, in one request. The service keeps that order inside
-     it: every thread is archived, read back, and only then flagged read if
-     the read back shows no new mail, because a failed archive must leave a
-     thread exactly where it was, unread, and a read flag on a reply nobody
-     has seen is the one thing Done must not do.
+  const batchOf = (batch: readonly MailThreadListItem[]): DoneBatch => ({
+    accountId: batch[0]!.accountId,
+    threads: batch.map(pressOf),
+    read: batch.some((thread) => thread.unread),
+  });
 
-     The press took a snapshot, and the service compares with what its cache
-     held, which may be newer. So every answer is compared with the press
-     here as well: new mail in it and the thread is taken back, the read flag
-     first when it went on (the reply is the one a reader would miss), then
-     the archive. A reply that lands after the answer arrives unread, as new
-     mail does, and is no longer this run's to see. */
+  /* Archive, then read, in one request, and the press travels with it. The
+     service holds each thread to what the press saw before it touches the
+     provider: a thread whose cached copy already has mail the press did not
+     see is left alone, and one that got mail while it was archived is put
+     back, in the same request, so a page that closes on the answer loses
+     nothing. Such a thread answers `renewed` and its row comes back with no
+     request from here. The read flag goes only on a thread unread at the
+     press, since a read failure leaves a thread exactly where it was and a
+     flag on a reply nobody has seen is the one thing Done must not do.
+
+     A `done` answer is still compared with the press: if the service could
+     not put a thread back, the new mail is in that answer, and the thread is
+     taken back from here, the read flag first when it went on (the reply is
+     the one a reader would miss), then the archive. A reply that lands after
+     the answer arrives unread, as new mail does, and is no longer this run's
+     to see. */
   const sendBatch = async (run: QueuedRun, batch: readonly MailThreadListItem[]): Promise<void> => {
     const accountId = batch[0]!.accountId;
     let answers: readonly MailThreadBatchItem[];
     try {
-      answers = await run.hooks.sendBatch({
-        accountId,
-        threadIds: batch.map((thread) => thread.threadId),
-        read: batch.some((thread) => thread.unread),
-      });
+      answers = await run.hooks.sendBatch(batchOf(batch));
     } catch (error) {
       const failure = failureOf(error);
       for (const thread of batch) {
@@ -406,6 +432,11 @@ export function doneQueue(failureOf: (error: unknown) => DoneFailure): DoneQueue
       if (answer.status === "failed") {
         close(run, thread, doneBatchFailureOf(answer.errorCode));
         run.stayed.push(thread);
+        continue;
+      }
+      if (answer.status === "renewed") {
+        run.renewed.push(thread);
+        run.hooks.onRenewed?.(thread);
         continue;
       }
       if (gotNewMail(thread, answer.thread)) {
@@ -487,8 +518,19 @@ export function doneQueue(failureOf: (error: unknown) => DoneFailure): DoneQueue
       return false;
     },
     unload() {
+      let budget = DONE_UNLOAD_BUDGET_BYTES;
       for (const run of open) {
         for (let batch = nextBatch(run); batch !== null; batch = nextBatch(run)) {
+          const bytes = new TextEncoder().encode(
+            JSON.stringify({ ...batchOf(batch), archive: true }),
+          ).length;
+          if (bytes > budget) {
+            // Not sent: these stay in the Inbox, and a page that comes back
+            // from the back-forward cache sends them with the rest of its run.
+            run.rest.unshift(...batch);
+            return;
+          }
+          budget -= bytes;
           run.atOnce.push(sendBatch(run, batch));
         }
       }

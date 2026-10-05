@@ -289,7 +289,7 @@ describe("Brain Mail message API routes", () => {
     });
     const input = {
       accountId: ACCOUNT_ID,
-      threadIds: [THREAD_ID, "thread_2"],
+      threads: presses([THREAD_ID, "thread_2"]),
       archive: true,
       read: true,
     };
@@ -316,7 +316,7 @@ describe("Brain Mail message API routes", () => {
 
   it("refuses a batch from another origin, in another type, too large, or of another shape before the socket", async () => {
     process.env.BRAIN_MAIL_SOCKET_PATH = "/tmp/brain-mail-never-opened.sock";
-    const input = { accountId: ACCOUNT_ID, threadIds: [THREAD_ID], archive: true };
+    const input = { accountId: ACCOUNT_ID, threads: presses([THREAD_ID]), archive: true };
     const crossOrigin = await archiveThreads(
       new Request("https://brain.test/api/mail/threads/batch", {
         method: "POST",
@@ -334,9 +334,22 @@ describe("Brain Mail message API routes", () => {
     const tooLarge = await archiveThreads(
       jsonRequest("https://brain.test/api/mail/threads/batch", "POST", {
         ...input,
-        threadIds: Array.from({ length: 80 }, (_value, index) => `t${index}`.padEnd(255, "x")),
+        threads: presses(
+          Array.from({ length: 80 }, (_value, index) => `t${index}`.padEnd(255, "x")),
+        ),
       }),
     );
+    // Fifty of the longest ids, each with its press, pass the route's bound
+    // and are refused, if at all, by the service: here no socket answers.
+    const fiftyLongest = await archiveThreads(
+      jsonRequest("https://brain.test/api/mail/threads/batch", "POST", {
+        ...input,
+        threads: presses(
+          Array.from({ length: 50 }, (_value, index) => `t${index}`.padEnd(255, "x")),
+        ),
+      }),
+    );
+    expect(fiftyLongest.status).not.toBe(413);
     const unarchive = await archiveThreads(
       jsonRequest("https://brain.test/api/mail/threads/batch", "POST", {
         ...input,
@@ -413,6 +426,15 @@ describe("Brain Mail message API routes", () => {
     });
   });
 });
+
+function presses(ids: readonly string[]) {
+  return ids.map((threadId) => ({
+    threadId,
+    messageCount: 1,
+    lastMessageAt: 100,
+    unread: true,
+  }));
+}
 
 function threadContext() {
   return { params: Promise.resolve({ threadId: THREAD_ID }) };

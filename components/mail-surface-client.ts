@@ -1706,26 +1706,30 @@ function readThreadBatchResult(
     !isExactRecord(value, ["apiVersion", "results"]) ||
     value.apiVersion !== 1 ||
     !Array.isArray(value.results) ||
-    value.results.length !== input.threadIds.length
+    value.results.length !== input.threads.length
   ) {
     throw new Error("invalid mail thread batch");
   }
   return value.results.map((entry: unknown, index): MailThreadBatchItem => {
-    const threadId = input.threadIds[index]!;
+    const threadId = input.threads[index]!.threadId;
     if (entry === null || typeof entry !== "object" || (entry as { threadId?: unknown }).threadId !== threadId) {
       throw new Error("invalid mail thread batch");
     }
-    if (isExactRecord(entry, ["markedRead", "status", "thread", "threadId"])) {
-      const thread = readThreadListItem(entry.thread);
-      if (
-        entry.status !== "done" ||
-        typeof entry.markedRead !== "boolean" ||
-        thread.accountId !== input.accountId ||
-        thread.threadId !== threadId
-      ) {
+    const ownThread = (raw: unknown) => {
+      const thread = readThreadListItem(raw);
+      if (thread.accountId !== input.accountId || thread.threadId !== threadId) {
         throw new Error("invalid mail thread batch");
       }
-      return { threadId, status: "done", thread, markedRead: entry.markedRead };
+      return thread;
+    };
+    if (isExactRecord(entry, ["markedRead", "status", "thread", "threadId"])) {
+      if (entry.status !== "done" || typeof entry.markedRead !== "boolean") {
+        throw new Error("invalid mail thread batch");
+      }
+      return { threadId, status: "done", thread: ownThread(entry.thread), markedRead: entry.markedRead };
+    }
+    if (isExactRecord(entry, ["status", "thread", "threadId"]) && entry.status === "renewed") {
+      return { threadId, status: "renewed", thread: ownThread(entry.thread) };
     }
     if (isExactRecord(entry, ["status", "threadId"]) && entry.status === "stale") {
       return { threadId, status: "stale" };

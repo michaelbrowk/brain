@@ -981,7 +981,12 @@ describe("Brain Mail Unix-socket client", () => {
     const client = createBrainMailClient({ socketPath });
     const input = {
       accountId,
-      threadIds: ["thread_1", "thread_2", "thread_3"],
+      threads: ["thread_1", "thread_2", "thread_3", "thread_4"].map((threadId) => ({
+        threadId,
+        messageCount: 1,
+        lastMessageAt: 1,
+        unread: true,
+      })),
       archive: true,
       read: true,
     } as const;
@@ -994,26 +999,39 @@ describe("Brain Mail Unix-socket client", () => {
       },
       { threadId: "thread_2", status: "stale" },
       { threadId: "thread_3", status: "failed", errorCode: "mail_sync_unavailable" },
+      {
+        threadId: "thread_4",
+        status: "renewed",
+        thread: { ...mailThreadFixture(accountId), threadId: "thread_4", messageCount: 2 },
+      },
     ];
     answer = { apiVersion: 1, results };
 
     await expect(client.archiveThreads(input)).resolves.toMatchObject({ apiVersion: 1, results });
     expect(requests).toEqual([{ method: "POST", path: "/v1/threads/batch", body: input }]);
 
-    // An answer for other threads, in another order, or for another account
-    // is not the answer to this batch.
+    // An answer for other threads, in another order, for a well-formed other
+    // account, or of another shape is not the answer to this batch.
+    const otherAccount = `account-a${"2".repeat(32)}`;
+    const [done, stale, failed, renewed] = results;
     for (const garbled of [
       { apiVersion: 1, results: results.slice(1) },
-      { apiVersion: 1, results: [results[1], results[0], results[2]] },
+      { apiVersion: 1, results: [stale, done, failed, renewed] },
+      {
+        apiVersion: 1,
+        results: [{ ...done, thread: mailThreadFixture(otherAccount) }, stale, failed, renewed],
+      },
       {
         apiVersion: 1,
         results: [
-          { ...results[0], thread: mailThreadFixture("account-a1111111111111111111111111111111") },
-          results[1],
-          results[2],
+          done,
+          stale,
+          failed,
+          { ...renewed, thread: { ...mailThreadFixture(otherAccount), threadId: "thread_4" } },
         ],
       },
-      { apiVersion: 1, results: [{ ...results[0], markedRead: "yes" }, results[1], results[2]] },
+      { apiVersion: 1, results: [{ ...done, markedRead: "yes" }, stale, failed, renewed] },
+      { apiVersion: 1, results: [done, stale, failed, { ...renewed, markedRead: false }] },
     ]) {
       answer = garbled;
       await expect(client.archiveThreads(input)).rejects.toMatchObject({
@@ -1024,7 +1042,7 @@ describe("Brain Mail Unix-socket client", () => {
     // A batch that is not archive-with-optional-read never reaches the socket.
     const sent = requests.length;
     await expect(
-      client.archiveThreads({ ...input, threadIds: [] }),
+      client.archiveThreads({ ...input, threads: [] }),
     ).rejects.toMatchObject({ status: 400 });
     expect(requests).toHaveLength(sent);
   });

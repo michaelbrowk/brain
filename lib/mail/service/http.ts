@@ -736,7 +736,11 @@ async function handleRequest(
       if (method !== "POST") throw new MailHttpError(405, "method_not_allowed");
       const service = requireMessageService(messages);
       const input = validateMailThreadBatchInput(
-        await readJsonBody(request, deadlineAt),
+        await readJsonBody(
+          request,
+          deadlineAt,
+          MAIL_SERVICE_HTTP_LIMITS.maxThreadBatchBodyBytes,
+        ),
       );
       requestAccountId = input.accountId;
       // Per-thread outcomes answer 200: the batch stops starting threads at

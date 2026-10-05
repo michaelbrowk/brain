@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { MailThreadListItem } from "../message-types";
+import type { MailThreadBatchPress, MailThreadListItem } from "../message-types";
 import type { GmailApiClient } from "../providers/gmail/api-client";
 import { GmailMailSyncAdapter } from "../providers/gmail/sync-adapter";
 import { MAIL_CHANGE_ALL_MAILBOXES, type MailServiceChange } from "./change-feed-ring";
@@ -1219,6 +1219,20 @@ describe("account mail message service batch archive", () => {
     return fixture;
   }
 
+  /** What a press saw of the seeded threads: one unread message at 1000. */
+  function pressed(
+    ids: readonly string[],
+    overrides: Partial<Omit<MailThreadBatchPress, "threadId">> = {},
+  ): MailThreadBatchPress[] {
+    return ids.map((threadId) => ({
+      threadId,
+      messageCount: 1,
+      lastMessageAt: 1000,
+      unread: true,
+      ...overrides,
+    }));
+  }
+
   /** The thread as a provider reads it after an archive, and after a flag. */
   function archivedFixture(threadId: string, unread: boolean, sentAt = 1000): CachedProviderThread {
     const base = mailboxThreadFixture(threadId, sentAt, ["all"]);
@@ -1258,7 +1272,7 @@ describe("account mail message service batch archive", () => {
     );
 
     const batch = fixture.service.archiveThreads(
-      { accountId: ACCOUNT_ID, threadIds: ids, archive: true, read: true },
+      { accountId: ACCOUNT_ID, threads: pressed(ids), archive: true, read: true },
       signal(),
     );
     // A mutation asked for meanwhile waits for the whole batch, not for one
@@ -1294,32 +1308,99 @@ describe("account mail message service batch archive", () => {
     fixture.cache.close();
   });
 
-  it("leaves a thread that got new mail archived and unread, and sends no read flag without `read`", async () => {
+  it("puts a thread that got mail while it was archived back in the Inbox, unflagged, in the same request", async () => {
+    let unarchived = false;
     const fixture = await seeded(
       {
         getThread: vi.fn(async (threadId: string) =>
-          archivedFixture(threadId, true, threadId === "thread-a" ? 2000 : 1000),
+          threadId === "thread-a" && unarchived
+            ? threadFixture(threadId, 2000)
+            : archivedFixture(threadId, true, threadId === "thread-a" ? 2000 : 1000),
         ),
+        unarchiveThread: vi.fn(async () => {
+          unarchived = true;
+        }),
       },
-      ["thread-a", "thread-b"],
+      ["thread-a", "thread-b", "thread-c"],
     );
 
-    const withRead = await fixture.service.archiveThreads(
-      { accountId: ACCOUNT_ID, threadIds: ["thread-a"], archive: true, read: true },
+    const renewed = await fixture.service.archiveThreads(
+      { accountId: ACCOUNT_ID, threads: pressed(["thread-a"]), archive: true, read: true },
       signal(),
     );
     const withoutRead = await fixture.service.archiveThreads(
-      { accountId: ACCOUNT_ID, threadIds: ["thread-b"], archive: true },
+      { accountId: ACCOUNT_ID, threads: pressed(["thread-b"]), archive: true },
+      signal(),
+    );
+    // Read when it was pressed: the flag is not for it, whatever it is now.
+    const readAtPress = await fixture.service.archiveThreads(
+      {
+        accountId: ACCOUNT_ID,
+        threads: pressed(["thread-c"], { unread: false }),
+        archive: true,
+        read: true,
+      },
       signal(),
     );
 
-    expect(withRead.results[0]).toMatchObject({
-      status: "done",
-      markedRead: false,
+    expect(renewed.results[0]).toMatchObject({
+      status: "renewed",
       thread: { lastMessageAt: 2000, unread: true },
     });
+    expect(fixture.provider.unarchiveThread).toHaveBeenCalledWith("thread-a", expect.anything());
     expect(withoutRead.results[0]).toMatchObject({ status: "done", markedRead: false });
+    expect(readAtPress.results[0]).toMatchObject({ status: "done", markedRead: false });
     expect(fixture.provider.setThreadRead).not.toHaveBeenCalled();
+    fixture.cache.close();
+  });
+
+  it("leaves alone a thread whose cached copy holds a reply the press did not see, and asks the provider nothing", async () => {
+    // The background sync cached the reply after the press. The provider's
+    // batch names the messages the cache holds, so sending this thread would
+    // archive the reply and mark it read: it is not sent.
+    const archiveThreads = vi.fn<NonNullable<MailProviderSyncPort["archiveThreads"]>>(
+      async () => new Map(),
+    );
+    const fixture = await seeded({ archiveThreads }, ["thread-a", "thread-b"]);
+    fixture.cache.replaceActiveThread(threadFixture("thread-a", 2000));
+
+    const result = await fixture.service.archiveThreads(
+      {
+        accountId: ACCOUNT_ID,
+        threads: pressed(["thread-a", "thread-b"]),
+        archive: true,
+        read: true,
+      },
+      signal(),
+    );
+
+    expect(result.results[0]).toMatchObject({
+      threadId: "thread-a",
+      status: "renewed",
+      thread: { lastMessageAt: 2000 },
+    });
+    expect(archiveThreads.mock.calls[0]![0].threads.map((thread) => thread.threadId)).toEqual([
+      "thread-b",
+    ]);
+    expect(fixture.provider.archiveThread).not.toHaveBeenCalledWith("thread-a", expect.anything());
+    fixture.cache.close();
+  });
+
+  it("does not count a letter deleted elsewhere as new mail", async () => {
+    const fixture = await seeded(
+      { getThread: vi.fn(async (threadId: string) => archivedFixture(threadId, true)) },
+      ["thread-a"],
+    );
+    const result = await fixture.service.archiveThreads(
+      {
+        accountId: ACCOUNT_ID,
+        threads: pressed(["thread-a"], { messageCount: 2 }),
+        archive: true,
+        read: true,
+      },
+      signal(),
+    );
+    expect(result.results[0]).toMatchObject({ status: "done", markedRead: true });
     fixture.cache.close();
   });
 
@@ -1340,7 +1421,11 @@ describe("account mail message service batch archive", () => {
     );
 
     const result = await fixture.service.archiveThreads(
-      { accountId: ACCOUNT_ID, threadIds: ["thread-a", "thread-b", "thread-c"], archive: true },
+      {
+        accountId: ACCOUNT_ID,
+        threads: pressed(["thread-a", "thread-b", "thread-c"]),
+        archive: true,
+      },
       signal(),
     );
 
@@ -1369,7 +1454,7 @@ describe("account mail message service batch archive", () => {
     );
     await expect(
       first.service.archiveThreads(
-        { accountId: ACCOUNT_ID, threadIds: ["thread-a", "thread-b"], archive: true },
+        { accountId: ACCOUNT_ID, threads: pressed(["thread-a", "thread-b"]), archive: true },
         signal(),
       ),
     ).rejects.toBe(refusal);
@@ -1384,7 +1469,7 @@ describe("account mail message service batch archive", () => {
       ["thread-a", "thread-b"],
     );
     const result = await later.service.archiveThreads(
-      { accountId: ACCOUNT_ID, threadIds: ["thread-a", "thread-b"], archive: true },
+      { accountId: ACCOUNT_ID, threads: pressed(["thread-a", "thread-b"]), archive: true },
       signal(),
     );
     expect(result.results).toEqual([
@@ -1414,7 +1499,11 @@ describe("account mail message service batch archive", () => {
     );
 
     const result = await fixture.service.archiveThreads(
-      { accountId: ACCOUNT_ID, threadIds: ["thread-a", "thread-b", "thread-c"], archive: true },
+      {
+        accountId: ACCOUNT_ID,
+        threads: pressed(["thread-a", "thread-b", "thread-c"]),
+        archive: true,
+      },
       controller.signal,
     );
 
@@ -1434,7 +1523,7 @@ describe("account mail message service batch archive", () => {
     controller.abort();
 
     const result = await fixture.service.archiveThreads(
-      { accountId: ACCOUNT_ID, threadIds: ["thread-a"], archive: true },
+      { accountId: ACCOUNT_ID, threads: pressed(["thread-a"]), archive: true },
       controller.signal,
     );
 
@@ -1453,7 +1542,7 @@ describe("account mail message service batch archive", () => {
           ["thread-a", { status: "applied", messageIds: ["message-thread-a"], markedRead: true }],
           [
             "thread-b",
-            { status: "done", thread: archivedFixture("thread-b", true, 2000), markedRead: false },
+            { status: "done", thread: threadFixture("thread-b", 2000), markedRead: false },
           ],
         ]),
     );
@@ -1469,22 +1558,38 @@ describe("account mail message service batch archive", () => {
     const result = await fixture.service.archiveThreads(
       {
         accountId: ACCOUNT_ID,
-        threadIds: ["thread-a", "thread-b", "thread-c", "thread-x"],
+        threads: [
+          ...pressed(["thread-a", "thread-b"]),
+          ...pressed(["thread-c"], { unread: false }),
+          ...pressed(["thread-x"]),
+        ],
         archive: true,
         read: true,
       },
       signal(),
     );
 
+    // The read flag is asked for the threads unread at the press only.
     expect(archiveThreads).toHaveBeenCalledWith(
       {
         threads: [
-          { threadId: "thread-a", messages: [{ messageId: "message-thread-a", unread: true }] },
-          { threadId: "thread-b", messages: [{ messageId: "message-thread-b", unread: true }] },
-          { threadId: "thread-c", messages: [{ messageId: "message-thread-c", unread: true }] },
-          { threadId: "thread-x", messages: null },
+          {
+            threadId: "thread-a",
+            messages: [{ messageId: "message-thread-a", unread: true }],
+            read: true,
+          },
+          {
+            threadId: "thread-b",
+            messages: [{ messageId: "message-thread-b", unread: true }],
+            read: true,
+          },
+          {
+            threadId: "thread-c",
+            messages: [{ messageId: "message-thread-c", unread: true }],
+            read: false,
+          },
+          { threadId: "thread-x", messages: null, read: true },
         ],
-        read: true,
         cursor: "100",
       },
       expect.any(AbortSignal),
@@ -1501,21 +1606,81 @@ describe("account mail message service batch archive", () => {
         thread: expect.objectContaining({ threadId: "thread-a", unread: false }),
         markedRead: true,
       },
+      // Gmail left the reply in the Inbox: the thread is answered as it
+      // stands, with nothing more sent for it.
       {
         threadId: "thread-b",
-        status: "done",
+        status: "renewed",
         thread: expect.objectContaining({ threadId: "thread-b", lastMessageAt: 2000 }),
-        markedRead: false,
       },
       expect.objectContaining({ threadId: "thread-c", status: "done" }),
       expect.objectContaining({ threadId: "thread-x", status: "done" }),
     ]);
-    // The confirmed archive is in the cache without a read of the thread.
-    expect((await fixture.service.listThreads({ accountId: ACCOUNT_ID, limit: 10 })).items).toEqual(
-      [],
-    );
+    // The confirmed archive is in the cache without a read of the thread; the
+    // renewed one is in the Inbox with its reply.
+    expect(
+      (await fixture.service.listThreads({ accountId: ACCOUNT_ID, limit: 10 })).items.map(
+        (item) => item.threadId,
+      ),
+    ).toEqual(["thread-b"]);
     expect(fixture.provider.getThread).not.toHaveBeenCalledWith("thread-a", expect.anything());
     expect(changes).toHaveLength(1);
+    fixture.cache.close();
+  });
+
+  it("does not claim a read flag that failed, and keeps the archive that landed", async () => {
+    const fixture = await seeded(
+      {
+        getThread: vi.fn(async (threadId: string) => archivedFixture(threadId, true)),
+        setThreadRead: vi.fn().mockRejectedValue(new MailProviderSyncError("mail_provider_unavailable")),
+      },
+      ["thread-a"],
+    );
+    const result = await fixture.service.archiveThreads(
+      { accountId: ACCOUNT_ID, threads: pressed(["thread-a"]), archive: true, read: true },
+      signal(),
+    );
+    expect(result.results[0]).toMatchObject({ status: "done", markedRead: false });
+    fixture.cache.close();
+  });
+
+  it("answers every thread failed when the provider's batch never got going, and spends no per-thread call", async () => {
+    const fixture = await seeded(
+      {
+        archiveThreads: vi.fn().mockRejectedValue(new MailProviderSyncError("mail_provider_unavailable")),
+      },
+      ["thread-a", "thread-b"],
+    );
+    const result = await fixture.service.archiveThreads(
+      { accountId: ACCOUNT_ID, threads: pressed(["thread-a", "thread-b"]), archive: true },
+      signal(),
+    );
+    expect(result.results).toEqual([
+      { threadId: "thread-a", status: "failed", errorCode: "mail_sync_unavailable" },
+      { threadId: "thread-b", status: "failed", errorCode: "mail_sync_unavailable" },
+    ]);
+    expect(fixture.provider.archiveThread).not.toHaveBeenCalled();
+    fixture.cache.close();
+  });
+
+  it("writes no change record when nothing in the batch moved", async () => {
+    const changes: MailServiceChange[] = [];
+    const fixture = await seeded(
+      {
+        archiveThread: vi.fn().mockRejectedValue(new MailProviderSyncError("mail_provider_thread_stale")),
+      },
+      ["thread-a", "thread-b"],
+      changes,
+    );
+    // One left alone because its cached copy already has a reply, one stale.
+    fixture.cache.replaceActiveThread(threadFixture("thread-a", 2000));
+    changes.length = 0;
+    const result = await fixture.service.archiveThreads(
+      { accountId: ACCOUNT_ID, threads: pressed(["thread-a", "thread-b"]), archive: true },
+      signal(),
+    );
+    expect(result.results.map((item) => item.status)).toEqual(["renewed", "stale"]);
+    expect(changes).toEqual([]);
     fixture.cache.close();
   });
 
@@ -1563,7 +1728,12 @@ describe("account mail message service batch archive", () => {
       archiveThread: (threadId, signal) => gmail.archiveThread(threadId, signal),
       setThreadRead: (threadId, read, signal) => gmail.setThreadRead(threadId, read, signal),
     };
-    const input = { accountId: ACCOUNT_ID, threadIds: ids, archive: true as const, read: true as const };
+    const input = {
+      accountId: ACCOUNT_ID,
+      threads: pressed(ids),
+      archive: true as const,
+      read: true as const,
+    };
 
     const before = await seeded(perThread, ids);
     await before.service.archiveThreads(input, signal());

@@ -312,8 +312,8 @@ export class GmailMailSyncAdapter implements MailProviderSyncPort {
    * `messages.batchModify` takes INBOX off every message the cache names, one
    * read of the change log since the cache's cursor says which of those
    * threads got a message the cache did not name (or lost one), and only
-   * those are read back. With `read`, one more batchModify takes UNREAD off
-   * the unread messages of the threads that got nothing new, and one more
+   * those are read back. One more batchModify takes UNREAD off the unread
+   * messages of the threads marked `read` that got nothing new, and one more
    * read of the log catches a letter that landed in between. Fifteen threads
    * cost four calls where the per-thread path costs sixty.
    *
@@ -329,7 +329,6 @@ export class GmailMailSyncAdapter implements MailProviderSyncPort {
   async archiveThreads(
     input: {
       readonly threads: readonly MailProviderBatchThread[];
-      readonly read: boolean;
       readonly cursor: string | null;
     },
     signal: AbortSignal,
@@ -337,6 +336,9 @@ export class GmailMailSyncAdapter implements MailProviderSyncPort {
     const outcomes = new Map<string, MailProviderBatchOutcome>();
     if (input.cursor === null) return outcomes;
     const cursor = input.cursor;
+    const wantsRead = new Set(
+      input.threads.filter((thread) => thread.read).map((thread) => thread.threadId),
+    );
     const named = new Map<string, readonly { readonly messageId: string; readonly unread: boolean }[]>();
     for (const thread of input.threads) {
       if (
@@ -370,7 +372,10 @@ export class GmailMailSyncAdapter implements MailProviderSyncPort {
     }
 
     const toRead = new Map(
-      [...named].filter(([, messages]) => input.read && messages.some((message) => message.unread)),
+      [...named].filter(
+        ([threadId, messages]) =>
+          wantsRead.has(threadId) && messages.some((message) => message.unread),
+      ),
     );
     for (const [threadId, messages] of named) {
       if (!toRead.has(threadId)) outcomes.set(threadId, applied(messages, false));
@@ -455,14 +460,14 @@ export class GmailMailSyncAdapter implements MailProviderSyncPort {
     markedRead: boolean,
     signal: AbortSignal,
   ): Promise<ReadonlyMap<string, MailProviderBatchOutcome> | null> {
-    let changed: ReadonlySet<string>;
+    let log: { readonly changed: ReadonlySet<string>; readonly known: boolean };
     try {
-      changed = await this.changedSince(threads, cursor, signal);
+      log = await this.changedSince(threads, cursor, signal);
     } catch {
       return null;
     }
     const outcomes = new Map<string, MailProviderBatchOutcome>();
-    for (const threadId of changed) {
+    for (const threadId of log.changed) {
       try {
         const thread = await this.getThread(threadId, signal);
         if (thread === null) {
@@ -477,9 +482,13 @@ export class GmailMailSyncAdapter implements MailProviderSyncPort {
           continue;
         }
         outcomes.set(threadId, { status: "done", thread, markedRead });
-      } catch {
-        // The archive is in; the thread's read back is not. What was sent
-        // stands as the answer.
+      } catch (error) {
+        // The log named this thread: something reached it that the cache
+        // did not hold, and without the read back nobody can say what. It is
+        // answered failed and kept out of the read flag. A thread read back
+        // only because the log was gone is not known to have changed, and
+        // what was sent stands as its answer.
+        if (log.known) outcomes.set(threadId, { status: "failed", error: mapGmailError(error) });
       }
     }
     return outcomes;
@@ -489,8 +498,8 @@ export class GmailMailSyncAdapter implements MailProviderSyncPort {
     threads: ReadonlyMap<string, readonly { readonly messageId: string; readonly unread: boolean }[]>,
     cursor: string,
     signal: AbortSignal,
-  ): Promise<ReadonlySet<string>> {
-    const everyThread = new Set(threads.keys());
+  ): Promise<{ readonly changed: ReadonlySet<string>; readonly known: boolean }> {
+    const everyThread = { changed: new Set(threads.keys()), known: false };
     const changed = new Set<string>();
     let pageToken: string | null = null;
     for (let page = 0; page < BATCH_HISTORY_PAGES; page += 1) {
@@ -523,7 +532,7 @@ export class GmailMailSyncAdapter implements MailProviderSyncPort {
         }
       }
       pageToken = history.nextPageToken;
-      if (pageToken === null) return changed;
+      if (pageToken === null) return { changed, known: true };
     }
     return everyThread;
   }

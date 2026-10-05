@@ -12,9 +12,8 @@ import {
   UNIFIED_FANOUT_LIMIT,
 } from "./mail-surface";
 import { MAIL_CHANGED_EVENT, type BrainMailEvent } from "@/lib/mail/mail-events";
-import { doneFailureOf, doneOverlaySnapshot, resetSectionDone } from "./mail-section-done";
-import { unifiedThreadKey } from "./mail-unified";
-import type { MailThreadBatchItem } from "@/lib/mail/message-types";
+import { doneFailureOf, resetSectionDone } from "./mail-section-done";
+import { mailThreadHasNewMail, type MailThreadBatchItem } from "@/lib/mail/message-types";
 import { SMART_UNDO_MS } from "./shell/helpers";
 import type { ToastOptions } from "./ui/primitives";
 
@@ -336,15 +335,31 @@ function makeClient(overrides: Partial<MailSurfaceClient> = {}): MailSurfaceClie
   return whole;
 }
 
+/** What a batch carries for these threads: each as it was pressed. */
+function pressesOf(items: readonly MailThreadListItem[], ids?: readonly string[]) {
+  return (ids === undefined ? items : ids.map((id) => items.find((item) => item.threadId === id)!)).map(
+    ({ threadId, messageCount, lastMessageAt, unread }) => ({
+      threadId,
+      messageCount,
+      lastMessageAt,
+      unread,
+    }),
+  );
+}
+
 /**
- * The service's batch, played over the per-thread `updateThread` a test
+ * The service's per-thread path, played over the `updateThread` a test
  * supplies, so a case written against single mutations still says what the
- * provider is asked, in the order the service asks it: per thread the
- * archive, and the read flag for an unread one whose archive answer shows no
- * new mail. A refusal, a timeout, a sign-out or a dead connection on the
- * first thread is the whole request's answer, as it is from the route; past
- * a thread that landed it is the rest of the batch's `failed`. The pressed
- * copy is the one the Done store holds.
+ * provider is asked, in the order the service asks it. It knows what the
+ * service knows and nothing more: the press each thread travels with, and
+ * the answers. Per thread the archive; then, held to the press, a thread with
+ * new mail in the archive's answer is put back (`archive: false`) and answers
+ * `renewed`; the read flag goes on one unread at the press and in that
+ * answer, and if the flag's answer shows new mail the flag and the archive
+ * are taken back in that order. A mock that answers nothing stands for a read
+ * back that shows the press unchanged. A refusal, a timeout, a sign-out or a
+ * dead connection on the first thread is the whole request's answer, as it
+ * is from the route; past a thread that landed it is the rest's `failed`.
  */
 async function batchOverSingles(
   client: MailSurfaceClient,
@@ -353,9 +368,30 @@ async function batchOverSingles(
   options?: { readonly keepalive?: boolean },
 ): Promise<MailThreadBatchItem[]> {
   const results: MailThreadBatchItem[] = [];
-  for (const [index, threadId] of input.threadIds.entries()) {
+  for (const [index, press] of input.threads.entries()) {
+    const { threadId } = press;
     const key = { accountId: input.accountId, threadId };
-    const pressed = doneOverlaySnapshot().get(unifiedThreadKey(key))?.thread;
+    const asPressed: MailThreadListItem = {
+      ...thread,
+      accountId: input.accountId,
+      threadId,
+      messageCount: press.messageCount,
+      lastMessageAt: press.lastMessageAt,
+      unread: press.unread,
+    };
+    const putBack = async (
+      mutations: readonly ({ readonly read: false } | { readonly archive: false })[],
+      answer: MailThreadListItem,
+    ) => {
+      try {
+        for (const mutation of mutations) {
+          await client.updateThread({ ...key, ...mutation }, signal, options);
+        }
+        results.push({ threadId, status: "renewed", thread: answer });
+      } catch {
+        results.push({ threadId, status: "done", thread: answer, markedRead: mutations.length > 1 });
+      }
+    };
     let archived: MailThreadListItem | void;
     try {
       archived = await client.updateThread({ ...key, archive: true }, signal, options);
@@ -372,17 +408,17 @@ async function batchOverSingles(
       if (!results.some((result) => result.status === "done")) throw error;
       const errorCode =
         failure === "refused" ? "mail_thread_mutation_unsupported" : "request_deadline_exceeded";
-      for (const rest of input.threadIds.slice(index)) {
-        results.push({ threadId: rest, status: "failed", errorCode });
+      for (const rest of input.threads.slice(index)) {
+        results.push({ threadId: rest.threadId, status: "failed", errorCode });
       }
       return results;
     }
-    const answer = archived || pressed!;
-    const renewed =
-      pressed !== undefined &&
-      (answer.messageCount !== pressed.messageCount ||
-        answer.lastMessageAt !== pressed.lastMessageAt);
-    if (input.read !== true || pressed?.unread !== true || renewed) {
+    const answer = archived || asPressed;
+    if (mailThreadHasNewMail(press, answer)) {
+      await putBack([{ archive: false }], answer);
+      continue;
+    }
+    if (input.read !== true || !press.unread || !answer.unread) {
       results.push({ threadId, status: "done", thread: answer, markedRead: false });
       continue;
     }
@@ -393,7 +429,12 @@ async function batchOverSingles(
       results.push({ threadId, status: "done", thread: answer, markedRead: false });
       continue;
     }
-    results.push({ threadId, status: "done", thread: read || answer, markedRead: true });
+    const after = read || { ...answer, unread: false };
+    if (mailThreadHasNewMail(press, after)) {
+      await putBack([{ read: false }, { archive: false }], after);
+      continue;
+    }
+    results.push({ threadId, status: "done", thread: after, markedRead: true });
   }
   return results;
 }
@@ -10466,7 +10507,7 @@ describe("MailSurface", () => {
         );
         const updateThread = vi.fn().mockResolvedValue(undefined);
         const archiveThreads = vi.fn<MailSurfaceClient["archiveThreads"]>(async (input) =>
-          input.threadIds.map((threadId) => ({
+          input.threads.map(({ threadId }) => ({
             threadId,
             status: "done" as const,
             thread: { ...items.find((item) => item.threadId === threadId)!, unread: false },
@@ -10498,7 +10539,7 @@ describe("MailSurface", () => {
           [
             {
               accountId: accountA.accountId,
-              threadIds: items.slice(0, 10).map((item) => item.threadId),
+              threads: pressesOf(items.slice(0, 10)),
               archive: true,
               read: true,
             },
@@ -10507,7 +10548,7 @@ describe("MailSurface", () => {
           [
             {
               accountId: accountB.accountId,
-              threadIds: items.slice(10).map((item) => item.threadId),
+              threads: pressesOf(items.slice(10)),
               archive: true,
               read: true,
             },
@@ -10529,7 +10570,7 @@ describe("MailSurface", () => {
           }),
         );
         const archiveThreads = vi.fn<MailSurfaceClient["archiveThreads"]>(async (input) =>
-          input.threadIds.map((threadId) =>
+          input.threads.map(({ threadId }) =>
             threadId === "bulk-2"
               ? { threadId, status: "failed" as const, errorCode: "mail_sync_unavailable" }
               : {
@@ -11115,7 +11156,7 @@ describe("MailSurface", () => {
         );
         const updateThread = vi.fn().mockResolvedValue(undefined);
         const archiveThreads = vi.fn<MailSurfaceClient["archiveThreads"]>(async (input) =>
-          input.threadIds.map((threadId) => ({
+          input.threads.map(({ threadId }) => ({
             threadId,
             status: "done" as const,
             thread: items.find((item) => item.threadId === threadId)!,
@@ -11147,7 +11188,7 @@ describe("MailSurface", () => {
           [
             {
               accountId: accountA.accountId,
-              threadIds: ["a-0", "a-1", "a-2"],
+              threads: pressesOf(items),
               archive: true,
             },
             undefined,
@@ -11787,8 +11828,8 @@ describe("MailSurface", () => {
         );
         const first = deferred<void>();
         const archiveThreads = vi.fn<MailSurfaceClient["archiveThreads"]>(async (input) => {
-          if (input.threadIds.includes("a-0")) await first.promise;
-          return input.threadIds.map((threadId) => ({
+          if (input.threads.some((press) => press.threadId === "a-0")) await first.promise;
+          return input.threads.map(({ threadId }) => ({
             threadId,
             status: "done" as const,
             thread: items.find((item) => item.threadId === threadId)!,
@@ -11825,7 +11866,9 @@ describe("MailSurface", () => {
         // Taken out is not a failure: the run has nothing to report for it.
         await act(async () => first.resolve());
         await drain();
-        expect(archiveThreads.mock.calls.map((call) => call[0].threadIds)).toEqual([
+        expect(
+          archiveThreads.mock.calls.map((call) => call[0].threads.map((press) => press.threadId)),
+        ).toEqual([
           ["a-0", "a-1"],
         ]);
         expect(threadsList()).toContain("1 thread, nothing unread");
@@ -12306,7 +12349,7 @@ describe("MailSurface", () => {
         const first = deferred<void>();
         const archiveThreads = vi.fn<MailSurfaceClient["archiveThreads"]>(async (input) => {
           if (input.accountId === accountA.accountId) await first.promise;
-          return input.threadIds.map((threadId) => ({
+          return input.threads.map(({ threadId }) => ({
             threadId,
             status: "done" as const,
             thread: { ...items.find((item) => item.threadId === threadId)!, unread: false },
@@ -12352,11 +12395,15 @@ describe("MailSurface", () => {
         });
         expect(archiveThreads.mock.calls.map(([input, , options]) => [input, options])).toEqual([
           [
-            { accountId: accountA.accountId, threadIds: ["a-0", "a-1"], archive: true },
+            {
+              accountId: accountA.accountId,
+              threads: pressesOf(items, ["a-0", "a-1"]),
+              archive: true,
+            },
             { keepalive: true },
           ],
           [
-            { accountId: accountB.accountId, threadIds: ["a-2"], archive: true },
+            { accountId: accountB.accountId, threads: pressesOf(items, ["a-2"]), archive: true },
             { keepalive: true },
           ],
         ]);
@@ -12402,14 +12449,19 @@ describe("MailSurface", () => {
           [
             {
               accountId: accountA.accountId,
-              threadIds: ["p-1", "p-2"],
+              threads: pressesOf(items, ["p-1", "p-2"]),
               archive: true,
               read: true,
             },
             { keepalive: true },
           ],
           [
-            { accountId: accountB.accountId, threadIds: ["p-3"], archive: true, read: true },
+            {
+              accountId: accountB.accountId,
+              threads: pressesOf(items, ["p-3"]),
+              archive: true,
+              read: true,
+            },
             { keepalive: true },
           ],
         ]);

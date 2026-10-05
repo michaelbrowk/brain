@@ -768,9 +768,147 @@ describe("IMAP thread mutations", () => {
 describe("IMAP batch archive", () => {
   const ids = (count: number) => Array.from({ length: count }, (_value, index) => `i77u${index + 1}`);
   const batch = (threadIds: readonly string[], read = true) => ({
-    threads: threadIds.map((threadId) => ({ threadId, messages: null })),
-    read,
+    threads: threadIds.map((threadId) => ({ threadId, messages: null, read })),
     cursor: null,
+  });
+  /** Sessions from this server, each handed a client `wrap` may change, and
+   *  `after` run as the session ends, as a deadline check or a logout is. */
+  const providerWith = (
+    server: FakeServer,
+    wrap: (client: ImapSessionClient) => ImapSessionClient = (client) => client,
+    after?: () => void,
+  ) =>
+    new ImapMailSyncAdapter(accountFixture(), {
+      async withSession<T>(
+        _account: StoredImapMailAccount,
+        _signal: AbortSignal,
+        operation: (client: ImapSessionClient) => Promise<T>,
+      ) {
+        const value = await operation(wrap(server.client));
+        after?.();
+        return value;
+      },
+    });
+  /** A client whose named commands throw as a dropped socket does. */
+  const dying =
+    (...commands: string[]) =>
+    (client: ImapSessionClient) =>
+      new Proxy(client, {
+        get(target, property, receiver) {
+          if (typeof property === "string" && commands.includes(property)) {
+            return async () => {
+              throw new Error("socket closed");
+            };
+          }
+          return Reflect.get(target, property, receiver);
+        },
+      });
+
+  it("answers done for every moved thread when the session fails after the MOVE answered", async () => {
+    const server = serverFixture({
+      inboxCount: 3,
+      mailboxes: [{ path: "Archive", specialUse: "\\Archive" }],
+    });
+    let ends = 0;
+    const provider = providerWith(server, undefined, () => {
+      ends += 1;
+      if (ends === 1) throw new Error("imap_connection_timeout after operation");
+    });
+
+    const outcomes = await provider.archiveThreads(batch(ids(3)), signal());
+
+    expect(server.mailbox("Archive").messages.size).toBe(3);
+    expect([...outcomes.values()].map((outcome) => outcome.status)).toEqual([
+      "done",
+      "done",
+      "done",
+    ]);
+    expect(outcomes.get("i77u1")).toMatchObject({ markedRead: true, thread: { inInbox: false } });
+    // COPYUID's handle is kept, so the take-back of one thread finds it.
+    await provider.unarchiveThread("i77u1", signal());
+    expect(server.mailbox("INBOX").messages.size).toBe(1);
+  });
+
+  it("answers done when the socket closes under the Message-ID search after the MOVE", async () => {
+    const server = serverFixture({
+      inboxCount: 2,
+      uidplus: false,
+      mailboxes: [{ path: "Archive", specialUse: "\\Archive" }],
+    });
+    const outcomes = await providerWith(server, dying("search")).archiveThreads(
+      batch(ids(2)),
+      signal(),
+    );
+    expect([...outcomes.values()].map((outcome) => outcome.status)).toEqual(["done", "done"]);
+  });
+
+  it("takes the flag back when the session throws under the MOVE", async () => {
+    const server = serverFixture({
+      inboxCount: 2,
+      mailboxes: [{ path: "Archive", specialUse: "\\Archive" }],
+    });
+    await expect(
+      providerWith(server, dying("messageMove")).archiveThreads(batch(ids(2)), signal()),
+    ).rejects.toMatchObject({ code: "mail_provider_unavailable" });
+    expect(server.commands.at(-1)).toEqual({
+      name: "store",
+      mailbox: "INBOX",
+      uids: [1, 2],
+      flags: ["\\Seen"],
+      add: false,
+    });
+    expect([...server.mailbox("INBOX").messages.values()].some((m) => m.flags.has("\\Seen"))).toBe(
+      false,
+    );
+  });
+
+  it("flags only the threads unread at the press, and says no flag went on one already seen", async () => {
+    const server = serverFixture({
+      inboxCount: 3,
+      mailboxes: [{ path: "Archive", specialUse: "\\Archive" }],
+    });
+    server.mailbox("INBOX").messages.get(3)!.flags.add("\\Seen");
+    const outcomes = await providerFor(server).provider.archiveThreads(
+      {
+        threads: [
+          { threadId: "i77u1", messages: null, read: true },
+          { threadId: "i77u2", messages: null, read: false },
+          { threadId: "i77u3", messages: null, read: true },
+        ],
+        cursor: null,
+      },
+      signal(),
+    );
+    expect(server.commands.find((command) => command.name === "store")).toEqual({
+      name: "store",
+      mailbox: "INBOX",
+      uid: 1,
+      flags: ["\\Seen"],
+      add: true,
+    });
+    expect([...outcomes].map(([threadId, outcome]) => [threadId, "markedRead" in outcome && outcome.markedRead])).toEqual([
+      ["i77u1", true],
+      ["i77u2", false],
+      ["i77u3", false],
+    ]);
+  });
+
+  it("answers stale a thread whose Inbox was recreated under another UIDVALIDITY, and moves nothing of it", async () => {
+    const server = serverFixture({
+      inboxCount: 2,
+      mailboxes: [{ path: "Archive", specialUse: "\\Archive" }],
+    });
+    const outcomes = await providerFor(server).provider.archiveThreads(
+      batch(["i77u1", "i78u2"]),
+      signal(),
+    );
+    expect(outcomes.get("i78u2")).toEqual({ status: "stale" });
+    expect(server.commands.find((command) => command.name === "move")).toEqual({
+      name: "move",
+      mailbox: "INBOX",
+      uid: 1,
+      destination: "Archive",
+    });
   });
 
   it("flags and moves fifteen threads on one session: one STORE, one MOVE", async () => {

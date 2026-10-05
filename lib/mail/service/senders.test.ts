@@ -2097,12 +2097,17 @@ describe("the new-senders screen", () => {
       archiveThreads: vi.fn(async () => ({
         apiVersion: 1 as const,
         results: [
-          ...ids.map((threadId) => ({
-            threadId,
-            status: "done" as const,
-            thread: raw.get(threadId)!,
-            markedRead: false,
-          })),
+          ...ids.map((threadId) =>
+            // A thread that got new mail is answered too, and marked alike.
+            threadId === "stranger"
+              ? { threadId, status: "renewed" as const, thread: raw.get(threadId)! }
+              : {
+                  threadId,
+                  status: "done" as const,
+                  thread: raw.get(threadId)!,
+                  markedRead: false,
+                },
+          ),
           { threadId: "gone", status: "stale" as const },
         ],
       })),
@@ -2118,7 +2123,16 @@ describe("the new-senders screen", () => {
       ),
     );
     const batch = await screened.archiveThreads(
-      { accountId: ACCOUNT_A, threadIds: [...ids, "gone"], archive: true },
+      {
+        accountId: ACCOUNT_A,
+        threads: [...ids, "gone"].map((threadId) => ({
+          threadId,
+          messageCount: 1,
+          lastMessageAt: null,
+          unread: true,
+        })),
+        archive: true,
+      },
       signal,
     );
 
@@ -2129,9 +2143,7 @@ describe("the new-senders screen", () => {
       [false, true],
       [false, false],
     ]);
-    expect(batch.results.slice(0, 3).map((item) => item.status === "done" && item.thread)).toEqual(
-      alone,
-    );
+    expect(batch.results.slice(0, 3).map((item) => "thread" in item && item.thread)).toEqual(alone);
     expect(batch.results[3]).toEqual({ threadId: "gone", status: "stale" });
   });
 

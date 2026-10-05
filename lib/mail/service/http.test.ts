@@ -49,6 +49,7 @@ describe("brain-mail HTTP-over-UDS shell", () => {
       maxHeaderBytes: 8 * 1024,
       maxHeaders: 32,
       maxBodyBytes: 16 * 1024,
+      maxThreadBatchBodyBytes: 24 * 1024,
       maxSendBodyBytes: 24 * 1024 * 1024,
       maxDraftBodyBytes: 24 * 1024 * 1024,
       headersTimeoutMs: 2_000,

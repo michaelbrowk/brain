@@ -2254,15 +2254,19 @@ export class MailSenderScreenedMessageService implements MailMessageService {
     signal: AbortSignal,
   ): Promise<MailThreadBatchResult> {
     const result = await this.inner.archiveThreads(input, signal);
-    const done = result.results.flatMap((item) => (item.status === "done" ? [item.thread] : []));
-    if (done.length === 0) return result;
-    const annotated = await this.screen.annotateItems(input.accountId, done);
+    const answered = result.results.flatMap((item) =>
+      item.status === "done" || item.status === "renewed" ? [item.thread] : [],
+    );
+    if (answered.length === 0) return result;
+    const annotated = await this.screen.annotateItems(input.accountId, answered);
     let next = 0;
     return Object.freeze({
       ...result,
       results: Object.freeze(
         result.results.map((item) =>
-          item.status === "done" ? Object.freeze({ ...item, thread: annotated[next++]! }) : item,
+          item.status === "done" || item.status === "renewed"
+            ? Object.freeze({ ...item, thread: annotated[next++]! })
+            : item,
         ),
       ),
     });

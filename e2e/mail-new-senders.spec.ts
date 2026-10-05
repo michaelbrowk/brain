@@ -756,3 +756,31 @@ test("@release @mobile two undos stack inside 390 and clear the tab bar and the 
   const [over] = await pillBoxes(page);
   expect(sendBox!.y + sendBox!.height).toBeLessThan(over.top);
 });
+
+/* TOAST_EXIT_SHOTS_DIR=<dir> shoots one pill leaving a stack of two, mid-exit:
+   the leaving pill should fade where it stood while the one under it stays.
+   A local review artifact, never committed. */
+const EXIT_SHOTS = process.env.TOAST_EXIT_SHOTS_DIR ?? "";
+
+async function shootStackExit(page: Page, device: string) {
+  await login(page);
+  await install(page);
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.goto("/mail");
+  const { done } = await blockThenDone(page);
+  await done.getByRole("button", { name: "Undo" }).click();
+  await page.waitForTimeout(20);
+  mkdirSync(EXIT_SHOTS, { recursive: true });
+  await page.screenshot({ path: path.join(EXIT_SHOTS, `toast-exit-stack-${device}-light.png`) });
+}
+
+test("a stacked pill's exit, mid-flight, on the desktop", async ({ page }) => {
+  test.skip(EXIT_SHOTS === "", "artifact capture — run with TOAST_EXIT_SHOTS_DIR=<dir>");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await shootStackExit(page, "desktop");
+});
+
+test("@mobile a stacked pill's exit, mid-flight, on a phone", async ({ page }) => {
+  test.skip(EXIT_SHOTS === "", "artifact capture — run with TOAST_EXIT_SHOTS_DIR=<dir>");
+  await shootStackExit(page, "phone");
+});

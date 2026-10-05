@@ -596,7 +596,7 @@ export function sendSectionDoneEarly(ticket: SectionDoneTicket): void {
 export function withdrawSectionDone(thread: MailThreadListItem): boolean {
   const key = unifiedThreadKey(thread);
   const held = store.overlay.get(key);
-  if (held === undefined || held.landedAt !== null) return false;
+  if (held === undefined) return false;
   let withdrawn = false;
   for (const ticket of store.waiting) {
     const at = ticket.run.threads.findIndex((item) => unifiedThreadKey(item) === key);

@@ -178,16 +178,73 @@ UIDVALIDITY, so the surface can say the undo is no longer available instead of
 offering a "Try again" that cannot work; the next sync rebuilds the list
 without the moved message.
 
-Each mutation opens its own bounded session, so a section Done over N threads
-is 2N sequential connect-and-authenticate cycles (archive, then mark read) and
-takes as long as those logins take. Nothing is sent until the press's nine
-second undo window has closed, and then the run goes out in the background,
-under no lock; a thread whose mutation answer shows new mail costs one or two
-more cycles to take the archive (and the read flag) back. The first refusal on
-an account stops the loop for that account instead of spending a login per
-thread on an answer that cannot change. It is correct and
-serialized, but it is the first thing to watch on a server that throttles
-logins; a pooled session is the fix if it bites.
+Each single mutation opens its own bounded session. A section Done does not:
+it is one batch per account (below), and on this adapter a batch is one
+session. The Inbox is opened once and its messages fetched once, `\Seen` is
+stored on the unseen ones in one `UID STORE`, and all of them leave in one
+`UID MOVE` to the archive the single archive would use, found, created and
+refused by the same rules (a server with no archive and a spent or refused
+CREATE answers the whole batch 409 before anything is stored). The flag goes
+first because the MOVE changes every UID; one IMAP message is one thread, so
+no thread can get new mail between the two. A MOVE the server refuses, or a
+session that dies under it, takes the flag back as well as it can, so the
+refusal leaves the mail where it was, unread. With UIDPLUS, a message
+`COPYUID` does not name did not move and answers `stale`; without it each
+moved message is looked for by Message-ID in the same session, as a single
+archive does, and one that cannot be found is reported where it went with no
+handle for an undo. Only threads the adapter has not moved ride the batch;
+one it relocated earlier goes the per-thread way in the same request. Fifteen
+threads were thirty logins; they are one. Nothing is sent until the press's
+nine second undo window has closed, and then the run goes out in the
+background, under no lock; a thread whose answer shows new mail costs one or
+two more sessions to take the archive (and the read flag) back.
+
+**Batch archive.** `POST /v1/threads/batch` with `{ accountId, threadIds,
+archive: true, read?: true }`, one to fifty distinct ids, is a section Done
+for one account; archive-with-optional-read is the only shape it has, and any
+other body is `400 mail_request_invalid`. It takes the account's mutation gate
+once for the whole batch, uses the provider's own batch where it has one,
+takes what that leaves (a thread the cache cannot name every message of, one
+the IMAP adapter has moved) through the per-thread path inside the same
+request, and writes one `mutation` change record at the end. Per thread the
+order is archive, read back, and the read flag only where the read back shows
+no mail the cache did not hold, then a second read back. The answer is
+`{ apiVersion: 1, results: [{ threadId, status: "done", thread, markedRead } |
+{ threadId, status: "stale" } | { threadId, status: "failed", errorCode }] }`
+in the order the ids were sent, `200` whenever the request itself was valid.
+`errorCode` is the code a single mutation's error body would carry
+(`mail_sync_unavailable`, `mail_sync_rate_limited`,
+`mail_account_reauth_required`, `mail_thread_mutation_unsupported`), and
+`request_deadline_exceeded` for a thread the provider deadline (ten seconds)
+left unreached: the batch stops starting threads there and reports the rest,
+so a batch cut short never comes back as a 5xx with the half that landed
+unsaid. An account that cannot archive at all answers the existing `409
+mail_thread_mutation_unsupported`, and only before anything moved. The
+new-senders screen annotates every `done` thread as it annotates one archived
+alone. Brain proxies the same shape at `POST /api/mail/threads/batch` (same
+origin, JSON, the 16 KiB account-request body bound, which fifty of the
+longest ids fit inside), and the Done queue sends one such request per account
+and fifty threads, with `keepalive`. The MCP tool `update_mail_thread` stays a
+single-thread mutation.
+
+On Gmail the batch is a fixed number of calls whatever its size. One
+`users.messages.batchModify` takes INBOX off every message id the cache holds
+for those threads (at most a thousand ids a call, never splitting a thread),
+and one read of `users.history.list` from the cache's cursor, asking only for
+messages added or deleted, says which threads got a message the cache did not
+name or lost one; only those are read back with `threads.get`. With `read`, a
+second batchModify takes UNREAD off the unread cached messages of the threads
+that got nothing new, and a second history read catches a reply that landed in
+between. Naming messages is what makes it safe: a reply that arrives after
+the cache was read is not among the ids, so it stays in the Inbox and unread.
+The cache then applies the confirmed change to those rows itself
+(`applyBatchArchive`) instead of a read per thread, and the next sync pass
+reads the threads as Gmail has them. Fifteen threads cost four calls where the
+per-thread path cost sixty. A cache with no cursor, a thread whose rows do not
+add up to its count, or a first batchModify Gmail refuses (an id deleted since)
+hands those threads to the per-thread path; a change log that is gone or
+longer than four pages is replaced by a `threads.get` per thread, and one that
+cannot be read at all leaves the archive standing without the read flag.
 
 `mailboxes` stays Inbox-only for custom-domain accounts. The mutations move
 mail out of the Inbox; giving those folders somewhere to be browsed is a

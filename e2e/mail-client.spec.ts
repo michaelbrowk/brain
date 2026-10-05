@@ -1638,13 +1638,13 @@ test("Mail unified inbox sections two accounts, and Done clears People behind an
   });
   await page.route("**/api/mail/threads/batch", (route) => {
     const body = route.request().postDataJSON() as {
-      readonly threadIds: readonly string[];
+      readonly threads: readonly { readonly threadId: string }[];
       readonly read?: true;
     };
     patched.push({ url: new URL(route.request().url()).pathname, body });
     return fulfill(route, {
       apiVersion: 1,
-      results: body.threadIds.map((threadId) => ({
+      results: body.threads.map(({ threadId }) => ({
         threadId,
         status: "done",
         thread: {
@@ -1725,13 +1725,23 @@ test("Mail unified inbox sections two accounts, and Done clears People behind an
     .click();
   await expect(pill).toContainText("People cleared");
   await expect.poll(() => patched.length, { timeout: 15_000 }).toBe(2);
-  for (const [threadId, accountId] of [
-    ["unified-a", account.accountId],
-    ["unified-b", secondAccount.accountId],
-  ] as const) {
+  // Each thread travels with what the press saw of it.
+  for (const pressed of [threadA, threadB]) {
     expect(patched).toContainEqual({
       url: "/api/mail/threads/batch",
-      body: { accountId, threadIds: [threadId], archive: true, read: true },
+      body: {
+        accountId: pressed.accountId,
+        threads: [
+          {
+            threadId: pressed.threadId,
+            messageCount: pressed.messageCount,
+            lastMessageAt: pressed.lastMessageAt,
+            unread: pressed.unread,
+          },
+        ],
+        archive: true,
+        read: true,
+      },
     });
   }
   await expect(list.locator('section[aria-label="People"]')).toHaveCount(0);
@@ -1819,11 +1829,14 @@ test("@release @mobile the undo and the refusal stack clear of the tab bar at 39
   });
   const batches: Array<readonly string[]> = [];
   await page.route("**/api/mail/threads/batch", (route) => {
-    const body = route.request().postDataJSON() as { readonly threadIds: readonly string[] };
-    batches.push(body.threadIds);
+    const body = route.request().postDataJSON() as {
+      readonly threads: readonly { readonly threadId: string }[];
+    };
+    const threadIds = body.threads.map((press) => press.threadId);
+    batches.push(threadIds);
     return fulfill(route, {
       apiVersion: 1,
-      results: body.threadIds.map((threadId) => ({
+      results: threadIds.map((threadId) => ({
         threadId,
         status: "done",
         thread: { ...people.find((candidate) => candidate.threadId === threadId), unread: false },
@@ -2032,15 +2045,17 @@ test("@release Done counts its window from the press, and its archives go out be
     return fulfill(route, { apiVersion: 1, thread: { ...target, unread: false } });
   });
   await page.route("**/api/mail/threads/batch", async (route) => {
-    const body = route.request().postDataJSON() as { readonly threadIds: readonly string[] };
+    const body = route.request().postDataJSON() as {
+      readonly threads: readonly { readonly threadId: string }[];
+    };
     started += 1;
     // The provider's round trips for the whole batch. The run is the one
     // request now, and it is still out while the reader goes on.
     await new Promise((resolve) => setTimeout(resolve, 8_000));
-    patched += body.threadIds.length;
+    patched += body.threads.length;
     return fulfill(route, {
       apiVersion: 1,
-      results: body.threadIds.map((threadId) => ({
+      results: body.threads.map(({ threadId }) => ({
         threadId,
         status: "done",
         thread: all.find((candidate) => candidate.threadId === threadId),
@@ -2168,15 +2183,16 @@ test("@release a mutation nobody answers ends at the client's clock, and its row
   await page.route("**/api/mail/threads/batch", (route) => {
     const body = route.request().postDataJSON() as {
       readonly accountId: string;
-      readonly threadIds: readonly string[];
+      readonly threads: readonly { readonly threadId: string }[];
     };
-    patched.push(body.threadIds);
+    const threadIds = body.threads.map((press) => press.threadId);
+    patched.push(threadIds);
     // The first account's batch is never answered — not refused, not slow:
     // gone.
     if (body.accountId === account.accountId) return undefined;
     return fulfill(route, {
       apiVersion: 1,
-      results: body.threadIds.map((threadId) => ({
+      results: threadIds.map((threadId) => ({
         threadId,
         status: "done",
         thread: all.find((candidate) => candidate.threadId === threadId),

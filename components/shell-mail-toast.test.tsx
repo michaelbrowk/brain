@@ -256,6 +256,46 @@ describe("shell toast channels, as mail uses them", () => {
     const undoOf = (title: string) =>
       pillOf(title)?.querySelector<HTMLButtonElement>("button") ?? null;
 
+    it("a second Done stands on top of a Block pressed between them, and ⌘Z reaches it", async () => {
+      const firstExpired = vi.fn();
+      const secondUndo = vi.fn();
+      const blockUndo = vi.fn(() => true as const);
+      await say("Newsletters cleared", doneReport(() => {}, firstExpired));
+      await say("Blocked Lena Okafor", {
+        ...blockReport(() => Promise.resolve()),
+        onAction: blockUndo,
+      });
+      // What mail says on a second Done: the first's sentence again under the
+      // one id, without its Undo, then the second Done with one.
+      await say("Newsletters archived", { id: "mail-section-done", icon: "check-linear" });
+      await say("People cleared", doneReport(secondUndo));
+
+      expect(pills()).toHaveLength(2);
+      expect(pills()[0]).toContain("People cleared");
+      expect(pills()[1]).toContain("Blocked Lena Okafor");
+      expect(firstExpired).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true }));
+      });
+      expect(secondUndo).toHaveBeenCalledTimes(1);
+      expect(blockUndo).not.toHaveBeenCalled();
+    });
+
+    it("a second Done draws a ring of its own from its press", async () => {
+      await say("Newsletters cleared", doneReport(() => {}));
+      const firstRing = pillOf("Newsletters cleared")?.querySelector("[data-toast-ring]");
+      expect(firstRing).not.toBeNull();
+      await act(async () => {
+        vi.advanceTimersByTime(4_000);
+      });
+      await say("People cleared", doneReport(() => {}));
+      const secondRing = pillOf("People cleared")?.querySelector("[data-toast-ring]");
+      expect(secondRing).not.toBeNull();
+      // A new element: its drain animation starts at the press instead of
+      // carrying on from where the first Done's had got to.
+      expect(secondRing).not.toBe(firstRing);
+    });
+
     it("shows Done at once, on top of the Block, each with its own ring", async () => {
       await say("Blocked Lena Okafor", blockReport(() => Promise.resolve()));
       const blockRing = pillOf("Blocked Lena Okafor")?.querySelector("[data-toast-ring]");

@@ -35,7 +35,7 @@ export type ShellToast = { readonly title: string } & ToastOptions;
 
 /**
  * One standing pill of that snackbar, as the overlay draws it. `key` is the
- * pill's place in the column, kept by a message that takes it under the same
+ * pill's place in the column, kept by a report that takes it under the same
  * id; `pending` is its own action begun and not yet settled, which puts only
  * this pill's button out of reach.
  */
@@ -81,12 +81,15 @@ export type ToastAdmission = {
  * is already up, and both stay live, each on its own window, up to
  * `TOAST_UNDO_LIMIT` of them.
  *
- * A message wearing the SAME id as a standing pill takes that pill, in its
- * place: that is the same sentence said again, not a second one owed to the
- * reader, and it carries its own way back with it. Mail's section Done wears
- * one id for every press, which is how a second Done takes the pill from the
- * first. An id already waiting is corrected in place for the same reason, so
- * a report and its correction never both stand in the queue.
+ * A message wearing the SAME id as a standing pill takes that pill down. A
+ * REPORT of that id takes its place, in the column, because it is the same
+ * sentence said again (a correction, or an undo that has gone out saying so).
+ * An UNDO of that id is a new gesture with a fresh window: Mail's section Done
+ * wears one id for every press, and a second Done is what the reader just
+ * did, so it stands as the newest pill, on top and first for ⌘Z, with a ring
+ * of its own rather than the first pill's place and elapsed ring. An id
+ * already waiting is corrected in place, so a report and its correction never
+ * both stand in the queue.
  *
  * A REPORT, a message with nothing to reach for, still waits while any undo
  * stands, and replaces a report: nobody needs two reports at once, and a
@@ -103,13 +106,21 @@ export function toastAdmit(
   next: ShellToast,
 ): ToastAdmission {
   const same = next.id != null ? standing.findIndex((entry) => entry.id === next.id) : -1;
-  if (same >= 0) {
+  if (same >= 0 && !next.onAction) {
     return {
       present: standing.map((entry, index) => (index === same ? next : entry)),
       waiting,
       left: [standing[same]],
       replaced: standing[same],
     };
+  }
+  if (same >= 0) {
+    const admitted = toastAdmit(
+      standing.filter((_, index) => index !== same),
+      waiting,
+      next,
+    );
+    return { ...admitted, left: [standing[same], ...admitted.left], replaced: null };
   }
   if (!standing.some((entry) => entry.onAction)) {
     return { present: [next], waiting, left: standing, replaced: standing.at(-1) ?? null };

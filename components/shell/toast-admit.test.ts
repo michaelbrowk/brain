@@ -46,18 +46,38 @@ describe("toastAdmit", () => {
     expect(admitted.waiting).toEqual([]);
   });
 
-  it("lets a message of the same id correct its own pill in place, whatever stands beside it", () => {
+  it("lets a report of the same id correct its own pill in place, whatever stands beside it", () => {
     const blocked = undo("Blocked Lena Okafor", "mail-sender:1");
-    const correction: ShellToast = {
-      title: "Notifications partly cleared",
-      actionLabel: "Undo",
-      onAction: () => {},
-      id: "done:1",
-    };
+    const correction: ShellToast = { title: "Notifications partly cleared", id: "done:1" };
     const admitted = toastAdmit([undoable, blocked], [], correction);
     expect(admitted.present).toEqual([correction, blocked]);
     expect(admitted.left).toEqual([undoable]);
     expect(admitted.replaced).toBe(undoable);
+  });
+
+  it("takes a pill of the same id down and stands a new undo on top, in a place of its own", () => {
+    // A second Done is a second gesture: it is what ⌘Z should reach and what
+    // the reader is looking for at the head of the column, and its window is
+    // a fresh one, so it does not inherit the first pill's place or ring.
+    const blocked = undo("Blocked Lena Okafor", "mail-sender:1");
+    const second: ShellToast = {
+      title: "Newsletters cleared",
+      actionLabel: "Undo",
+      onAction: () => {},
+      id: "done:1",
+    };
+    const admitted = toastAdmit([undoable, blocked], [], second);
+    expect(admitted.present).toEqual([blocked, second]);
+    expect(admitted.left).toEqual([undoable]);
+    expect(admitted.replaced).toBeNull();
+  });
+
+  it("takes the only pill of the same id down without handing its place on", () => {
+    const second: ShellToast = { ...undoable, title: "Newsletters cleared" };
+    const admitted = toastAdmit([undoable], [], second);
+    expect(admitted.present).toEqual([second]);
+    expect(admitted.left).toEqual([undoable]);
+    expect(admitted.replaced).toBeNull();
   });
 
   it(`stands at most ${TOAST_UNDO_LIMIT} undos, and a fourth commits the oldest`, () => {

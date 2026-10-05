@@ -218,7 +218,7 @@ const REDEPLOY_TOAST_MS = 10_000;
 
 /** One standing pill's own window and the state of its own action. */
 type ToastClock = {
-  /** Its place in the column, kept by a message that takes it by id. */
+  /** Its place in the column, kept by a report that takes it by id. */
   key: number;
   timer: ReturnType<typeof setTimeout> | null;
   endsAt: number;

@@ -213,7 +213,10 @@ export function Snackbar({
  * `popLayout` takes a leaving pill out of the flow as its exit starts, so the
  * pills that stay, in this slot and in the rows above it, settle into its
  * place on the toast spring in the same beat instead of waiting for the exit
- * to finish and then jumping.
+ * to finish and then jumping. It pins the leaving pill by its BOTTOM
+ * (`anchorY`): the column is fixed to the foot of the window and grows upward,
+ * so a pill pinned by its top would drift down the screen as the pills under
+ * it close up, while one pinned by its bottom fades where it stood.
  *
  * A slot of several is not `aria-atomic`: a pill joining the column is read on
  * its own, not the whole column again with it.
@@ -234,7 +237,9 @@ export function SnackbarSlot({
       aria-atomic={atomic}
       className="brain-toast-slot"
     >
-      <AnimatePresence mode="popLayout">{children}</AnimatePresence>
+      <AnimatePresence mode="popLayout" anchorY="bottom">
+        {children}
+      </AnimatePresence>
     </div>
   );
 }

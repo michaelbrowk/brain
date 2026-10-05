@@ -773,10 +773,10 @@ export function Shell({
    * Puts one message on screen (or clears the pill) and starts its window.
    *
    * `durationMs: null` starts NO window. The pill stands until a message
-   * wearing its id replaces it or its action is spent — which is what an
-   * action whose end is not yet known needs, since the alternative is a
-   * guessed duration that either takes the way back away mid-work or draws a
-   * countdown over a deadline nobody has.
+   * wearing its id replaces it or its action is spent — which is what a
+   * sentence said before its answer has landed needs (a task's "Completed"),
+   * since the alternative is a guessed duration that either leaves before the
+   * answer does or draws a countdown over a deadline nobody has.
    */
   const presentToast = useCallback(
     (next: ShellToast | null) => {
@@ -810,19 +810,20 @@ export function Shell({
    * notice one and reach it.
    *
    * A message never overwrites a standing UNDO. Replacing the pill used to
-   * throw the way back away silently — press Done on Notifications, then on
-   * Newsletters inside the window, and the first Undo was gone with nothing
-   * said — and the mail lock makes that the likely order rather than a rare
-   * one. So an action that is still live holds the pill, and what arrives
-   * meanwhile waits its turn. The one thing that may take the pill from it is
-   * a message wearing the SAME id: that is the same sentence corrected, not a
-   * second one, and it carries its own way back with it.
+   * throw the way back away silently — block a sender, then discard a draft
+   * inside the window, and the first Undo was gone with nothing said. So an
+   * action that is still live holds the pill, and what arrives meanwhile
+   * waits its turn. The one thing that may take the pill from it is a message
+   * wearing the SAME id: that is the same sentence said again, not a second
+   * one, and it carries its own way back with it. Mail's section Done leans
+   * on exactly that: every Done wears one id, so a second Done takes the pill
+   * from the first, and the first hears `onExpire` and sends what it held.
    *
    * The exception is `urgent`. Waiting is right for a REPORT and wrong for a
-   * REFUSAL — press Done a second time inside the window and the answer has to
-   * arrive with the press, not ten seconds later when the first undo's window
-   * closes and the sentence is no longer even true. So a refusal takes its own
-   * pill above the standing one and never touches the queue.
+   * REFUSAL — an Accept the service does not take has to say so with the
+   * press, not nine seconds later when a standing undo's window closes and
+   * the sentence is no longer even true. So a refusal takes its own pill
+   * above the standing one and never touches the queue.
    */
   const showToast = useCallback((title: string, options?: ToastOptions) => {
     if (options?.urgent) {
@@ -845,9 +846,10 @@ export function Shell({
   /**
    * Runs the toast's own action, then takes the pill down so the undo cannot
    * be pressed twice while the restore is still running — in that order,
-   * because an action that REFUSES (`false`: the mail lock is held by
-   * something else) must not spend the way back. A refused press leaves the
-   * message and its remaining window exactly where they were.
+   * because an action that REFUSES (`false`: another mail action holds the
+   * lock, or there is nothing left to bring back) must not spend the way
+   * back. A refused press leaves the message and its remaining window exactly
+   * where they were.
    */
   const runToastAction = useCallback(
     (action: () => boolean | void | Promise<unknown>) => {
@@ -872,9 +874,10 @@ export function Shell({
         return;
       }
       toastSpentRef.current = false;
-      /* The action has begun but cannot finish yet — an undo waiting for the
-         loop it stops to drop the mail lock. The pill stands, its button out
-         of reach, until the promise settles; only THEN is it spent. The
+      /* The action has begun but cannot finish yet — an undo whose own
+         request is still out (a Block taken back, a letter archived again).
+         The pill stands, its button out of reach, until the promise settles;
+         only THEN is it spent. The
          standing message is remembered so a pill that was replaced meanwhile
          (its own window ran out, or a same-id correction took it) is not the
          one taken down. */

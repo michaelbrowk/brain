@@ -278,13 +278,13 @@ export function appendStreamPage(
 }
 
 /**
- * Take threads out of the streams that hold them, in one pass.
+ * Take threads out of the streams that hold them, in one pass, and hand the
+ * same streams back when none of them was there.
  *
- * Done empties a section at the gesture, before the first request goes out, so
- * the removal is ONE commit for the same reason the undo is: pressing Done is
- * one act, and a group that drains row by row over half a minute is not what
- * the reader did. `restoreStreamItems` is the exact inverse, and it is what
- * puts back whatever the loop then fails to move.
+ * It is how an archive becomes true of the column without a read: the letter
+ * an Undo of Move to Inbox sends back out, and the threads a section's Done
+ * archived, swept in ONE commit as their hold on the overlay ends
+ * (`mail-section-done.ts`). `restoreStreamItems` is the exact inverse.
  */
 export function removeStreamItems(
   streams: readonly UnifiedStream[],
@@ -307,8 +307,8 @@ export function removeStreamItems(
 /**
  * Put archived threads back into the streams they were removed from.
  *
- * Undoing a Done has to restore the list, not only the mailbox. The rows left
- * one at a time, so they go back into their own account's stream, in
+ * Undoing a Block has to restore the list, not only the mailbox. The rows go
+ * back into their own account's stream, in
  * `compareUnified` order — sorted insertion rather than an append, because the
  * merge reads a stream as a sorted prefix and takes its horizon from the last
  * item, and an out-of-order tail would move the safe cut and withhold rows

@@ -323,7 +323,8 @@ export interface MailSurfaceClient {
   updateThread(
     input: MailThreadMutationInput & { readonly threadId: string },
     signal?: AbortSignal,
-  ): Promise<void>;
+    options?: { readonly keepalive?: boolean },
+  ): Promise<MailThreadListItem>;
   send(input: MailSendInput, signal?: AbortSignal): Promise<MailSendResult>;
   createDraft(
     input: MailDraftCreateInput,
@@ -547,7 +548,7 @@ export const defaultMailSurfaceClient: MailSurfaceClient = {
     readSyncResult(payload);
   },
 
-  async updateThread(input, signal) {
+  async updateThread(input, signal, options) {
     const { threadId, ...mutation } = input;
     const payload = await requestJsonWithin(
       `/api/mail/threads/${encodeURIComponent(threadId)}`,
@@ -559,10 +560,13 @@ export const defaultMailSurfaceClient: MailSurfaceClient = {
         },
         body: JSON.stringify(mutation),
         signal,
+        // What a section's Done has not sent yet goes out at pagehide like a
+        // parked draft delete: allowed to outlive the tab.
+        keepalive: options?.keepalive,
       },
       MAIL_MUTATION_TIMEOUT_MS,
     );
-    readThreadMutationResult(payload);
+    return readThreadMutationResult(payload);
   },
 
   async send(input, signal) {
@@ -1651,14 +1655,16 @@ function readSyncResult(value: unknown): void {
   }
 }
 
-function readThreadMutationResult(value: unknown): void {
+/** The service reads the thread again once the mutation is applied: what
+ *  comes back is the provider's own account of the thread as it now stands. */
+function readThreadMutationResult(value: unknown): MailThreadListItem {
   if (
     !isExactRecord(value, ["apiVersion", "thread"]) ||
     value.apiVersion !== 1
   ) {
     throw new Error("invalid mail thread mutation");
   }
-  readThreadListItem(value.thread);
+  return readThreadListItem(value.thread);
 }
 
 function readDraftCreateResponse(

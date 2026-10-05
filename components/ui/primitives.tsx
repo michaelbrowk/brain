@@ -84,16 +84,17 @@ export type ToastOptions = {
    *
    * Returning a promise spends it LATER: the pill stands, its button out of
    * reach and wearing `pendingLabel`, until the promise settles. That is the
-   * shape of an undo pressed while the work it reverses is still going out —
-   * the reversal cannot begin before the loop drops its lock, and a pill taken
-   * down at the press looked spent over a run that had not been stopped.
+   * shape of an undo that has a request of its own to make — a Block taken
+   * back, a letter archived again — where a pill taken down at the press
+   * would let a second press, or ⌘Z, start the same reversal twice.
    */
   readonly onAction?: () => boolean | void | Promise<unknown>;
   /**
    * The pill left WITHOUT its action being spent: its window ran out, or a
    * message wearing its `id` took its place. A caller that parked real work
    * behind the way back (the compose sheet's Discard holds the provider
-   * delete behind its Undo) does that work here, and only here — the shell
+   * delete behind its Undo, a section's Done holds its archives) does that
+   * work here, and only here — the shell
    * owns the window, hover included, so the shell is the one that knows when
    * the way back is gone. Never called after `onAction` spent the pill.
    */
@@ -106,12 +107,14 @@ export type ToastOptions = {
    * its action is spent.
    *
    * `null` is not "a very long time". A caller whose work has no known end —
-   * a loop of sequential requests, say — cannot name a duration without
-   * guessing, and a guessed one is worse than none: too short takes the way
-   * back away while the thing it reverses is still happening, too long draws
-   * the ring below over a deadline that is not real. So the caller says it
-   * has no deadline yet, and says the sentence again with a real window when
-   * the work lands.
+   * a request not yet answered, say — cannot name a duration without
+   * guessing, and a guessed one is worse than none: too short takes the pill
+   * away while the thing it speaks of is still happening, too long draws the
+   * ring below over a deadline that is not real. So the caller says it has no
+   * deadline yet, and says the sentence again with a real window when the
+   * work lands. (A section's Done was the first to stand this way and no
+   * longer does: its requests wait behind the window, so the window is real
+   * from the press.)
    */
   readonly durationMs?: number | null;
   /**
@@ -126,8 +129,8 @@ export type ToastOptions = {
    * A REFUSAL, not a report. It answers a gesture the reader just made, so it
    * speaks at once or not at all: it takes its own pill above whatever is
    * standing, never the pill itself, and never queues — a sentence that
-   * surfaced ten seconds later would be detached from the gesture and by then
-   * untrue. Nothing else on the options travels with it: a refusal is one
+   * surfaced nine seconds later would be detached from the gesture and by
+   * then untrue. Nothing else on the options travels with it: a refusal is one
    * sentence and there is nothing to undo.
    */
   readonly urgent?: boolean;

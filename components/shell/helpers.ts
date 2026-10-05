@@ -37,17 +37,17 @@ export type ShellToast = { readonly title: string } & ToastOptions;
  * Who gets the pill when a message arrives.
  *
  * A standing UNDO is not overwritten. Replacing it used to throw the way back
- * away with nothing said — press Done on Notifications, then on Newsletters
- * inside the window, and the first Undo was gone — and because the mail lock
- * refuses a second bulk action until the first has finished, that order is the
- * likely one rather than a rare one. So a live action holds the pill and what
- * arrives meanwhile waits its turn.
+ * away with nothing said — block a sender, then discard a draft inside the
+ * window, and the first Undo was gone. So a live action holds the pill and
+ * what arrives meanwhile waits its turn.
  *
  * The one message that may take the pill from it wears the SAME id: that is
- * the same sentence corrected, not a second one owed to the reader, and it
+ * the same sentence said again, not a second one owed to the reader, and it
  * carries its own way back with it. An id already waiting is corrected in
  * place for the same reason, so a report and its correction never both stand
- * in the queue.
+ * in the queue. Mail's section Done wears one id for every press, which is
+ * how a second Done takes the pill from the first instead of waiting out its
+ * window.
  *
  * `present: null` means "leave what is showing alone".
  *

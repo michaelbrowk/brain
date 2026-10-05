@@ -12,6 +12,7 @@ import {
   UNIFIED_FANOUT_LIMIT,
 } from "./mail-surface";
 import { MAIL_CHANGED_EVENT, type BrainMailEvent } from "@/lib/mail/mail-events";
+import { resetSectionDone } from "./mail-section-done";
 import { SMART_UNDO_MS } from "./shell/helpers";
 import type { ToastOptions } from "./ui/primitives";
 
@@ -633,6 +634,10 @@ describe("MailSurface", () => {
     try {
       await act(async () => root.unmount());
     } finally {
+      // A section's Done keeps its holds and its queue for the page, which
+      // in this file is every case: one case's holds would hide the next
+      // case's rows.
+      resetSectionDone();
       vi.clearAllTimers();
       vi.useRealTimers();
       host.remove();
@@ -9581,124 +9586,147 @@ describe("MailSurface", () => {
         }),
       );
 
-      it("asks once a Done that refused the end lets go", async () => {
-        // Done empties Newsletters, the column gets short, and its end comes
-        // into view while Done's requests are still going out. Load more is
-        // refused under their lock, and the end is still in view after.
+      /** Two unread letters at the head of a deep account. Opening one sends
+       *  its read flag, which is a mail action that takes the lock: the one
+       *  left that does, now that a section's Done holds none. */
+      const unreadTop = unifiedThread({
+        accountId: accountA.accountId,
+        threadId: "A unread top",
+        lastMessageAt: 1_700_001_000_000,
+        unread: true,
+      });
+      const unreadNext = unifiedThread({
+        accountId: accountA.accountId,
+        threadId: "A unread next",
+        lastMessageAt: 1_700_000_999_500,
+        unread: true,
+      });
+      const openedLetter = () =>
+        vi.fn().mockImplementation(({ threadId }) => {
+          const opened = threadId === unreadNext.threadId ? unreadNext : unreadTop;
+          return Promise.resolve({
+            ...detail,
+            thread: opened,
+            messages: detail.messages.map((message) => ({
+              ...message,
+              threadId: opened.threadId,
+            })),
+          });
+        });
+
+      it("asks once a mail action that refused the end lets go", async () => {
+        // The end comes into view while an opened letter's read flag is
+        // still going out. Load more is refused under its lock, and the end
+        // is still in view after.
         const view = { inView: false };
         sentinelInView(view);
         const listThreads = vi.fn().mockImplementation(({ accountId, cursor }) => {
           if (accountId === accountB.accountId) return Promise.resolve(pageOf([]));
           if (!cursor) {
             return Promise.resolve(
-              pageOf([...newsletters, ...deepRows.slice(0, 45)], "p2"),
+              pageOf([unreadTop, ...deepRows.slice(0, 49)], "p2"),
             );
           }
-          return Promise.resolve(pageOf(deepRows.slice(45, 95)));
+          return Promise.resolve(pageOf(deepRows.slice(49, 99)));
         });
-        const archive = deferred<void>();
-        const updateThread = vi.fn().mockImplementation(() => archive.promise);
+        const readTop = deferred<void>();
+        const updateThread = vi.fn().mockImplementation(() => readTop.promise);
         const client = makeClient({
           loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
           listThreads,
           updateThread,
+          readThread: openedLetter(),
         });
-        await act(async () =>
-          root.render(
-            <MailSurface client={client} onOpenSettings={() => {}} onToast={vi.fn()} />,
-          ),
+        const noSettings = () => {};
+        const surface = () => (
+          <MailSurface client={client} onOpenSettings={noSettings} />
         );
+        await act(async () => root.render(surface()));
         await settle();
         expect(cursorsAsked(listThreads)).toEqual([]);
 
+        await click(findButton("A unread top"));
+        await until(() => updateThread.mock.calls.length === 1, "the letter is read");
+        // The column draws again with its end in view and the lock held.
         view.inView = true;
-        await click(findButton("Done — archive all 5 in Newsletters"));
+        await act(async () => root.render(surface()));
+        await settle();
         expect(cursorsAsked(listThreads)).toEqual([]);
-        await act(async () => archive.resolve());
-        await until(
-          () => updateThread.mock.calls.length === 10,
-          "Done archives and reads all five",
-        );
 
+        await act(async () => readTop.resolve());
         await until(() => cursorsAsked(listThreads).length === 1, "the end asks p2");
       });
 
       it("serves a refused Load more once, not after every later mail action", async () => {
-        // Done refuses the end while it runs and the end is asked for once it
-        // lets go. Opening a letter later reads it, which is a mail action of
-        // its own: nothing was refused under that one, so it asks for nothing.
+        // One read flag refuses the end while it is out and the end is asked
+        // for once it lets go. Opening another letter later reads it, which
+        // is a mail action of its own: nothing was refused under that one, so
+        // it asks for nothing.
         const view = { inView: false };
         sentinelInView(view);
-        const top = unifiedThread({
-          accountId: accountA.accountId,
-          threadId: "A unread top",
-          lastMessageAt: 1_700_001_000_000,
-          unread: true,
-        });
         const pageThree = deferred<MailThreadPage>();
         const listThreads = vi.fn().mockImplementation(({ accountId, cursor }) => {
           if (accountId === accountB.accountId) return Promise.resolve(pageOf([]));
           if (!cursor) {
             return Promise.resolve(
-              pageOf([top, ...newsletters, ...deepRows.slice(0, 44)], "p2"),
+              pageOf([unreadTop, unreadNext, ...deepRows.slice(0, 48)], "p2"),
             );
           }
           if (cursor === "p2") {
-            return Promise.resolve(pageOf(deepRows.slice(44, 94), "p3"));
+            return Promise.resolve(pageOf(deepRows.slice(48, 98), "p3"));
           }
           return pageThree.promise;
         });
-        const archive = deferred<void>();
         const readTop = deferred<void>();
-        const updateThread = vi.fn().mockImplementation((input) => {
-          if ("archive" in input) return archive.promise;
-          return input.threadId === top.threadId ? readTop.promise : Promise.resolve();
-        });
+        const readNext = deferred<void>();
+        const updateThread = vi.fn().mockImplementation((input) =>
+          input.threadId === unreadTop.threadId ? readTop.promise : readNext.promise,
+        );
         const client = makeClient({
           loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
           listThreads,
           updateThread,
-          readThread: vi.fn().mockResolvedValue({
-            ...detail,
-            thread: top,
-            messages: detail.messages.map((message) => ({
-              ...message,
-              threadId: top.threadId,
-            })),
-          }),
+          readThread: openedLetter(),
         });
-        await act(async () =>
-          root.render(
-            <MailSurface client={client} onOpenSettings={() => {}} onToast={vi.fn()} />,
-          ),
+        const noSettings = () => {};
+        const surface = () => (
+          <MailSurface client={client} onOpenSettings={noSettings} />
         );
+        await act(async () => root.render(surface()));
         await settle();
 
+        await click(findButton("A unread top"));
+        await until(() => updateThread.mock.calls.length === 1, "the letter is read");
         view.inView = true;
-        await click(findButton("Done — archive all 5 in Newsletters"));
+        await act(async () => root.render(surface()));
+        await settle();
         expect(cursorsAsked(listThreads)).toEqual([]);
-        await act(async () => archive.resolve());
+        await act(async () => readTop.resolve());
         await until(() => cursorsAsked(listThreads).length === 2, "the end pages on");
         expect(cursorsAsked(listThreads)).toEqual(["p2", "p3"]);
 
-        // Page three is still out. Reading the letter is the next action, and
-        // it holds the lock across a render of its own.
-        await click(findButton("A unread top"));
+        // Page three is still out. Reading the other letter is the next
+        // action, and it holds the lock across a render of its own.
+        await click(findButton("A unread next"));
         await until(
           () =>
             updateThread.mock.calls.some(
-              ([input]) => input.threadId === top.threadId && input.read === true,
+              ([input]) =>
+                input.threadId === unreadNext.threadId && input.read === true,
             ),
-          "the letter is read",
+          "the other letter is read",
         );
         await settle();
-        await act(async () => readTop.resolve());
+        await act(async () => readNext.resolve());
         await settle();
         await settle();
         expect(cursorsAsked(listThreads)).toEqual(["p2", "p3"]);
       });
 
-      it("asks again once a Done that dropped its page lets go", async () => {
+      it("serves the end at the press when Done shortens the column, with nothing refused", async () => {
+        // Done used to take the lock, so the end it brought into view was
+        // refused until the whole run let go. The press holds no lock now:
+        // it sends nothing and hides the rows.
         sentinelInView();
         const pageTwo = deferred<MailThreadPage>();
         let pageTwoReads = 0;
@@ -9724,8 +9752,7 @@ describe("MailSurface", () => {
             ? pageTwo.promise
             : Promise.resolve(pageOf(deepRows.slice(45, 95)));
         });
-        const archive = deferred<void>();
-        const updateThread = vi.fn().mockImplementation(() => archive.promise);
+        const updateThread = vi.fn().mockResolvedValue(undefined);
         const client = makeClient({
           loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
           listThreads,
@@ -9738,17 +9765,22 @@ describe("MailSurface", () => {
         );
         await until(() => cursorsAsked(listThreads).length === 1, "the end asks p2");
 
+        // The column got five rows shorter with its end in view, so the end
+        // asks again, and is answered: no lock stands in its way. The page
+        // that was already out is the older ask and is let go, as any Load
+        // more a newer one overtakes is.
         await click(findButton("Done — archive all 5 in Newsletters"));
+        expect(cursorsAsked(listThreads)).toEqual(["p2", "p2"]);
         await act(async () => pageTwo.resolve(pageOf(deepRows.slice(45, 95))));
         await settle();
-        expect(cursorsAsked(listThreads)).toEqual(["p2"]);
-        await act(async () => archive.resolve());
-        await until(
-          () => updateThread.mock.calls.length >= 5,
-          "Done archives the section",
-        );
-
-        await until(() => cursorsAsked(listThreads).length === 2, "the end asks again");
+        await settle();
+        // The page landed in the column, under a Newsletters that stays gone.
+        expect(document.body.textContent).toContain("95 threads, nothing unread");
+        expect(
+          document.body.querySelector('section[aria-label="Newsletters"]'),
+        ).toBeNull();
+        expect(cursorsAsked(listThreads)).toEqual(["p2", "p2"]);
+        expect(updateThread).not.toHaveBeenCalled();
       });
 
       /** Scrolling with the end in view against a five-page account whose
@@ -10142,6 +10174,36 @@ describe("MailSurface", () => {
         for (let index = 0; index < rounds; index += 1) await settle();
       }
 
+      /** The pill Done posted last, as the shell holds it: the sentence with
+       *  its Undo, its window and what to do when the window closes. */
+      function donePill(onToast: ReturnType<typeof vi.fn>): ToastOptions {
+        const call = [...onToast.mock.calls]
+          .reverse()
+          .find(
+            ([, options]) =>
+              (options as ToastOptions | undefined)?.id === "mail-section-done" &&
+              (options as ToastOptions | undefined)?.actionLabel === "Undo",
+          );
+        if (!call) throw new Error("Done posted no pill");
+        return call[1] as ToastOptions;
+      }
+
+      /** The window ran out with the Undo unpressed. The shell owns the
+       *  window and says so through `onExpire`, which is where the commit
+       *  begins. */
+      async function closeWindow(onToast: ReturnType<typeof vi.fn>) {
+        const pill = donePill(onToast);
+        await act(async () => pill.onExpire?.());
+        await drain();
+      }
+
+      function threadsList(): string {
+        return (
+          document.body.querySelector('[aria-label="All inboxes threads"]')
+            ?.textContent ?? ""
+        );
+      }
+
       function unifiedClient(
         items: readonly MailThreadListItem[],
         overrides: Partial<MailSurfaceClient>,
@@ -10157,7 +10219,7 @@ describe("MailSurface", () => {
         });
       }
 
-      it("takes a bundled section whole — archive first, then read", async () => {
+      it("takes a bundled section whole once its window closes: archive first, then read", async () => {
         const items = Array.from({ length: 8 }, (_value, index) =>
           unifiedThread({
             accountId: accountA.accountId,
@@ -10189,7 +10251,14 @@ describe("MailSurface", () => {
 
         await click(findButton("Done — archive all 8 in Newsletters"));
         await drain();
+        // The section is gone and the way back is on screen. Nothing has
+        // been sent: the archives wait behind the pill's window.
+        expect(
+          document.body.querySelector('section[aria-label="Newsletters"]'),
+        ).toBeNull();
+        expect(updateThread).not.toHaveBeenCalled();
 
+        await closeWindow(onToast);
         expect(updateThread).toHaveBeenCalledTimes(16);
         expect(
           updateThread.mock.calls.filter((call) => call[0].archive === true),
@@ -10210,6 +10279,9 @@ describe("MailSurface", () => {
         expect(
           document.body.querySelector('section[aria-label="Newsletters"]'),
         ).toBeNull();
+        // Success is silent: the one sentence was said at the press, and the
+        // pill that said it is already gone.
+        expect(onToast).toHaveBeenCalledTimes(1);
         expect(onToast).toHaveBeenCalledWith(
           "Newsletters cleared",
           expect.objectContaining({
@@ -10219,7 +10291,9 @@ describe("MailSurface", () => {
         );
       });
 
-      it("aborts when the mode changes mid-flight, finishing only the item in hand", async () => {
+      it("sends at the press when there is no pill to offer the way back in", async () => {
+        // No toast channel, no Undo, and so no window to wait out: the
+        // protection Done defers for is not there to defer for.
         const items = [1, 2, 3].map((index) =>
           unifiedThread({
             accountId: accountA.accountId,
@@ -10245,17 +10319,16 @@ describe("MailSurface", () => {
         await act(async () => {
           findButton("Done — archive all 3 in People").click();
         });
+        await drain();
         expect(updateThread).toHaveBeenCalledTimes(1);
 
-        // Leaving unified mode bumps the epoch. The thread whose archive is
-        // already in flight still gets its read flag — an archived letter left
-        // unread would be a half-state nobody asked for — and nothing after it
-        // is started.
+        // Leaving All inboxes does not stop it. The run used to end at the
+        // switch and leave the rest of the section in the inbox.
         await enterSingleAccount();
         await act(async () => firstMutation.resolve());
         await drain();
         expect(updateThread.mock.calls.map((call) => call[0].threadId)).toEqual(
-          ["bulk-1", "bulk-1"],
+          ["bulk-1", "bulk-1", "bulk-2", "bulk-2", "bulk-3", "bulk-3"],
         );
       });
 
@@ -10287,7 +10360,7 @@ describe("MailSurface", () => {
         await settle();
 
         await click(findButton("Done — archive all 3 in People"));
-        await drain();
+        await closeWindow(onToast);
 
         // The failed thread was never marked read either: a failed archive
         // leaves it exactly as it stood, unread and in its section.
@@ -10296,25 +10369,28 @@ describe("MailSurface", () => {
             (call) => call[0].threadId === "bulk-2",
           ),
         ).toHaveLength(1);
-        const list = document.body.querySelector(
-          '[aria-label="All inboxes threads"]',
-        );
-        expect(list?.textContent).toContain("bulk-2");
-        expect(list?.textContent).not.toContain("bulk-1");
-        expect(list?.textContent).not.toContain("bulk-3");
-        expect(onToast).toHaveBeenCalledWith(
+        expect(threadsList()).toContain("bulk-2");
+        expect(threadsList()).not.toContain("bulk-1");
+        expect(threadsList()).not.toContain("bulk-3");
+        // One report, when the run has landed, and no way back on it: the
+        // window closed before the first request went out.
+        expect(onToast).toHaveBeenCalledTimes(2);
+        expect(onToast).toHaveBeenLastCalledWith(
           "People partly cleared",
-          expect.objectContaining({
-            subtitle: "2 archived, 1 stayed put",
-            actionLabel: "Undo",
-          }),
+          expect.objectContaining({ subtitle: "2 archived, 1 stayed put" }),
         );
+        expect(onToast.mock.calls.at(-1)?.[1]?.actionLabel).toBeUndefined();
+        expect(onToast.mock.calls.at(-1)?.[1]?.onAction).toBeUndefined();
+        // Nor the Done pill's id, which may belong to a later Done by now:
+        // the report would take that one's way back.
+        expect(onToast.mock.calls.at(-1)?.[1]?.id).toBeUndefined();
       });
 
-      it("empties the column at the press, before the first request lands", async () => {
-        // The undo window opens with the gesture, not half a minute after it:
-        // the whole point of an always-drawn destructive control is that the
-        // way back is there while the reader is still looking at what changed.
+      it("empties the column at the press with the ring already counting, and sends nothing inside the window", async () => {
+        // The owner met this as a pill that stood for half a minute with no
+        // ring while every other mail action was refused. The press now arms
+        // the window every other Undo in Brain uses, at once, and the
+        // requests wait behind it.
         const items = [1, 2, 3, 4].map((index) =>
           unifiedThread({
             accountId: accountA.accountId,
@@ -10322,11 +10398,7 @@ describe("MailSurface", () => {
             lastMessageAt: 1_700_000_000_000 - index,
           }),
         );
-        const firstArchive = deferred<void>();
-        const updateThread = vi
-          .fn()
-          .mockReturnValueOnce(firstArchive.promise)
-          .mockResolvedValue(undefined);
+        const updateThread = vi.fn().mockResolvedValue(undefined);
         const onToast = vi.fn();
         await act(async () =>
           root.render(
@@ -10340,49 +10412,149 @@ describe("MailSurface", () => {
         await settle();
 
         await click(findButton("Done — archive all 4 in People"));
+        await drain();
 
-        // One request is in flight and none has landed, and the section is
-        // already gone with its Undo on screen.
-        expect(updateThread).toHaveBeenCalledTimes(1);
         expect(
           document.body.querySelector('section[aria-label="People"]'),
         ).toBeNull();
-        // The press-time pill has no window at all: it stands until the loop
-        // reports. A duration here would have to be guessed from the count,
-        // and the ring drawn over it would be counting down a deadline that
-        // does not exist yet.
+        // A real window from the press: the shell draws the ring wherever
+        // there is a deadline, and `null` was the pill with none.
+        expect(onToast).toHaveBeenCalledTimes(1);
         expect(onToast).toHaveBeenCalledWith(
           "People cleared",
           expect.objectContaining({
+            icon: "check-linear",
             subtitle: "4 threads out of your inbox",
             actionLabel: "Undo",
-            durationMs: null,
+            durationMs: SMART_UNDO_MS,
           }),
         );
+        expect(donePill(onToast).pendingLabel).toBeUndefined();
+        expect(updateThread).not.toHaveBeenCalled();
 
-        await act(async () => firstArchive.resolve());
-        await drain();
+        await closeWindow(onToast);
         expect(updateThread).toHaveBeenCalledTimes(8);
-        // Same sentence, same pill, ordinary window — counted from where the
-        // work ended rather than from a press that may be a minute old.
-        expect(onToast).toHaveBeenLastCalledWith(
-          "People cleared",
-          expect.objectContaining({
-            subtitle: "4 threads out of your inbox",
-            actionLabel: "Undo",
-            durationMs: 10_000,
-          }),
-        );
+        // Nothing is said a second time when everything went.
+        expect(onToast).toHaveBeenCalledTimes(1);
       });
 
-      it("holds the pill through a long run and counts only from the end", async () => {
-        // Forty read threads under Done — the scale a busy Seen section
-        // reaches. The window used to be predicted from that count — ten
-        // seconds plus six a thread — so this press armed 250 seconds, the
-        // ring crawled, and the pill read as frozen. There is no number here
-        // now. The pill stands with no window until the last request lands,
-        // and the ordinary ten seconds are counted from there.
-        const items = Array.from({ length: 40 }, (_value, index) =>
+      it("Undo inside the window puts the rows back with no request at all", async () => {
+        const items = [1, 2, 3].map((index) =>
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: `bulk-${index}`,
+            lastMessageAt: 1_700_000_000_000 - index,
+          }),
+        );
+        const updateThread = vi.fn().mockResolvedValue(undefined);
+        const listThreads = vi.fn().mockImplementation(({ accountId }) =>
+          Promise.resolve(pageOf(accountId === accountA.accountId ? items : [])),
+        );
+        const onToast = vi.fn();
+        await act(async () =>
+          root.render(
+            <MailSurface
+              client={unifiedClient(items, { updateThread, listThreads })}
+              onOpenSettings={() => {}}
+              onToast={onToast}
+            />,
+          ),
+        );
+        await settle();
+        const reads = listThreads.mock.calls.length;
+
+        await click(findButton("Done — archive all 3 in People"));
+        expect(threadsList()).not.toContain("bulk-1");
+        const pill = donePill(onToast);
+
+        // The press is taken and spent on the spot: there is no loop to stop
+        // and nothing to reverse, so it answers neither `false` nor a promise.
+        let answer: unknown;
+        await act(async () => {
+          answer = pill.onAction?.();
+        });
+        await drain();
+        expect(answer).toBeUndefined();
+        expect(threadsList()).toContain("bulk-1");
+        expect(threadsList()).toContain("bulk-2");
+        expect(threadsList()).toContain("bulk-3");
+        expect(findButton("Done — archive all 3 in People")).toBeTruthy();
+        expect(updateThread).not.toHaveBeenCalled();
+        expect(listThreads).toHaveBeenCalledTimes(reads);
+        expect(onToast).toHaveBeenCalledTimes(1);
+
+        // A pill that outlives its Undo has nothing left to send or to give
+        // back: the window closing on it is not a commit, and a second press
+        // is refused.
+        await act(async () => pill.onExpire?.());
+        await drain();
+        expect(updateThread).not.toHaveBeenCalled();
+        expect(pill.onAction?.()).toBe(false);
+      });
+
+      it("keeps the rows out through a list read made inside the window", async () => {
+        vi.useFakeTimers();
+        const items = [1, 2].map((index) =>
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: `bulk-${index}`,
+            lastMessageAt: 1_700_000_000_000 - index,
+          }),
+        );
+        const updateThread = vi.fn().mockResolvedValue(undefined);
+        // The server has been told nothing, so every read still lists them.
+        const listThreads = vi.fn().mockImplementation(({ accountId }) =>
+          Promise.resolve(pageOf(accountId === accountA.accountId ? items : [])),
+        );
+        const onToast = vi.fn();
+        await act(async () =>
+          root.render(
+            <MailSurface
+              client={unifiedClient(items, { updateThread, listThreads })}
+              onOpenSettings={() => {}}
+              onToast={onToast}
+            />,
+          ),
+        );
+        await settle();
+        const reads = listThreads.mock.calls.length;
+
+        await click(findButton("Done — archive all 2 in People"));
+        await mailEvent({
+          kind: "mail",
+          changeKind: "sync",
+          accountId: accountA.accountId,
+          mailboxIds: ["inbox"],
+        });
+        await act(async () => vi.advanceTimersByTimeAsync(MAIL_EVENT_DEBOUNCE_MS));
+        await drain();
+
+        expect(listThreads.mock.calls.length).toBeGreaterThan(reads);
+        expect(threadsList()).not.toContain("bulk-1");
+        expect(threadsList()).not.toContain("bulk-2");
+        expect(updateThread).not.toHaveBeenCalled();
+
+        // And Undo still brings them back, from the streams that never
+        // dropped them.
+        await act(async () => {
+          donePill(onToast).onAction?.();
+        });
+        await drain();
+        expect(threadsList()).toContain("bulk-1");
+        expect(threadsList()).toContain("bulk-2");
+      });
+
+      it("says nothing more through a long run, and lets another mail action through it", async () => {
+        // Forty read threads under Done, the scale a busy Seen section
+        // reaches. The run used to hold the mail lock from the press to the
+        // last request, and every other action answered "Finish the current
+        // mail action first" for minutes.
+        const person = unifiedThread({
+          accountId: accountA.accountId,
+          threadId: "p-1",
+          lastMessageAt: 1_700_000_001_000,
+        });
+        const seen = Array.from({ length: 40 }, (_value, index) =>
           unifiedThread({
             accountId: accountA.accountId,
             threadId: `seen-${index}`,
@@ -10390,7 +10562,8 @@ describe("MailSurface", () => {
             lastMessageAt: 1_700_000_000_000 - index,
           }),
         );
-        // One thread in the middle holds the loop, which is what a real
+        const items = [person, ...seen];
+        // One thread in the middle holds the queue, which is what a real
         // custom-domain mutation does: its own connect, authenticate and
         // logout with no pool behind it.
         const midRun = deferred<void>();
@@ -10399,11 +10572,19 @@ describe("MailSurface", () => {
           .mockImplementation(({ threadId }: { threadId: string }) =>
             threadId === "seen-19" ? midRun.promise : Promise.resolve(undefined),
           );
+        const readThread = vi.fn().mockResolvedValue({
+          ...detail,
+          thread: person,
+          messages: detail.messages.map((message) => ({
+            ...message,
+            threadId: person.threadId,
+          })),
+        });
         const onToast = vi.fn();
         await act(async () =>
           root.render(
             <MailSurface
-              client={unifiedClient(items, { updateThread })}
+              client={unifiedClient(items, { updateThread, readThread })}
               onOpenSettings={() => {}}
               onToast={onToast}
             />,
@@ -10412,41 +10593,60 @@ describe("MailSurface", () => {
         await settle();
 
         await click(findButton("Done — archive all 40 in Seen"));
-        // The press: the section is gone, the way back is on screen, and the
-        // pill carries no window for the ring to draw.
         expect(onToast).toHaveBeenCalledTimes(1);
         expect(onToast).toHaveBeenCalledWith(
           "Seen cleared",
           expect.objectContaining({
             subtitle: "40 threads out of your inbox",
             actionLabel: "Undo",
-            durationMs: null,
+            durationMs: SMART_UNDO_MS,
           }),
         );
 
-        // Twenty threads in and stuck on the twentieth. The pill has not been
-        // said a second time, so nothing has taken it and nothing has started
-        // counting it down — the Undo posted at the press is still the one
-        // standing over work that is still going out.
-        await drain();
+        // The window closes and the queue runs: twenty threads in and stuck
+        // on the twentieth.
+        await closeWindow(onToast);
         expect(updateThread).toHaveBeenCalledTimes(20);
         expect(onToast).toHaveBeenCalledTimes(1);
 
+        // Opening the unread People letter reads it, and E archives it, both
+        // while the queue is still out on its twentieth request.
+        await click(findButton("p-1"));
+        await drain();
+        const forPerson = () =>
+          updateThread.mock.calls
+            .map((call) => call[0] as Record<string, unknown>)
+            .filter((input) => input.threadId === "p-1");
+        expect(forPerson()).toEqual([
+          { accountId: accountA.accountId, threadId: "p-1", read: true },
+        ]);
+        await act(async () => {
+          window.dispatchEvent(
+            new KeyboardEvent("keydown", { key: "e", cancelable: true }),
+          );
+        });
+        await drain();
+        expect(forPerson()).toEqual([
+          { accountId: accountA.accountId, threadId: "p-1", read: true },
+          { accountId: accountA.accountId, threadId: "p-1", archive: true },
+        ]);
+        expect(threadsList()).not.toContain("p-1");
+        expect(
+          onToast.mock.calls.filter(([, options]) => options?.urgent === true),
+        ).toEqual([]);
+
         await act(async () => midRun.resolve());
         await drain();
-        expect(updateThread).toHaveBeenCalledTimes(40);
-        // The loop landed, and only now is there a deadline to count: the same
-        // sentence under the same id, with the plain window measured from the
-        // end of the work rather than from a press four minutes old.
-        expect(onToast).toHaveBeenCalledTimes(2);
-        expect(onToast).toHaveBeenLastCalledWith(
-          "Seen cleared",
-          expect.objectContaining({
-            subtitle: "40 threads out of your inbox",
-            actionLabel: "Undo",
-            durationMs: 10_000,
-          }),
-        );
+        expect(
+          updateThread.mock.calls.filter((call) =>
+            String(call[0].threadId).startsWith("seen-"),
+          ),
+        ).toHaveLength(40);
+        // Everything went, so Done never spoke again: nothing after the
+        // press-time pill reports on the section.
+        expect(
+          onToast.mock.calls.filter(([title]) => String(title).includes("Seen")),
+        ).toHaveLength(1);
       });
 
       it("stops an account at its first refusal and says why", async () => {
@@ -10478,20 +10678,24 @@ describe("MailSurface", () => {
         await settle();
 
         await click(findButton("Done — archive all 3 in People"));
-        await drain();
+        expect(threadsList()).not.toContain("bulk-1");
+        await closeWindow(onToast);
 
+        // The rows that could not leave are back in the column, and one
+        // report says why.
         expect(updateThread).toHaveBeenCalledTimes(1);
-        const list = document.body.querySelector(
-          '[aria-label="All inboxes threads"]',
-        );
-        expect(list?.textContent).toContain("bulk-1");
-        expect(list?.textContent).toContain("bulk-3");
+        expect(threadsList()).toContain("bulk-1");
+        expect(threadsList()).toContain("bulk-3");
+        expect(findButton("Done — archive all 3 in People")).toBeTruthy();
+        expect(onToast).toHaveBeenCalledTimes(2);
         expect(onToast).toHaveBeenLastCalledWith(
           "Couldn’t clear People",
           expect.objectContaining({
+            icon: "danger-triangle-linear",
             subtitle: "3 threads stayed put, that account has no folder for it",
           }),
         );
+        expect(onToast.mock.calls.at(-1)?.[1]?.actionLabel).toBeUndefined();
       });
 
       it("keeps going for the other account when one of them refuses", async () => {
@@ -10543,7 +10747,7 @@ describe("MailSurface", () => {
         await settle();
 
         await click(findButton("Done — archive all 3 in People"));
-        await drain();
+        await closeWindow(onToast);
 
         // One refusal closes A. B's thread still goes out, because its server
         // never said anything of the kind.
@@ -10552,6 +10756,9 @@ describe("MailSurface", () => {
             (call) => call[0].accountId === accountA.accountId,
           ),
         ).toHaveLength(1);
+        expect(threadsList()).toContain("bulk-1");
+        expect(threadsList()).not.toContain("bulk-2");
+        expect(threadsList()).toContain("bulk-3");
         expect(onToast).toHaveBeenLastCalledWith(
           "People partly cleared",
           expect.objectContaining({
@@ -10559,91 +10766,98 @@ describe("MailSurface", () => {
               "1 archived, 2 stayed put, that account has no folder for it",
           }),
         );
+        expect(onToast.mock.calls.at(-1)?.[1]?.actionLabel).toBeUndefined();
       });
 
-      it("Undo during the loop stops it and puts back what never left", async () => {
+      it("holds an archived row out against a read that left before the archive, and lets a later read speak", async () => {
+        vi.useFakeTimers();
         const items = [1, 2, 3].map((index) =>
           unifiedThread({
             accountId: accountA.accountId,
             threadId: `bulk-${index}`,
+            unread: false,
             lastMessageAt: 1_700_000_000_000 - index,
           }),
         );
-        const firstArchive = deferred<void>();
-        const updateThread = vi
-          .fn()
-          .mockReturnValueOnce(firstArchive.promise)
-          .mockResolvedValue(undefined);
+        const updateThread = vi.fn().mockResolvedValue(undefined);
+        // What account A's next page-one reads answer, in order.
+        const answers: Array<Promise<MailThreadPage>> = [];
+        const listThreads = vi.fn().mockImplementation(({ accountId }) => {
+          if (accountId !== accountA.accountId) return Promise.resolve(pageOf([]));
+          return answers.shift() ?? Promise.resolve(pageOf(items));
+        });
         const onToast = vi.fn();
         await act(async () =>
           root.render(
             <MailSurface
-              client={unifiedClient(items, { updateThread })}
+              client={unifiedClient(items, { updateThread, listThreads })}
               onOpenSettings={() => {}}
               onToast={onToast}
             />,
           ),
         );
         await settle();
+        const readAgain = async () => {
+          await mailEvent({
+            kind: "mail",
+            changeKind: "sync",
+            accountId: accountA.accountId,
+            mailboxIds: ["inbox"],
+          });
+          await act(async () => vi.advanceTimersByTimeAsync(MAIL_EVENT_DEBOUNCE_MS));
+          await drain();
+        };
 
-        await click(findButton("Done — archive all 3 in People"));
-        const undo = onToast.mock.calls.at(-1)?.[1]?.onAction as
-          | (() => boolean | void | Promise<unknown>)
-          | undefined;
-        // Taken, but not spent yet: the answer is the run's own settling, and
-        // the shell keeps the pill up until it lands.
-        expect(undo?.()).toBeInstanceOf(Promise);
-        await act(async () => firstArchive.resolve());
+        await click(findButton("Done — archive all 3 in Seen"));
+        // A read leaves while the window is still open, and stays out.
+        const early = deferred<MailThreadPage>();
+        answers.push(early.promise);
+        await readAgain();
+
+        await closeWindow(onToast);
+        expect(updateThread).toHaveBeenCalledTimes(3);
+
+        // It answers after the archives did, with what the server held when
+        // it was asked: all three. The hold keeps them out of the column.
+        await act(async () => early.resolve(pageOf(items)));
         await drain();
+        expect(
+          document.body.querySelector('section[aria-label="Seen"]'),
+        ).toBeNull();
 
-        // The thread already in flight is archived, marked read and then put
-        // back; the two still queued never go out at all, which is the
-        // cheapest possible reversal and the reason Undo is worth offering
-        // while the loop is still running.
-        expect(updateThread.mock.calls.map((call) => call[0])).toEqual([
-          {
-            accountId: accountA.accountId,
-            threadId: "bulk-1",
-            archive: true,
-          },
-          { accountId: accountA.accountId, threadId: "bulk-1", read: true },
-          {
-            accountId: accountA.accountId,
-            threadId: "bulk-1",
-            archive: false,
-          },
-          { accountId: accountA.accountId, threadId: "bulk-1", read: false },
-        ]);
-        const list = document.body.querySelector(
-          '[aria-label="All inboxes threads"]',
-        );
-        expect(list?.textContent).toContain("bulk-1");
-        expect(list?.textContent).toContain("bulk-2");
-        expect(list?.textContent).toContain("bulk-3");
-        // One thread was restored: the other two never left, so they are not
-        // counted as brought back. "3 restored" here was a lie the old copy
-        // told by adding what stayed to what moved.
-        expect(onToast).toHaveBeenLastCalledWith(
-          "Back in your inbox",
-          expect.objectContaining({ subtitle: "1 thread restored" }),
-        );
-      });
-
-      /** A deferred with both ends, for a request the clock has to end. */
-      function settleable<T>() {
-        let resolve!: (value: T | PromiseLike<T>) => void;
-        let reject!: (reason: unknown) => void;
-        const promise = new Promise<T>((next, fail) => {
-          resolve = next;
-          reject = fail;
+        // The next read to land is the other account's. It began after the
+        // archives, and it says nothing about these rows: the hold stands.
+        await mailEvent({
+          kind: "mail",
+          changeKind: "sync",
+          accountId: accountB.accountId,
+          mailboxIds: ["inbox"],
         });
-        return { promise, resolve, reject };
-      }
+        await act(async () => vi.advanceTimersByTimeAsync(MAIL_EVENT_DEBOUNCE_MS));
+        await drain();
+        expect(
+          document.body.querySelector('section[aria-label="Seen"]'),
+        ).toBeNull();
+
+        // Account A's own read, begun after the archives, lists none of
+        // them: the hold ends on it and the rows are swept from the stream.
+        answers.push(Promise.resolve(pageOf([])));
+        await readAgain();
+        expect(
+          document.body.querySelector('section[aria-label="Seen"]'),
+        ).toBeNull();
+
+        // One comes back by hand, Move to Inbox, and the next read lists it.
+        // The hold is over, so the row shows.
+        answers.push(Promise.resolve(pageOf([items[1]!])));
+        await readAgain();
+        expect(threadsList()).toContain("1 thread, nothing unread");
+      });
 
       const timedOut = () =>
         new DOMException("mail mutation unanswered after 15000ms", "TimeoutError");
 
-      it("a mutation the clock gave up on closes its account for the run and frees the lock", async () => {
+      it("a mutation the clock gave up on closes its account for the run, and its rows come back", async () => {
         // Three read threads on A and one on B. A's second archive is never
         // answered: the client's deadline turns that into a timeout, which
         // is not a bad minute — the next request to that account would sit
@@ -10692,7 +10906,7 @@ describe("MailSurface", () => {
         await settle();
 
         await click(findButton("Done — archive all 4 in Seen"));
-        await drain();
+        await closeWindow(onToast);
 
         expect(updateThread.mock.calls.map((call) => call[0])).toEqual([
           { accountId: accountA.accountId, threadId: "a-0", archive: true },
@@ -10703,37 +10917,15 @@ describe("MailSurface", () => {
           "Seen partly cleared",
           expect.objectContaining({
             subtitle: "2 archived, 2 stayed put, that account stopped answering",
-            actionLabel: "Undo",
-            durationMs: 10_000,
           }),
         );
+        expect(onToast.mock.calls.at(-1)?.[1]?.actionLabel).toBeUndefined();
         // Seen keeps the two that stayed (a-1, a-2); the two that left are
         // out. The section is collapsed, so it is the count that says so.
-        const list = document.body.querySelector(
-          '[aria-label="All inboxes threads"]',
-        );
-        expect(list?.textContent).toContain("2 threads, nothing unread");
-
-        // The lock went with the run. Undo is not refused, and it reverses
-        // exactly the two that left.
-        const undo = onToast.mock.calls.at(-1)?.[1]?.onAction as
-          | (() => boolean | void | Promise<unknown>)
-          | undefined;
-        updateThread.mockClear();
-        updateThread.mockResolvedValue(undefined);
-        expect(undo?.()).not.toBe(false);
-        await drain();
-        expect(updateThread.mock.calls.map((call) => call[0])).toEqual([
-          { accountId: accountA.accountId, threadId: "a-0", archive: false },
-          { accountId: accountB.accountId, threadId: "b-0", archive: false },
-        ]);
-        expect(onToast).toHaveBeenLastCalledWith(
-          "Back in your inbox",
-          expect.objectContaining({ subtitle: "2 threads restored" }),
-        );
+        expect(threadsList()).toContain("2 threads, nothing unread");
       });
 
-      it("Undo waits out a request the clock has to end, then restores only what left", async () => {
+      it("sends everything still unsent with keepalive when the page starts unloading, and the pill loses its Undo", async () => {
         const items = [0, 1, 2].map((index) =>
           unifiedThread({
             accountId: accountA.accountId,
@@ -10742,12 +10934,7 @@ describe("MailSurface", () => {
             lastMessageAt: 1_700_000_000_000 - index,
           }),
         );
-        const stuck = settleable<void>();
-        const updateThread = vi
-          .fn()
-          .mockImplementation(({ threadId }: { threadId: string }) =>
-            threadId === "a-1" ? stuck.promise : Promise.resolve(undefined),
-          );
+        const updateThread = vi.fn().mockResolvedValue(undefined);
         const onToast = vi.fn();
         await act(async () =>
           root.render(
@@ -10761,49 +10948,53 @@ describe("MailSurface", () => {
         await settle();
 
         await click(findButton("Done — archive all 3 in Seen"));
-        await drain();
-        expect(updateThread).toHaveBeenCalledTimes(2);
-        const undo = onToast.mock.calls.at(-1)?.[1]?.onAction as
-          | (() => boolean | void | Promise<unknown>)
-          | undefined;
+        const pill = donePill(onToast);
+        onToast.mockClear();
 
-        // Undo, with the second archive hanging. The press is taken — and
-        // not answered: the pill's promise is open until the run settles,
-        // which it cannot while a request it sent is unanswered.
-        const taken = undo?.();
-        expect(taken).toBeInstanceOf(Promise);
-        let settled = false;
-        void (taken as Promise<unknown>).then(() => {
-          settled = true;
+        // Inside the window. A queue that awaited its way through the three
+        // would be cut at the first request, so they leave in the handler,
+        // bounded and allowed to outlive the tab.
+        act(() => {
+          window.dispatchEvent(new Event("pagehide"));
         });
-        await drain();
-        expect(settled).toBe(false);
-        expect(updateThread).toHaveBeenCalledTimes(2);
-        // Nothing has been reversed and nothing has been said: the rows
-        // that never left are back, the one that did is still out.
-        expect(onToast).toHaveBeenCalledTimes(1);
-
-        // The clock ends the request. The run settles, the pill is spent,
-        // and the reversal reaches exactly the one thread that left.
-        await act(async () => stuck.reject(timedOut()));
-        await drain();
-        expect(settled).toBe(true);
-        expect(updateThread.mock.calls.map((call) => call[0])).toEqual([
-          { accountId: accountA.accountId, threadId: "a-0", archive: true },
-          { accountId: accountA.accountId, threadId: "a-1", archive: true },
-          { accountId: accountA.accountId, threadId: "a-0", archive: false },
+        expect(updateThread.mock.calls).toEqual([
+          [
+            { accountId: accountA.accountId, threadId: "a-0", archive: true },
+            undefined,
+            { keepalive: true },
+          ],
+          [
+            { accountId: accountA.accountId, threadId: "a-1", archive: true },
+            undefined,
+            { keepalive: true },
+          ],
+          [
+            { accountId: accountA.accountId, threadId: "a-2", archive: true },
+            undefined,
+            { keepalive: true },
+          ],
         ]);
-        const list = document.body.querySelector(
-          '[aria-label="All inboxes threads"]',
+        await drain();
+
+        // The page may come back from the back-forward cache with this DOM:
+        // the pill it shows must not offer an Undo over archives already out.
+        expect(onToast).toHaveBeenCalledTimes(1);
+        expect(onToast).toHaveBeenCalledWith(
+          "Seen cleared",
+          expect.objectContaining({
+            id: "mail-section-done",
+            subtitle: "3 threads out of your inbox",
+          }),
         );
-        expect(list?.textContent).toContain("3 threads, nothing unread");
-        expect(onToast).toHaveBeenLastCalledWith(
-          "Back in your inbox",
-          expect.objectContaining({ subtitle: "1 thread restored" }),
-        );
+        expect(onToast.mock.calls[0]?.[1]?.actionLabel).toBeUndefined();
+        expect(pill.onAction?.()).toBe(false);
+        expect(updateThread).toHaveBeenCalledTimes(3);
       });
 
-      it("a run the reader walked out of names the switch, and refreshes the list they walked into", async () => {
+      it("sends each thread once under StrictMode and beside a second Mail, and hears the page leave once", async () => {
+        // The holds, the queue and the page listener are the page's. A
+        // development double mount, and two surfaces on screen at once, must
+        // not add a second listener or send any thread twice.
         const items = [0, 1, 2].map((index) =>
           unifiedThread({
             accountId: accountA.accountId,
@@ -10812,15 +11003,125 @@ describe("MailSurface", () => {
             lastMessageAt: 1_700_000_000_000 - index,
           }),
         );
+        const updateThread = vi.fn().mockResolvedValue(undefined);
+        const onToast = vi.fn();
+        const listening = vi.spyOn(window, "addEventListener");
+        const client = unifiedClient(items, { updateThread });
+        await act(async () =>
+          root.render(
+            <StrictMode>
+              <MailSurface client={client} onOpenSettings={() => {}} onToast={onToast} />
+              <MailSurface client={client} onOpenSettings={() => {}} />
+            </StrictMode>,
+          ),
+        );
+        await settle();
+
+        const lists = () =>
+          [...document.body.querySelectorAll('[aria-label="All inboxes threads"]')].map(
+            (list) => list.textContent ?? "",
+          );
+        const pageListeners = () =>
+          listening.mock.calls.filter(([type]) => type === "pagehide").length;
+        const mounted = pageListeners();
+        expect(lists()).toHaveLength(2);
+        for (const list of lists()) expect(list).toContain("3 threads, nothing unread");
+        await click(findButton("Done — archive all 3 in Seen"));
+        // The store's own listener, added at the first Done and only then.
+        expect(pageListeners() - mounted).toBe(1);
+        // Both surfaces read the one overlay: neither draws the section.
+        expect(document.body.textContent).not.toContain("3 threads, nothing unread");
+
+        const pill = donePill(onToast);
+        act(() => {
+          window.dispatchEvent(new Event("pagehide"));
+        });
+        await drain();
+        // Its window closing after the page left finds nothing left to send.
+        await act(async () => pill.onExpire?.());
+        await drain();
+        expect(sent(updateThread).map((mutation) => mutation.threadId)).toEqual([
+          "a-0",
+          "a-1",
+          "a-2",
+        ]);
+        expect(pageListeners() - mounted).toBe(1);
+      });
+
+      it("lets a waiting Done go when the Mail surface unmounts, and the pill loses its Undo", async () => {
+        const items = [0, 1].map((index) =>
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: `a-${index}`,
+            unread: false,
+            lastMessageAt: 1_700_000_000_000 - index,
+          }),
+        );
+        const updateThread = vi.fn().mockResolvedValue(undefined);
+        const onToast = vi.fn();
+        await act(async () =>
+          root.render(
+            <MailSurface
+              client={unifiedClient(items, { updateThread })}
+              onOpenSettings={() => {}}
+              onToast={onToast}
+            />,
+          ),
+        );
+        await settle();
+
+        await click(findButton("Done — archive all 2 in Seen"));
+        onToast.mockClear();
+
+        // A route change inside Brain takes the column that could show the
+        // rows again with it, so the archives go out now, one after the
+        // other. Every request a Done makes may outlive the page.
+        await act(async () => root.render(<div>Home</div>));
+        await drain();
+        expect(updateThread.mock.calls).toEqual([
+          [
+            { accountId: accountA.accountId, threadId: "a-0", archive: true },
+            undefined,
+            { keepalive: true },
+          ],
+          [
+            { accountId: accountA.accountId, threadId: "a-1", archive: true },
+            undefined,
+            { keepalive: true },
+          ],
+        ]);
+        expect(onToast).toHaveBeenCalledWith(
+          "Seen cleared",
+          expect.objectContaining({ id: "mail-section-done" }),
+        );
+        expect(onToast.mock.calls[0]?.[1]?.actionLabel).toBeUndefined();
+      });
+
+      it("a run the reader walked out of keeps sending, and the Inbox they walked into never shows its rows", async () => {
+        const items = [0, 1, 2].map((index) =>
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: `a-${index}`,
+            unread: false,
+            lastMessageAt: 1_700_000_000_000 - index,
+          }),
+        );
+        // The server lists a thread until its archive has answered.
+        const archived = new Set<string>();
         const midRun = deferred<void>();
         const updateThread = vi
           .fn()
-          .mockImplementation(({ threadId }: { threadId: string }) =>
-            threadId === "a-1" ? midRun.promise : Promise.resolve(undefined),
-          );
+          .mockImplementation(async ({ threadId }: { threadId: string }) => {
+            if (threadId === "a-1") await midRun.promise;
+            archived.add(threadId);
+          });
         const listThreads = vi.fn().mockImplementation(({ accountId }) =>
           Promise.resolve(
-            pageOf(accountId === accountA.accountId ? items : []),
+            pageOf(
+              accountId === accountA.accountId
+                ? items.filter((item) => !archived.has(item.threadId))
+                : [],
+            ),
           ),
         );
         const onToast = vi.fn();
@@ -10836,39 +11137,35 @@ describe("MailSurface", () => {
         await settle();
 
         await click(findButton("Done — archive all 3 in Seen"));
-        await drain();
+        await closeWindow(onToast);
         expect(updateThread).toHaveBeenCalledTimes(2);
 
         // Out of All inboxes and into account A while a-1 is still in
-        // flight. The single list loads at once — with a-1 still in it,
-        // because the server has not archived it yet.
+        // flight. The single list loads at once, and the server still lists
+        // the one in flight and the one not yet sent: neither is drawn.
         await enterSingleAccount(accountA);
         await drain();
-        const loadsOfA = () =>
-          listThreads.mock.calls.filter(
-            (call) => call[0].accountId === accountA.accountId,
-          ).length;
-        const loadedOnSwitch = loadsOfA();
-        expect(loadedOnSwitch).toBeGreaterThan(1);
+        const single = () =>
+          document.body.querySelector('section[aria-label="Mailbox"]')
+            ?.textContent ?? "";
+        expect(navTrigger()?.getAttribute("aria-label")).toContain("Inbox");
+        for (const id of ["a-0", "a-1", "a-2"]) {
+          expect(single()).not.toContain(id);
+        }
 
         await act(async () => midRun.resolve());
         await drain();
-        // The loop stopped at the switch: a-2 never went. The report says
-        // why the count is short instead of leaving "stayed put" to imply a
-        // refusal that never happened.
-        expect(updateThread).toHaveBeenCalledTimes(2);
-        expect(onToast).toHaveBeenLastCalledWith(
-          "Seen partly cleared",
-          expect.objectContaining({
-            subtitle:
-              "2 archived, 1 stayed put, stopped when you left All inboxes",
-            durationMs: 10_000,
-          }),
-        );
-        // And the list the reader is looking at is asked again, so the row
-        // whose archive landed after the switch does not sit there for the
-        // next minute.
-        expect(loadsOfA()).toBe(loadedOnSwitch + 1);
+        // The run went on to its end, and with everything gone it has
+        // nothing to report.
+        expect(updateThread.mock.calls.map((call) => call[0].threadId)).toEqual([
+          "a-0",
+          "a-1",
+          "a-2",
+        ]);
+        expect(onToast).toHaveBeenCalledTimes(1);
+        for (const id of ["a-0", "a-1", "a-2"]) {
+          expect(single()).not.toContain(id);
+        }
       });
 
       it("a letter opened while the lock is held is marked read once the lock lifts", async () => {
@@ -10877,22 +11174,19 @@ describe("MailSurface", () => {
           threadId: "p-1",
           lastMessageAt: 1_700_000_000_000,
         });
-        const seen = [1, 2].map((index) =>
-          unifiedThread({
-            accountId: accountA.accountId,
-            threadId: `s-${index}`,
-            unread: false,
-            lastMessageAt: 1_600_000_000_000 - index,
-          }),
-        );
-        const items = [people, ...seen];
-        const firstArchive = deferred<void>();
+        const other = unifiedThread({
+          accountId: accountA.accountId,
+          threadId: "p-2",
+          lastMessageAt: 1_700_000_000_000 - 1,
+        });
+        const items = [people, other];
+        // Done holds no lock any more, so the holder here is the action that
+        // still does: the read flag an opened letter sends.
+        const firstRead = deferred<void>();
         const updateThread = vi
           .fn()
           .mockImplementation((input: Record<string, unknown>) =>
-            input.threadId === "s-1" && input.archive === true
-              ? firstArchive.promise
-              : Promise.resolve(undefined),
+            input.threadId === "p-2" ? firstRead.promise : Promise.resolve(undefined),
           );
         const readThread = vi.fn().mockImplementation(({ threadId }) =>
           Promise.resolve({
@@ -10911,11 +11205,12 @@ describe("MailSurface", () => {
         );
         await settle();
 
-        await click(findButton("Done — archive all 2 in Seen"));
-        // Open the unread People letter while Seen's loop holds the lock.
+        await click(findButton("p-2"));
+        await drain();
+        expect(updateThread).toHaveBeenCalledTimes(1);
+        // Open the other unread letter while that read flag holds the lock.
         await click(findButton("p-1"));
         await drain();
-        expect(readThread).toHaveBeenCalled();
         const readFlags = () =>
           updateThread.mock.calls.filter(
             (call) => call[0].threadId === "p-1" && call[0].read === true,
@@ -10923,7 +11218,7 @@ describe("MailSurface", () => {
         // Not yet: the lock is held and the mark-read is not spent for it.
         expect(readFlags()).toHaveLength(0);
 
-        await act(async () => firstArchive.resolve());
+        await act(async () => firstRead.resolve());
         await drain();
         // The lock lifted and the open letter is read, once.
         expect(readFlags()).toHaveLength(1);
@@ -10931,11 +11226,11 @@ describe("MailSurface", () => {
 
       const stale = () => new MailApiError(409, "mail_thread_stale");
 
-      it("a thread that changed on the server under Done is named, kept out, and not undone", async () => {
+      it("a thread that changed on the server under Done is named and kept out", async () => {
         // `mail_thread_stale`: the service says the letter is no longer what
         // the list said — moved by another client, or its mailbox re-keyed.
         // It did not "stay put": it is not where the column had it, so it is
-        // not put back, and there is nothing of ours on it to reverse.
+        // not put back.
         const items = [0, 1, 2].map((index) =>
           unifiedThread({
             accountId: accountA.accountId,
@@ -10962,207 +11257,101 @@ describe("MailSurface", () => {
         await settle();
 
         await click(findButton("Done — archive all 3 in Seen"));
-        await drain();
+        await closeWindow(onToast);
         expect(onToast).toHaveBeenLastCalledWith(
           "Seen partly cleared",
           expect.objectContaining({
             subtitle: "2 archived, 1 changed on the server",
-            actionLabel: "Undo",
-            durationMs: 10_000,
-          }),
-        );
-        expect(
-          document.body.querySelector('section[aria-label="Seen"]'),
-        ).toBeNull();
-
-        const undo = onToast.mock.calls.at(-1)?.[1]?.onAction as
-          | (() => boolean | void | Promise<unknown>)
-          | undefined;
-        updateThread.mockClear();
-        updateThread.mockResolvedValue(undefined);
-        expect(undo?.()).not.toBe(false);
-        await drain();
-        expect(updateThread.mock.calls.map((call) => call[0])).toEqual([
-          { accountId: accountA.accountId, threadId: "a-0", archive: false },
-          { accountId: accountA.accountId, threadId: "a-2", archive: false },
-        ]);
-        expect(onToast).toHaveBeenLastCalledWith(
-          "Back in your inbox",
-          expect.objectContaining({ subtitle: "2 threads restored" }),
-        );
-      });
-
-      it("Undo names what changed on the server instead of calling it archived", async () => {
-        const items = [0, 1, 2].map((index) =>
-          unifiedThread({
-            accountId: accountA.accountId,
-            threadId: `a-${index}`,
-            unread: false,
-            lastMessageAt: 1_700_000_000_000 - index,
-          }),
-        );
-        const updateThread = vi
-          .fn()
-          .mockImplementation((input: Record<string, unknown>) =>
-            input.threadId === "a-1" && input.archive === false
-              ? Promise.reject(stale())
-              : Promise.resolve(undefined),
-          );
-        const onToast = vi.fn();
-        await act(async () =>
-          root.render(
-            <MailSurface
-              client={unifiedClient(items, { updateThread })}
-              onOpenSettings={() => {}}
-              onToast={onToast}
-            />,
-          ),
-        );
-        await settle();
-
-        await click(findButton("Done — archive all 3 in Seen"));
-        await drain();
-        const undo = onToast.mock.calls.at(-1)?.[1]?.onAction as
-          | (() => boolean | void | Promise<unknown>)
-          | undefined;
-        expect(undo?.()).not.toBe(false);
-        await drain();
-
-        // Two came back. The third is not "still archived" — the server said
-        // it is not the letter we archived any more — so it is neither
-        // counted as archived nor left on the column as if it were back.
-        expect(onToast).toHaveBeenLastCalledWith(
-          "Put back 2 of 3",
-          expect.objectContaining({ subtitle: "1 changed on the server" }),
-        );
-        const list = document.body.querySelector(
-          '[aria-label="All inboxes threads"]',
-        );
-        expect(list?.textContent).toContain("2 threads, nothing unread");
-      });
-
-      it("an Undo the server no longer recognises says so, without asking for another try", async () => {
-        const items = [0, 1].map((index) =>
-          unifiedThread({
-            accountId: accountA.accountId,
-            threadId: `a-${index}`,
-            unread: false,
-            lastMessageAt: 1_700_000_000_000 - index,
-          }),
-        );
-        const updateThread = vi
-          .fn()
-          .mockImplementation((input: Record<string, unknown>) =>
-            input.archive === false ? Promise.reject(stale()) : Promise.resolve(undefined),
-          );
-        const onToast = vi.fn();
-        await act(async () =>
-          root.render(
-            <MailSurface
-              client={unifiedClient(items, { updateThread })}
-              onOpenSettings={() => {}}
-              onToast={onToast}
-            />,
-          ),
-        );
-        await settle();
-
-        await click(findButton("Done — archive all 2 in Seen"));
-        await drain();
-        const undo = onToast.mock.calls.at(-1)?.[1]?.onAction as
-          | (() => boolean | void | Promise<unknown>)
-          | undefined;
-        expect(undo?.()).not.toBe(false);
-        await drain();
-        // "Try again" would be a lie: the letters changed under the archive,
-        // and a second press meets the same answer.
-        expect(onToast).toHaveBeenLastCalledWith(
-          "Couldn’t put anything back",
-          expect.objectContaining({
-            subtitle: "Your mail changed on the server. Refresh Mail to see it.",
-          }),
-        );
-      });
-
-      it("Undo says it is working under the pill it took, and reports when the work lands", async () => {
-        // Maya's measurement on a slow provider: press Undo and the rows come
-        // back at once, then ten seconds of no pill at all until the report.
-        // Half the mechanism said "working", the other half said nothing.
-        // Mirror of Done: a pill with no window under the same id while the
-        // way back goes out, replaced by the report when the last request
-        // lands.
-        const items = [0, 1, 2].map((index) =>
-          unifiedThread({
-            accountId: accountA.accountId,
-            threadId: `a-${index}`,
-            unread: false,
-            lastMessageAt: 1_700_000_000_000 - index,
-          }),
-        );
-        const unarchives: Array<{ resolve: () => void }> = [];
-        const updateThread = vi
-          .fn()
-          .mockImplementation((input: Record<string, unknown>) => {
-            if (input.archive !== false) return Promise.resolve(undefined);
-            const gate = settleable<void>();
-            unarchives.push({ resolve: () => gate.resolve() });
-            return gate.promise;
-          });
-        const onToast = vi.fn();
-        await act(async () =>
-          root.render(
-            <MailSurface
-              client={unifiedClient(items, { updateThread })}
-              onOpenSettings={() => {}}
-              onToast={onToast}
-            />,
-          ),
-        );
-        await settle();
-
-        await click(findButton("Done — archive all 3 in Seen"));
-        await drain();
-        const report = onToast.mock.calls.at(-1)?.[1] as ToastOptions;
-        expect(report.id).toBeDefined();
-        const undo = report.onAction as
-          | (() => boolean | void | Promise<unknown>)
-          | undefined;
-        expect(undo?.()).toBeInstanceOf(Promise);
-        await drain();
-
-        // The rows are back and the first un-archive is out. The pill says
-        // so under the same id, with no window and no way back of its own.
-        expect(unarchives).toHaveLength(1);
-        expect(onToast).toHaveBeenLastCalledWith(
-          "Putting back…",
-          expect.objectContaining({
-            subtitle: "3 threads on the way back",
-            durationMs: null,
-            id: report.id,
           }),
         );
         expect(onToast.mock.calls.at(-1)?.[1]?.actionLabel).toBeUndefined();
-        const spoken = onToast.mock.calls.length;
-
-        // Nothing more is said while the requests go out one by one.
-        await act(async () => unarchives[0]!.resolve());
-        await drain();
-        expect(unarchives).toHaveLength(2);
-        expect(onToast).toHaveBeenCalledTimes(spoken);
-
-        await act(async () => unarchives[1]!.resolve());
-        await drain();
-        await act(async () => unarchives[2]!.resolve());
-        await drain();
-        // The report takes the pill: same id, an ordinary window.
-        expect(onToast).toHaveBeenLastCalledWith(
-          "Back in your inbox",
-          expect.objectContaining({ subtitle: "3 threads restored", id: report.id }),
-        );
-        expect(onToast.mock.calls.at(-1)?.[1]?.durationMs).not.toBeNull();
+        expect(
+          document.body.querySelector('section[aria-label="Seen"]'),
+        ).toBeNull();
       });
 
-      it("says so when a second Done arrives while the first is still going", async () => {
+      it("reads the list no more than once per change while fifteen threads go out", async () => {
+        // Every mutation the queue sends comes back as a mail event, and an
+        // event is a page-one read. Thirty of them must not become a storm:
+        // a burst is one read, and a slow run is at most one read a change.
+        vi.useFakeTimers();
+        const items = Array.from({ length: 15 }, (_value, index) =>
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: `nl-${index}`,
+            category: "newsletter",
+            lastMessageAt: 1_700_000_000_000 - index,
+          }),
+        );
+        const archived = new Set<string>();
+        const listThreads = vi.fn().mockImplementation(({ accountId }) =>
+          Promise.resolve(
+            pageOf(
+              accountId === accountA.accountId
+                ? items.filter((item) => !archived.has(item.threadId))
+                : [],
+            ),
+          ),
+        );
+        // A mutation answers a quarter of a second after it is asked, and the
+        // service says so on the change feed, the way #126 has it.
+        const updateThread = vi.fn().mockImplementation(
+          (input: { threadId: string; archive?: boolean }) =>
+            new Promise<void>((resolve) => {
+              setTimeout(() => {
+                if (input.archive === true) archived.add(input.threadId);
+                window.dispatchEvent(
+                  new CustomEvent(MAIL_CHANGED_EVENT, {
+                    detail: {
+                      kind: "mail",
+                      changeKind: "sync",
+                      accountId: accountA.accountId,
+                      mailboxIds: ["inbox"],
+                    } satisfies BrainMailEvent,
+                  }),
+                );
+                resolve();
+              }, 250);
+            }),
+        );
+        const onToast = vi.fn();
+        await act(async () =>
+          root.render(
+            <MailSurface
+              client={unifiedClient(items, { updateThread, listThreads })}
+              onOpenSettings={() => {}}
+              onToast={onToast}
+            />,
+          ),
+        );
+        await settle();
+
+        await click(findButton("Done — archive all 15 in Newsletters"));
+        const before = listThreads.mock.calls.length;
+        const pill = donePill(onToast);
+        await act(async () => pill.onExpire?.());
+
+        // Thirty mutations a quarter of a second apart, and then the last
+        // event's own debounce. A row that came back at any step would show
+        // as a Newsletters section again.
+        for (let step = 0; step < 34; step += 1) {
+          await act(async () => vi.advanceTimersByTimeAsync(250));
+          expect(
+            document.body.querySelector('section[aria-label="Newsletters"]'),
+          ).toBeNull();
+        }
+        await drain();
+        expect(updateThread).toHaveBeenCalledTimes(30);
+        // Events 250ms apart keep pushing the 400ms debounce on, so the whole
+        // run is read once, when it goes quiet. One change, one read, is the
+        // ceiling whatever the spacing.
+        const reads = listThreads.mock.calls.length - before;
+        expect(reads).toBeGreaterThanOrEqual(1);
+        expect(reads).toBeLessThanOrEqual(2);
+        expect(onToast).toHaveBeenCalledTimes(1);
+      });
+
+      it("a second Done commits the first at once and opens a window of its own", async () => {
         const items = [
           ...[1, 2].map((index) =>
             unifiedThread({
@@ -11196,46 +11385,1193 @@ describe("MailSurface", () => {
         await settle();
 
         await click(findButton("Done — archive all 2 in People"));
+        const first = donePill(onToast);
+        expect(updateThread).not.toHaveBeenCalled();
+
+        // The second press is not refused. It lets the first go, which is
+        // one pill and one way back at a time, and takes the pill under the
+        // same id.
         await click(findButton("Done — archive all 1 in Notifications"));
-        // Silence was the old answer, while the sibling undo has always
-        // refused the same condition in words.
-        // A refusal answers the gesture that made it, so it speaks at
-        // once on its own pill rather than queueing behind the undo it is
-        // competing with.
+        expect(updateThread.mock.calls.map((call) => call[0])).toEqual([
+          { accountId: accountA.accountId, threadId: "p-1", archive: true },
+        ]);
+        expect(
+          document.body.querySelector('section[aria-label="Notifications"]'),
+        ).toBeNull();
         expect(onToast).toHaveBeenLastCalledWith(
-          "Finish the current mail action first",
-          { urgent: true },
+          "Notifications cleared",
+          expect.objectContaining({
+            subtitle: "1 thread out of your inbox",
+            actionLabel: "Undo",
+            durationMs: SMART_UNDO_MS,
+            id: "mail-section-done",
+          }),
         );
+        expect(
+          onToast.mock.calls.filter(([, options]) => options?.urgent === true),
+        ).toEqual([]);
+        // The first Done's way back went with its commit.
+        expect(first.onAction?.()).toBe(false);
+
+        // The second window is its own: its Undo works while the first is
+        // still sending, and its thread never goes out.
+        const second = donePill(onToast);
+        await act(async () => {
+          second.onAction?.();
+        });
+        await act(async () => firstArchive.resolve());
+        await drain();
+        expect(updateThread.mock.calls.map((call) => call[0].threadId)).toEqual([
+          "p-1",
+          "p-1",
+          "p-2",
+          "p-2",
+        ]);
         expect(
           document.body.querySelector('section[aria-label="Notifications"]'),
         ).not.toBeNull();
-
-        await act(async () => firstArchive.resolve());
-        await drain();
+        expect(
+          document.body.querySelector('section[aria-label="People"]'),
+        ).toBeNull();
       });
 
-      it("an Undo the lock refuses is not spent", async () => {
+      it("closes the letter a Done takes, and walks and counts as if its rows were gone", async () => {
+        const people = [1, 2].map((index) =>
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: `p-${index}`,
+            lastMessageAt: 1_700_000_000_000 - index,
+          }),
+        );
+        const notes = [1, 2].map((index) =>
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: `n-${index}`,
+            category: "notification",
+            lastMessageAt: 1_600_000_000_000 - index,
+          }),
+        );
+        const items = [...people, ...notes];
+        const updateThread = vi.fn().mockResolvedValue(undefined);
+        const readThread = vi.fn().mockImplementation(({ threadId }) =>
+          Promise.resolve({
+            ...detail,
+            thread: items.find((item) => item.threadId === threadId),
+          }),
+        );
+        const onToast = vi.fn();
+        vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+          callback(0);
+          return 1;
+        });
+        await act(async () =>
+          root.render(
+            <MailSurface
+              client={unifiedClient(items, { updateThread, readThread })}
+              onOpenSettings={() => {}}
+              onToast={onToast}
+            />,
+          ),
+        );
+        await settle();
+
+        // The reader holds one of the letters Done is about to take.
+        await click(findButton("p-1"));
+        await drain();
+        const open = () =>
+          document.body
+            .querySelector('[aria-label="All inboxes threads"] [aria-current="true"]')
+            ?.textContent ?? null;
+        expect(open()).toContain("p-1");
+        updateThread.mockClear();
+
+        await click(findButton("Done — archive all 2 in People"));
+        expect(open()).toBeNull();
+        expect(
+          document.body.querySelector('section[aria-label="People"]'),
+        ).toBeNull();
+        // The sections that stay still count what they hold.
+        expect(findButton("Done — archive all 2 in Notifications")).toBeTruthy();
+
+        // J lands on the first row that is drawn, never on a hidden one the
+        // stream still holds above it.
+        await act(async () => {
+          window.dispatchEvent(
+            new KeyboardEvent("keydown", { key: "j", cancelable: true }),
+          );
+        });
+        await drain();
+        expect(open()).toContain("n-1");
+        expect(readThread.mock.calls.at(-1)?.[0]).toMatchObject({ threadId: "n-1" });
+        expect(
+          updateThread.mock.calls.filter((call) =>
+            String(call[0].threadId).startsWith("p-"),
+          ),
+        ).toEqual([]);
+      });
+
+      /** What the queue sent, without the account: `{ threadId, archive }`,
+       *  with `keepalive` named where the request carried it. */
+      const sent = (updateThread: ReturnType<typeof vi.fn>) =>
+        updateThread.mock.calls.map((call) => {
+          const rest: Record<string, unknown> = Object.fromEntries(
+            Object.entries(call[0] as Record<string, unknown>).filter(
+              ([name]) => name !== "accountId",
+            ),
+          );
+          return (call[2] as { keepalive?: boolean } | undefined)?.keepalive
+            ? { ...rest, keepalive: true }
+            : rest;
+        });
+
+      const detailOf = (items: readonly MailThreadListItem[]) =>
+        vi.fn().mockImplementation(({ threadId }: { threadId: string }) => {
+          const opened = items.find((item) => item.threadId === threadId) ?? items[0]!;
+          return Promise.resolve({
+            ...detail,
+            thread: opened,
+            messages: detail.messages.map((message) => ({
+              ...message,
+              threadId: opened.threadId,
+            })),
+          });
+        });
+
+      const openRow = () =>
+        document.body
+          .querySelector('[aria-label="All inboxes threads"] [aria-current="true"]')
+          ?.textContent ?? null;
+
+      it("takes a letter someone asked for out of a waiting Done, and opens it", async () => {
+        const items = [1, 2].map((index) =>
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: `p-${index}`,
+            lastMessageAt: 1_700_000_000_000 - index,
+          }),
+        );
+        const updateThread = vi.fn().mockResolvedValue(undefined);
+        const readThread = detailOf(items);
+        const listThreads = vi.fn().mockImplementation(({ accountId }) =>
+          Promise.resolve(pageOf(accountId === accountA.accountId ? items : [])),
+        );
+        const onToast = vi.fn();
+        await act(async () =>
+          root.render(
+            <MailSurface
+              client={unifiedClient(items, { updateThread, readThread, listThreads })}
+              onOpenSettings={() => {}}
+              onToast={onToast}
+            />,
+          ),
+        );
+        await settle();
+        await click(findButton("Done — archive all 2 in People"));
+        const reads = listThreads.mock.calls.length;
+
+        // A notification pressed for a letter that just left the column. The
+        // press names the letter, and that outranks the Done: it comes out
+        // of the run, back into the column, and opens where the reader is.
+        await act(async () => {
+          requestOpenThread(accountA.accountId, "p-1");
+        });
+        await drain();
+        expect(pendingOpenThread()).toBeNull();
+        expect(readThread.mock.calls.map((call) => call[0].threadId)).toEqual(["p-1"]);
+        expect(openRow()).toContain("p-1");
+        expect(threadsList()).not.toContain("p-2");
+        expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: All inboxes");
+        expect(listThreads).toHaveBeenCalledTimes(reads);
+
+        // The window closes on what the run still holds: the other letter.
+        // The one that was opened is read, as any opened letter is, and
+        // never archived.
+        await closeWindow(onToast);
+        expect(sent(updateThread).filter((mutation) => "archive" in mutation)).toEqual([
+          { threadId: "p-2", archive: true, keepalive: true },
+        ]);
+        expect(threadsList()).toContain("p-1");
+        expect(onToast).toHaveBeenCalledTimes(1);
+      });
+
+      it("takes a letter someone asked for out of a run the queue has not sent it for", async () => {
+        const items = [0, 1, 2].map((index) =>
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: `a-${index}`,
+            unread: false,
+            lastMessageAt: 1_700_000_000_000 - index,
+          }),
+        );
+        const first = deferred<void>();
+        const updateThread = vi
+          .fn()
+          .mockReturnValueOnce(first.promise)
+          .mockResolvedValue(undefined);
+        const readThread = detailOf(items);
+        const onToast = vi.fn();
+        await act(async () =>
+          root.render(
+            <MailSurface
+              client={unifiedClient(items, { updateThread, readThread })}
+              onOpenSettings={() => {}}
+              onToast={onToast}
+            />,
+          ),
+        );
+        await settle();
+        await click(findButton("Done — archive all 3 in Seen"));
+        await closeWindow(onToast);
+        expect(sent(updateThread)).toHaveLength(1);
+
+        await act(async () => {
+          requestOpenThread(accountA.accountId, "a-2");
+        });
+        await drain();
+        expect(readThread.mock.calls.map((call) => call[0].threadId)).toEqual(["a-2"]);
+        // Taken out is not a failure: the run has nothing to report for it.
+        await act(async () => first.resolve());
+        await drain();
+        expect(sent(updateThread).map((mutation) => mutation.threadId)).toEqual([
+          "a-0",
+          "a-1",
+        ]);
+        expect(threadsList()).toContain("1 thread, nothing unread");
+        expect(onToast).toHaveBeenCalledTimes(1);
+      });
+
+      it("follows a request for a letter Done has already archived to the mailbox it names", async () => {
+        // The palette found the letter in All Mail. Its archive has answered
+        // and its hold stands until the Inbox is read again, with the row
+        // still in the stream under it. That row is not a row of the column:
+        // opening it there would open a letter the list does not draw.
         const items = [
           unifiedThread({
             accountId: accountA.accountId,
+            threadId: "a-0",
+            unread: false,
+            lastMessageAt: 1_700_000_000_000,
+          }),
+        ];
+        const archived = new Set<string>();
+        const updateThread = vi
+          .fn()
+          .mockImplementation(async ({ threadId }: { threadId: string }) => {
+            archived.add(threadId);
+          });
+        const listThreads = vi.fn().mockImplementation(({ accountId }) =>
+          Promise.resolve(
+            pageOf(
+              accountId === accountA.accountId
+                ? items.filter((item) => !archived.has(item.threadId))
+                : [],
+            ),
+          ),
+        );
+        const readMailboxThread = vi.fn().mockResolvedValue({ ...detail, thread: items[0] });
+        const onToast = vi.fn();
+        await act(async () =>
+          root.render(
+            <MailSurface
+              client={unifiedClient(items, { updateThread, listThreads, readMailboxThread })}
+              onOpenSettings={() => {}}
+              onToast={onToast}
+            />,
+          ),
+        );
+        await settle();
+        await click(findButton("Done — archive all 1 in Seen"));
+        await closeWindow(onToast);
+        expect(sent(updateThread)).toHaveLength(1);
+
+        await act(async () => {
+          requestOpenThread(accountA.accountId, "a-0", "all");
+        });
+        await drain();
+        expect(navTrigger()?.getAttribute("aria-label")).toContain("All Mail");
+        expect(readMailboxThread).toHaveBeenCalledWith(
+          expect.objectContaining({ mailboxId: "all", threadId: "a-0" }),
+        );
+      });
+
+      it("opens a held letter from the list of another mailbox that draws it", async () => {
+        // The hold is the Inboxes' alone. All Mail lists the archived letter,
+        // so a request that ends there opens the row it draws at once, as
+        // for any row, and does not wait on a fetch of the letter first.
+        const items = [
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: "a-0",
+            unread: false,
+            lastMessageAt: 1_700_000_000_000,
+          }),
+        ];
+        const archived = new Set<string>();
+        const updateThread = vi
+          .fn()
+          .mockImplementation(async ({ threadId }: { threadId: string }) => {
+            archived.add(threadId);
+          });
+        const listThreads = vi.fn().mockImplementation(({ accountId }) =>
+          Promise.resolve(
+            pageOf(
+              accountId === accountA.accountId
+                ? items.filter((item) => !archived.has(item.threadId))
+                : [],
+            ),
+          ),
+        );
+        const listMailboxThreads = vi
+          .fn()
+          .mockImplementation(({ mailboxId }) =>
+            Promise.resolve(mailboxThreadPage(mailboxId, mailboxId === "all" ? items : [])),
+          );
+        const letter = deferred<MailThreadDetail>();
+        const readMailboxThread = vi.fn().mockReturnValue(letter.promise);
+        const onToast = vi.fn();
+        await act(async () =>
+          root.render(
+            <MailSurface
+              client={unifiedClient(items, {
+                updateThread,
+                listThreads,
+                listMailboxThreads,
+                readMailboxThread,
+              })}
+              onOpenSettings={() => {}}
+              onToast={onToast}
+            />,
+          ),
+        );
+        await settle();
+        await click(findButton("Done — archive all 1 in Seen"));
+        // Into the account's All Mail inside the window, so no Inbox read
+        // begins after the archive and the hold stands when the request comes.
+        await enterSingleAccount(accountA);
+        await drain();
+        await goTo("All Mail");
+        await drain();
+        await closeWindow(onToast);
+        expect(sent(updateThread)).toHaveLength(1);
+
+        await act(async () => {
+          requestOpenThread(accountA.accountId, "a-0", "all");
+        });
+        await drain();
+        expect(navTrigger()?.getAttribute("aria-label")).toContain("All Mail");
+        expect(pendingOpenThread()).toBeNull();
+        expect(
+          document.body.querySelector('section[aria-label="Mailbox"] [aria-current="true"]')
+            ?.textContent,
+        ).toContain("a-0");
+        await act(async () => letter.resolve({ ...detail, thread: items[0]! }));
+        await drain();
+        expect(readMailboxThread).toHaveBeenCalledTimes(1);
+      });
+
+      it("does not archive a letter that got a reply inside the window, and says so", async () => {
+        vi.useFakeTimers();
+        const original = unifiedThread({
+          accountId: accountA.accountId,
+          threadId: "p-1",
+          messageCount: 1,
+          lastMessageAt: 1_700_000_000_000,
+        });
+        const other = unifiedThread({
+          accountId: accountA.accountId,
+          threadId: "p-2",
+          messageCount: 1,
+          lastMessageAt: 1_699_999_999_000,
+        });
+        let server: MailThreadListItem[] = [original, other];
+        const updateThread = vi.fn().mockResolvedValue(undefined);
+        const listThreads = vi.fn().mockImplementation(({ accountId }) =>
+          Promise.resolve(pageOf(accountId === accountA.accountId ? server : [])),
+        );
+        const onToast = vi.fn();
+        await act(async () =>
+          root.render(
+            <MailSurface
+              client={unifiedClient(server, { updateThread, listThreads })}
+              onOpenSettings={() => {}}
+              onToast={onToast}
+            />,
+          ),
+        );
+        await settle();
+        await click(findButton("Done — archive all 2 in People"));
+
+        // A reply lands on the server inside the window. A provider's archive
+        // acts on every message the thread has when it is called, so sending
+        // the press-time snapshot would file the reply away, read, unseen.
+        server = [
+          { ...original, messageCount: 2, lastMessageAt: 1_700_000_060_000 },
+          other,
+        ];
+        await mailEvent({
+          kind: "mail",
+          changeKind: "sync",
+          accountId: accountA.accountId,
+          mailboxIds: ["inbox"],
+        });
+        await act(async () => vi.advanceTimersByTimeAsync(MAIL_EVENT_DEBOUNCE_MS));
+        await drain();
+        expect(updateThread).not.toHaveBeenCalled();
+
+        await closeWindow(onToast);
+        expect(sent(updateThread)).toEqual([
+          { threadId: "p-2", archive: true, keepalive: true },
+          { threadId: "p-2", read: true, keepalive: true },
+        ]);
+        // The letter with the reply is back in the column, unread, and the
+        // one report counts it. It stands five seconds: long enough to read,
+        // with no Undo to wait for and no pill id to take from a later Done.
+        expect(threadsList()).toContain("p-1");
+        expect(threadsList()).not.toContain("p-2");
+        expect(onToast).toHaveBeenCalledTimes(2);
+        expect(onToast).toHaveBeenLastCalledWith("People partly cleared", {
+          icon: "check-linear",
+          subtitle: "1 archived, 1 got new mail and stayed",
+          durationMs: 5_000,
+        });
+      });
+
+      /* THE PROVIDER'S ANSWER, wherever the reader is. The lists only know
+         what the change feed told them; the server answers every mutation
+         with the thread as it reads it afterwards, and that copy is the one
+         Done believes. Each case below has a reply that no list on screen
+         holds when the archive goes out. */
+      describe("when no list holds the reply", () => {
+        const pressed = () => [
+          unifiedThread({
+            accountId: accountA.accountId,
             threadId: "p-1",
+            messageCount: 1,
             lastMessageAt: 1_700_000_000_000,
           }),
           unifiedThread({
             accountId: accountA.accountId,
-            threadId: "n-1",
-            category: "notification",
+            threadId: "p-2",
+            messageCount: 1,
+            lastMessageAt: 1_699_999_999_000,
+          }),
+        ];
+        const replied = (thread: MailThreadListItem): MailThreadListItem => ({
+          ...thread,
+          unread: true,
+          messageCount: 2,
+          lastMessageAt: 1_700_000_060_000,
+        });
+        /** A server: each mutation is answered with the thread as it stands
+         *  when the answer leaves, the read flag applied. */
+        const serverOf = (server: () => readonly MailThreadListItem[]) =>
+          vi.fn().mockImplementation(async (mutation: { threadId: string; read?: boolean }) => {
+            const found = server().find((item) => item.threadId === mutation.threadId)!;
+            return mutation.read === undefined ? found : { ...found, unread: !mutation.read };
+          });
+        const ofThread = (updateThread: ReturnType<typeof vi.fn>, threadId: string) =>
+          sent(updateThread).filter((mutation) => mutation.threadId === threadId);
+
+        async function mount(
+          server: () => readonly MailThreadListItem[],
+          updateThread: ReturnType<typeof vi.fn>,
+        ) {
+          const listThreads = vi.fn().mockImplementation(({ accountId }) =>
+            Promise.resolve(pageOf(accountId === accountA.accountId ? server() : [])),
+          );
+          const onToast = vi.fn();
+          await act(async () =>
+            root.render(
+              <MailSurface
+                client={unifiedClient(server(), {
+                  updateThread: updateThread as MailSurfaceClient["updateThread"],
+                  listThreads,
+                })}
+                onOpenSettings={() => {}}
+                onToast={onToast}
+              />,
+            ),
+          );
+          await settle();
+          await click(findButton("Done — archive all 2 in People"));
+          return onToast;
+        }
+
+        it("takes the archive back when the reader is in another account", async () => {
+          const [original, other] = pressed();
+          let server = [original!, other!];
+          const updateThread = serverOf(() => server);
+          const onToast = await mount(() => server, updateThread);
+          await enterSingleAccount(accountB);
+          await drain();
+          // The reply lands, and account B's list has nothing to say of it.
+          server = [replied(original!), other!];
+          await closeWindow(onToast);
+
+          expect(ofThread(updateThread, "p-1")).toEqual([
+            { threadId: "p-1", archive: true, keepalive: true },
+            { threadId: "p-1", archive: false, keepalive: true },
+          ]);
+          expect(ofThread(updateThread, "p-2")).toEqual([
+            { threadId: "p-2", archive: true, keepalive: true },
+            { threadId: "p-2", read: true, keepalive: true },
+          ]);
+          expect(onToast).toHaveBeenLastCalledWith("People partly cleared", {
+            icon: "check-linear",
+            subtitle: "1 archived, 1 got new mail and stayed",
+            durationMs: 5_000,
+          });
+        });
+
+        it("takes the archive back when no event ever told the lists", async () => {
+          const [original, other] = pressed();
+          let server = [original!, other!];
+          const updateThread = serverOf(() => server);
+          const onToast = await mount(() => server, updateThread);
+          // The change feed lags past the window: nothing is heard at all.
+          server = [replied(original!), other!];
+          await closeWindow(onToast);
+
+          expect(ofThread(updateThread, "p-1")).toEqual([
+            { threadId: "p-1", archive: true, keepalive: true },
+            { threadId: "p-1", archive: false, keepalive: true },
+          ]);
+          // Back in the column the moment the queue knew.
+          expect(threadsList()).toContain("p-1");
+          expect(threadsList()).not.toContain("p-2");
+        });
+
+        it("takes the archive back when the reader has left Mail", async () => {
+          vi.useFakeTimers();
+          const [original, other] = pressed();
+          let server = [original!, other!];
+          const first = deferred<void>();
+          const answer = serverOf(() => server);
+          const updateThread = vi
+            .fn()
+            .mockImplementation(async (mutation: { threadId: string }) => {
+              if (mutation.threadId === "p-1") await first.promise;
+              return answer(mutation);
+            });
+          await mount(() => server, updateThread);
+          // Leaving Mail lets the run go, and its first archive is out.
+          await act(async () => root.render(<div>Home</div>));
+          await drain();
+          // Out of Mail, p-2 gets a reply: no list is mounted to hear it.
+          server = [original!, replied(other!)];
+          await mailEvent({
+            kind: "mail",
+            changeKind: "sync",
+            accountId: accountA.accountId,
+            mailboxIds: ["inbox"],
+          });
+          await act(async () => vi.advanceTimersByTimeAsync(MAIL_EVENT_DEBOUNCE_MS));
+          await act(async () => first.resolve());
+          await drain();
+
+          expect(ofThread(updateThread, "p-2")).toEqual([
+            { threadId: "p-2", archive: true, keepalive: true },
+            { threadId: "p-2", archive: false, keepalive: true },
+          ]);
+        });
+
+        it("takes the read flag and the archive back when the reply lands between them", async () => {
+          const [original, other] = pressed();
+          let server = [original!, other!];
+          const flag = deferred<void>();
+          const answer = serverOf(() => server);
+          const updateThread = vi
+            .fn()
+            .mockImplementation(async (mutation: { threadId: string; read?: boolean }) => {
+              if (mutation.threadId === "p-1" && mutation.read === true) await flag.promise;
+              return answer(mutation);
+            });
+          const onToast = await mount(() => server, updateThread);
+          await closeWindow(onToast);
+          // p-1's archive answered as pressed, and its read flag is out when
+          // the reply lands. The provider's read flag is thread-wide: the
+          // reply is marked read with the rest.
+          server = [replied(original!), other!];
+          await act(async () => flag.resolve());
+          await drain();
+
+          expect(ofThread(updateThread, "p-1")).toEqual([
+            { threadId: "p-1", archive: true, keepalive: true },
+            { threadId: "p-1", read: true, keepalive: true },
+            { threadId: "p-1", read: false, keepalive: true },
+            { threadId: "p-1", archive: false, keepalive: true },
+          ]);
+          expect(threadsList()).toContain("p-1");
+          expect(onToast).toHaveBeenLastCalledWith("People partly cleared", {
+            icon: "check-linear",
+            subtitle: "1 archived, 1 got new mail and stayed",
+            durationMs: 5_000,
+          });
+        });
+
+        it("asks the account's own list first, and sends nothing for a reply it already holds", async () => {
+          // The reader stepped into the account the section is on. Its list
+          // heard the reply, and that copy saves both requests.
+          vi.useFakeTimers();
+          const [original, other] = pressed();
+          let server = [original!, other!];
+          const updateThread = serverOf(() => server);
+          const onToast = await mount(() => server, updateThread);
+          await enterSingleAccount(accountA);
+          await drain();
+          server = [replied(original!), other!];
+          await mailEvent({
+            kind: "mail",
+            changeKind: "sync",
+            accountId: accountA.accountId,
+            mailboxIds: ["inbox"],
+          });
+          await act(async () => vi.advanceTimersByTimeAsync(MAIL_EVENT_DEBOUNCE_MS));
+          await drain();
+          await closeWindow(onToast);
+
+          expect(ofThread(updateThread, "p-1")).toEqual([]);
+          expect(ofThread(updateThread, "p-2")).toEqual([
+            { threadId: "p-2", archive: true, keepalive: true },
+            { threadId: "p-2", read: true, keepalive: true },
+          ]);
+        });
+      });
+
+      it("keeps its holds and its queue through a trip out of Mail, and sends each thread once", async () => {
+        const items = [0, 1, 2].map((index) =>
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: `a-${index}`,
+            unread: false,
+            lastMessageAt: 1_700_000_000_000 - index,
+          }),
+        );
+        // The server lists a thread until its archive has answered.
+        const archived = new Set<string>();
+        const first = deferred<void>();
+        const updateThread = vi
+          .fn()
+          .mockImplementation(async ({ threadId }: { threadId: string }) => {
+            if (threadId === "a-0") await first.promise;
+            archived.add(threadId);
+          });
+        const listThreads = vi.fn().mockImplementation(({ accountId }) =>
+          Promise.resolve(
+            pageOf(
+              accountId === accountA.accountId
+                ? items.filter((item) => !archived.has(item.threadId))
+                : [],
+            ),
+          ),
+        );
+        const onToast = vi.fn();
+        const client = unifiedClient(items, { updateThread, listThreads });
+        const noSettings = () => {};
+        const surface = () => (
+          <MailSurface client={client} onOpenSettings={noSettings} onToast={onToast} />
+        );
+        await act(async () => root.render(surface()));
+        await settle();
+        await click(findButton("Done — archive all 3 in Seen"));
+
+        // Out of Mail inside the window: the run goes to the queue, and its
+        // first archive is still out when the reader comes back.
+        await act(async () => root.render(<div>Home</div>));
+        await drain();
+        expect(sent(updateThread).map((mutation) => mutation.threadId)).toEqual(["a-0"]);
+        await act(async () => root.render(surface()));
+        await drain();
+
+        // A new mount, a fresh list that still names all three, and the same
+        // holds: the section is not drawn, so there is no second Done to
+        // press over it and no second queue to send the three again.
+        expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: All inboxes");
+        expect(listThreads.mock.calls.at(-1)?.[0]).toMatchObject({
+          accountId: expect.any(String),
+        });
+        expect(
+          document.body.querySelector('section[aria-label="Seen"]'),
+        ).toBeNull();
+
+        await act(async () => first.resolve());
+        await drain();
+        expect(sent(updateThread).map((mutation) => mutation.threadId)).toEqual([
+          "a-0",
+          "a-1",
+          "a-2",
+        ]);
+        expect(
+          document.body.querySelector('section[aria-label="Seen"]'),
+        ).toBeNull();
+        expect(
+          onToast.mock.calls.filter(([, options]) => options?.actionLabel === undefined),
+        ).toHaveLength(1);
+      });
+
+      it("sends the unsent tail when the tab closes after the reader has left Mail", async () => {
+        const items = [0, 1, 2].map((index) =>
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: `a-${index}`,
+            unread: false,
+            lastMessageAt: 1_700_000_000_000 - index,
+          }),
+        );
+        const first = deferred<void>();
+        const updateThread = vi
+          .fn()
+          .mockReturnValueOnce(first.promise)
+          .mockResolvedValue(undefined);
+        const onToast = vi.fn();
+        await act(async () =>
+          root.render(
+            <MailSurface
+              client={unifiedClient(items, { updateThread })}
+              onOpenSettings={() => {}}
+              onToast={onToast}
+            />,
+          ),
+        );
+        await settle();
+        await click(findButton("Done — archive all 3 in Seen"));
+        await act(async () => root.render(<div>Home</div>));
+        await drain();
+        expect(sent(updateThread)).toHaveLength(1);
+
+        // No Mail surface is mounted to hear the page leave. The queue hears
+        // it itself, and what it had not reached leaves in that task.
+        act(() => {
+          window.dispatchEvent(new Event("pagehide"));
+        });
+        expect(sent(updateThread)).toEqual([
+          { threadId: "a-0", archive: true, keepalive: true },
+          { threadId: "a-1", archive: true, keepalive: true },
+          { threadId: "a-2", archive: true, keepalive: true },
+        ]);
+        await act(async () => first.resolve());
+        await drain();
+      });
+
+      it("sends every request so it can outlive the page, the one in flight at pagehide included", async () => {
+        const items = [1, 2, 3].map((index) =>
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: `p-${index}`,
+            lastMessageAt: 1_700_000_000_000 - index,
+          }),
+        );
+        const first = deferred<void>();
+        const updateThread = vi
+          .fn()
+          .mockReturnValueOnce(first.promise)
+          .mockResolvedValue(undefined);
+        const onToast = vi.fn();
+        await act(async () =>
+          root.render(
+            <MailSurface
+              client={unifiedClient(items, { updateThread })}
+              onOpenSettings={() => {}}
+              onToast={onToast}
+            />,
+          ),
+        );
+        await settle();
+        await click(findButton("Done — archive all 3 in People"));
+        await closeWindow(onToast);
+        // Mid-run: one archive out, sent the ordinary way a moment ago, and
+        // it too would be cut with the document without `keepalive`.
+        expect(sent(updateThread)).toEqual([
+          { threadId: "p-1", archive: true, keepalive: true },
+        ]);
+
+        act(() => {
+          window.dispatchEvent(new Event("pagehide"));
+        });
+        // Every archive is out in the handler. The read flags follow their
+        // archives' answers, which a page that is really leaving may never
+        // see: best effort until the mutations go as one batch.
+        expect(sent(updateThread)).toEqual([
+          { threadId: "p-1", archive: true, keepalive: true },
+          { threadId: "p-2", archive: true, keepalive: true },
+          { threadId: "p-3", archive: true, keepalive: true },
+        ]);
+        await act(async () => first.resolve());
+        await drain();
+        expect(
+          sent(updateThread).filter((mutation) => "read" in mutation),
+        ).toEqual([
+          { threadId: "p-2", read: true, keepalive: true },
+          { threadId: "p-3", read: true, keepalive: true },
+          { threadId: "p-1", read: true, keepalive: true },
+        ]);
+      });
+
+      it("ends a hold on its own account's read, not on another account's that landed first", async () => {
+        vi.useFakeTimers();
+        const accountC: PublicMailAccount = {
+          ...accountA,
+          accountId: "account-c0123456789abcdef0123456789abcdef",
+          emailAddress: "c@example.test",
+        };
+        const accountD: PublicMailAccount = {
+          ...accountA,
+          accountId: "account-d0123456789abcdef0123456789abcdef",
+          emailAddress: "d@example.test",
+        };
+        const x = unifiedThread({
+          accountId: accountA.accountId,
+          threadId: "x-1",
+          unread: false,
+          lastMessageAt: 1_700_000_000_000,
+        });
+        const archive = deferred<void>();
+        const updateThread = vi.fn().mockReturnValue(archive.promise);
+        const held = new Map<string, ReturnType<typeof deferred<void>>>();
+        let hold = false;
+        let listed: MailThreadListItem[] = [x];
+        const listThreads = vi.fn().mockImplementation(({ accountId }) => {
+          // What the server holds when the read is ASKED: a read that left
+          // before the archive answers with the thread still in it.
+          const page = pageOf(accountId === accountA.accountId ? [...listed] : []);
+          if (!hold || accountId === accountD.accountId) return Promise.resolve(page);
+          const wait = deferred<void>();
+          held.set(accountId, wait);
+          return wait.promise.then(() => page);
+        });
+        const onToast = vi.fn();
+        await act(async () =>
+          root.render(
+            <MailSurface
+              client={makeClient({
+                loadAccounts: vi
+                  .fn()
+                  .mockResolvedValue([accountA, accountB, accountC, accountD]),
+                listThreads,
+                updateThread,
+              })}
+              onOpenSettings={() => {}}
+              onToast={onToast}
+            />,
+          ),
+        );
+        await settle();
+        await drain();
+        await click(findButton("Done — archive all 1 in Seen"));
+        await closeWindow(onToast);
+        expect(sent(updateThread)).toHaveLength(1);
+
+        // One refresh of every account, three at a time: A, B and C leave in
+        // the first wave, before the archive has answered.
+        hold = true;
+        const before = listThreads.mock.calls.length;
+        await mailEvent({ kind: "mail", changeKind: "reset" });
+        await act(async () => vi.advanceTimersByTimeAsync(MAIL_EVENT_DEBOUNCE_MS));
+        await drain();
+        expect(listThreads.mock.calls.length - before).toBe(UNIFIED_FANOUT_LIMIT);
+
+        // The archive answers. Then B answers, which lets D's read begin, and
+        // D's read lands at once: begun after the archive, and about another
+        // account.
+        listed = [];
+        await act(async () => archive.resolve());
+        await drain();
+        await act(async () => held.get(accountB.accountId)?.resolve());
+        await drain();
+        expect(listThreads.mock.calls.length - before).toBe(4);
+
+        // A's own read, the one that left before the archive, lands last and
+        // lists the thread. The hold has to be standing still.
+        await act(async () => held.get(accountC.accountId)?.resolve());
+        await act(async () => held.get(accountA.accountId)?.resolve());
+        await drain();
+        expect(
+          document.body.querySelector('section[aria-label="Seen"]'),
+        ).toBeNull();
+        expect(threadsList()).not.toContain("x-1");
+      });
+
+      it("takes an archived row out of an account's own deep list as its hold ends", async () => {
+        vi.useFakeTimers();
+        // Fifty unread letters fill page one in both lists. The three read
+        // ones Done takes sit below it, where a page-one read never reaches
+        // and the fold keeps whatever the list holds.
+        const pageOne = Array.from({ length: 50 }, (_value, index) =>
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: `top-${String(index).padStart(2, "0")}`,
+            lastMessageAt: 1_700_000_100_000 - index * 1_000,
+          }),
+        );
+        const deep = [0, 1, 2].map((index) =>
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: `deep-${index}`,
+            unread: false,
+            lastMessageAt: 1_700_000_000_000 - index,
+          }),
+        );
+        const archived = new Set<string>();
+        const listThreads = vi.fn().mockImplementation(({ accountId, cursor }) =>
+          Promise.resolve(
+            accountId !== accountA.accountId
+              ? pageOf([])
+              : cursor
+                ? pageOf(deep.filter((item) => !archived.has(item.threadId)))
+                : pageOf(pageOne, "cursor-deep"),
+          ),
+        );
+        const updateThread = vi
+          .fn()
+          .mockImplementation(async ({ threadId }: { threadId: string }) => {
+            archived.add(threadId);
+          });
+        const onToast = vi.fn();
+        await act(async () =>
+          root.render(
+            <MailSurface
+              client={unifiedClient(pageOne, { updateThread, listThreads })}
+              onOpenSettings={() => {}}
+              onToast={onToast}
+            />,
+          ),
+        );
+        await settle();
+        await click(findButton("Load more"));
+        await drain();
+        await click(findButton("Done — archive all 3 in Seen"));
+
+        // Into the account's own Inbox inside the window, and down to the
+        // page the three are on: held, so not drawn.
+        await enterSingleAccount(accountA);
+        await drain();
+        await click(findButton("Load more"));
+        await drain();
+        const single = () =>
+          document.body.querySelector('section[aria-label="Mailbox"]')
+            ?.textContent ?? "";
+        expect(single()).toContain("top-49");
+        expect(single()).not.toContain("deep-0");
+
+        await closeWindow(onToast);
+        expect(sent(updateThread)).toHaveLength(3);
+        // The read their own events bring is page one, begun after them. It
+        // ends the holds, and the rows below it leave the list with them.
+        await mailEvent({
+          kind: "mail",
+          changeKind: "sync",
+          accountId: accountA.accountId,
+          mailboxIds: ["inbox"],
+        });
+        await act(async () => vi.advanceTimersByTimeAsync(MAIL_EVENT_DEBOUNCE_MS));
+        await drain();
+        expect(listThreads.mock.calls.at(-1)?.[0]?.cursor).toBeUndefined();
+        expect(single()).toContain("top-49");
+        expect(single()).not.toContain("deep-0");
+        expect(single()).not.toContain("deep-2");
+      });
+
+      it.each([
+        [
+          "a session that ended",
+          () => new MailApiError(401, null),
+          "3 threads stayed put, you were signed out",
+          1,
+        ],
+        [
+          "a connection that dropped",
+          () => new TypeError("Failed to fetch"),
+          "3 threads stayed put, no connection to the server",
+          1,
+        ],
+        [
+          // Too many requests is a bad minute for one thread: the next is
+          // still tried, and there is no reason to give for the account.
+          "a rate limit",
+          () => new MailApiError(429, "mail_rate_limited"),
+          "3 threads stayed put",
+          3,
+        ],
+      ] as const)(
+        "reads %s for what it says about the rest of the run",
+        async (_what, failure, subtitle, attempts) => {
+          const items = [1, 2, 3].map((index) =>
+            unifiedThread({
+              accountId: accountA.accountId,
+              threadId: `bulk-${index}`,
+              lastMessageAt: 1_700_000_000_000 - index,
+            }),
+          );
+          const updateThread = vi.fn().mockImplementation(() => Promise.reject(failure()));
+          const onToast = vi.fn();
+          await act(async () =>
+            root.render(
+              <MailSurface
+                client={unifiedClient(items, { updateThread })}
+                onOpenSettings={() => {}}
+                onToast={onToast}
+              />,
+            ),
+          );
+          await settle();
+          await click(findButton("Done — archive all 3 in People"));
+          await closeWindow(onToast);
+          expect(updateThread).toHaveBeenCalledTimes(attempts);
+          expect(onToast).toHaveBeenLastCalledWith("Couldn’t clear People", {
+            icon: "danger-triangle-linear",
+            subtitle,
+            durationMs: 5_000,
+          });
+          expect(threadsList()).toContain("bulk-3");
+        },
+      );
+
+      describe("the column's motion", () => {
+        type Played = {
+          readonly node: HTMLElement;
+          readonly keyframes: Keyframe[];
+          readonly options: KeyframeAnimationOptions;
+        };
+        let played: Played[];
+
+        beforeEach(() => {
+          played = [];
+          Object.defineProperty(HTMLElement.prototype, "animate", {
+            configurable: true,
+            writable: true,
+            value: function animate(
+              this: HTMLElement,
+              keyframes: Keyframe[],
+              options: KeyframeAnimationOptions,
+            ) {
+              played.push({ node: this, keyframes, options });
+              return { finished: new Promise(() => {}), cancel: () => {} };
+            },
+          });
+        });
+        afterEach(() => {
+          delete (HTMLElement.prototype as { animate?: unknown }).animate;
+        });
+
+        const ghosts = () =>
+          [...document.body.querySelectorAll<HTMLElement>(".brain-mail-list > *")].filter(
+            (element) => element.getAttribute("aria-hidden") === "true" && element.inert,
+          );
+
+        async function mountWith(
+          items: readonly MailThreadListItem[],
+          onToast: (title: string, options?: ToastOptions) => void,
+        ) {
+          await act(async () =>
+            root.render(
+              <MailSurface
+                client={mixedClient(items, {
+                  updateThread: vi.fn().mockResolvedValue(undefined),
+                })}
+                onOpenSettings={() => {}}
+                onToast={onToast}
+              />,
+            ),
+          );
+          await settle();
+        }
+
+        it("lets the whole section go on a fade at the press, and brings it back rising on Undo", async () => {
+          const items = [1, 2].map((index) =>
+            unifiedThread({
+              accountId: accountA.accountId,
+              threadId: `p-${index}`,
+              lastMessageAt: 1_700_000_000_000 - index,
+            }),
+          );
+          const onToast = vi.fn();
+          await mountWith(items, onToast);
+
+          await click(findButton("Done — archive all 2 in People"));
+          // The section unmounted whole, so what fades is a copy of its last
+          // frame, header and rows in one piece.
+          expect(ghosts()).toHaveLength(1);
+          expect(ghosts()[0]!.textContent).toContain("People");
+          expect(ghosts()[0]!.textContent).toContain("p-1");
+          const fade = played.find((each) => each.node === ghosts()[0]);
+          expect(fade?.keyframes).toEqual([{ opacity: 1 }, { opacity: 0 }]);
+          expect(fade?.options.duration).toBe(120);
+
+          played.length = 0;
+          await act(async () => {
+            donePill(onToast).onAction?.();
+          });
+          await drain();
+          // Back as one piece too, the 4px a row rises entering the list.
+          const section = document.body.querySelector<HTMLElement>(
+            'section[aria-label="People"]',
+          );
+          expect(section).not.toBeNull();
+          const rise = played.filter((each) => each.node === section);
+          expect(rise).toHaveLength(1);
+          expect(rise[0]!.keyframes).toEqual([
+            { opacity: 0, transform: "translateY(4px)" },
+            { opacity: 1, transform: "none" },
+          ]);
+          expect(rise[0]!.options.duration).toBe(120);
+          // Its rows do not rise a second time inside it.
+          expect(
+            played.filter((each) => each.node.dataset.flip?.startsWith("row:")),
+          ).toEqual([]);
+        });
+
+        it("fades only the rows that go when part of the section stays, and raises only those on Undo", async () => {
+          const items = [
+            unifiedThread({
+              accountId: accountA.accountId,
+              threadId: "gmail-1",
+              lastMessageAt: 1_700_000_000_000,
+            }),
+            unifiedThread({
+              accountId: imapAccount.accountId,
+              threadId: "imap-1",
+              lastMessageAt: 1_600_000_000_000,
+            }),
+          ];
+          const onToast = vi.fn();
+          await mountWith(items, onToast);
+
+          await click(findButton("Done — archive 1 of 2 in People"));
+          expect(ghosts()).toHaveLength(1);
+          expect(ghosts()[0]!.textContent).toContain("gmail-1");
+          expect(ghosts()[0]!.textContent).not.toContain("imap-1");
+
+          played.length = 0;
+          await act(async () => {
+            donePill(onToast).onAction?.();
+          });
+          await drain();
+          const risen = played.filter(
+            (each) => each.keyframes[0]?.transform === "translateY(4px)",
+          );
+          expect(risen.map((each) => each.node.dataset.flip)).toEqual([
+            `row:${accountA.accountId}:gmail-1`,
+          ]);
+        });
+      });
+
+      it("counts an account's Inbox badge without the letters Done is holding out", async () => {
+        const items = [
+          ...[1, 2].map((index) =>
+            unifiedThread({
+              accountId: accountA.accountId,
+              threadId: `nl-${index}`,
+              category: "newsletter",
+              lastMessageAt: 1_700_000_000_000 - index,
+            }),
+          ),
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: "p-1",
             lastMessageAt: 1_600_000_000_000,
           }),
         ];
-        const secondArchive = deferred<void>();
-        const updateThread = vi
-          .fn()
-          .mockImplementation((input: Record<string, unknown>) =>
-            input.threadId === "n-1" && input.archive === true
-              ? secondArchive.promise
-              : Promise.resolve(undefined),
-          );
+        const updateThread = vi.fn().mockResolvedValue(undefined);
         const onToast = vi.fn();
         await act(async () =>
           root.render(
@@ -11248,29 +12584,77 @@ describe("MailSurface", () => {
         );
         await settle();
 
-        await click(findButton("Done — archive all 1 in People"));
+        await click(findButton("Done — archive all 2 in Newsletters"));
+        // Into the account's own Inbox inside the window: the server lists
+        // three unread letters, and the column and its badge hold one.
+        await enterSingleAccount(accountA);
         await drain();
-        const undo = onToast.mock.calls.at(-1)?.[1]?.onAction as
-          | (() => boolean | void)
-          | undefined;
+        const single = () =>
+          document.body.querySelector('section[aria-label="Mailbox"]')
+            ?.textContent ?? "";
+        expect(single()).toContain("p-1");
+        expect(single()).not.toContain("nl-1");
+        await openNav();
+        expect(navItem("Inbox")?.querySelector(".tree-row-count")?.textContent).toBe("1");
+        await closeNav();
 
-        // Notifications takes the lock and parks on its first archive.
-        await click(findButton("Done — archive all 1 in Notifications"));
-        updateThread.mockClear();
-        // The shell dismisses the pill only when the action says it took the
-        // press. Refused, the way back is still on screen.
-        expect(undo?.()).toBe(false);
+        // Undo from there puts them back in this list too.
+        await act(async () => {
+          donePill(onToast).onAction?.();
+        });
         await drain();
+        expect(single()).toContain("nl-1");
+        expect(single()).toContain("nl-2");
         expect(updateThread).not.toHaveBeenCalled();
+      });
 
-        await act(async () => secondArchive.resolve());
+      it("walks an account's own Inbox past the letters Done is holding out", async () => {
+        const items = [
+          ...[1, 2].map((index) =>
+            unifiedThread({
+              accountId: accountA.accountId,
+              threadId: `nl-${index}`,
+              category: "newsletter",
+              lastMessageAt: 1_700_000_000_000 - index,
+            }),
+          ),
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: "p-1",
+            unread: false,
+            lastMessageAt: 1_600_000_000_000,
+          }),
+        ];
+        const readThread = detailOf(items);
+        const onToast = vi.fn();
+        vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+          callback(0);
+          return 1;
+        });
+        await act(async () =>
+          root.render(
+            <MailSurface
+              client={unifiedClient(items, { readThread })}
+              onOpenSettings={() => {}}
+              onToast={onToast}
+            />,
+          ),
+        );
+        await settle();
+        await click(findButton("Done — archive all 2 in Newsletters"));
+        await enterSingleAccount(accountA);
         await drain();
-        // And it still works once the lock is free.
-        expect(undo?.()).toBeInstanceOf(Promise);
+
+        // The list this account's Inbox holds starts with the two held
+        // letters. J lands on the first row that is drawn.
+        await act(async () => {
+          window.dispatchEvent(
+            new KeyboardEvent("keydown", { key: "j", cancelable: true }),
+          );
+        });
         await drain();
-        expect(
-          updateThread.mock.calls.filter((call) => call[0].archive === false),
-        ).toHaveLength(1);
+        expect(readThread).toHaveBeenCalledTimes(1);
+        expect(readThread.mock.calls[0]?.[0]).toMatchObject({ threadId: "p-1" });
       });
 
       it("gives Seen its own Done, and sends no read flag with it", async () => {
@@ -11302,7 +12686,7 @@ describe("MailSurface", () => {
         await settle();
 
         await click(findButton("Done — archive all 2 in Seen"));
-        await drain();
+        await closeWindow(onToast);
         expect(updateThread.mock.calls.map((call) => call[0])).toEqual([
           { accountId: accountA.accountId, threadId: "read-1", archive: true },
           { accountId: accountA.accountId, threadId: "read-2", archive: true },
@@ -11381,22 +12765,13 @@ describe("MailSurface", () => {
 
         // The label promises only what it can keep.
         await click(findButton("Done — archive 2 of 5 in Newsletters"));
-        await drain();
-
-        // The two Gmail threads leave; the three IMAP rows are never touched
-        // and never sent.
-        expect(updateThread.mock.calls.map((call) => call[0].threadId)).toEqual([
-          "gmail-1",
-          "gmail-1",
-          "gmail-2",
-          "gmail-2",
-        ]);
-        const section = document.body.querySelector(
-          'section[aria-label="Newsletters"]',
-        );
-        expect(section).not.toBeNull();
-        expect(section?.textContent).toContain("imap-1");
-        expect(section?.textContent).not.toContain("gmail-1");
+        const section = () =>
+          document.body.querySelector('section[aria-label="Newsletters"]');
+        // The two Gmail threads leave at the press; the three IMAP rows are
+        // never hidden and never sent.
+        expect(section()).not.toBeNull();
+        expect(section()?.textContent).toContain("imap-1");
+        expect(section()?.textContent).not.toContain("gmail-1");
         // And the rows that stayed are accounted for, in the same breath as
         // the ones that went. Silence here never corrects itself.
         expect(onToast).toHaveBeenCalledWith(
@@ -11404,8 +12779,71 @@ describe("MailSurface", () => {
           expect.objectContaining({
             subtitle: "2 threads out of your inbox, 3 can’t leave",
             actionLabel: "Undo",
+            durationMs: SMART_UNDO_MS,
           }),
         );
+
+        await closeWindow(onToast);
+        expect(updateThread.mock.calls.map((call) => call[0].threadId)).toEqual([
+          "gmail-1",
+          "gmail-1",
+          "gmail-2",
+          "gmail-2",
+        ]);
+        expect(section()?.textContent).toContain("imap-1");
+        expect(section()?.textContent).not.toContain("gmail-1");
+        expect(onToast).toHaveBeenCalledTimes(1);
+      });
+
+      it("names the rows an account could never move in the report of a run that fell short", async () => {
+        const items = [
+          ...[1, 2].map((index) =>
+            unifiedThread({
+              accountId: accountA.accountId,
+              threadId: `gmail-${index}`,
+              category: "newsletter",
+              lastMessageAt: 1_700_000_000_000 - index,
+            }),
+          ),
+          unifiedThread({
+            accountId: imapAccount.accountId,
+            threadId: "imap-1",
+            category: "newsletter",
+            lastMessageAt: 1_600_000_000_000,
+          }),
+        ];
+        const updateThread = vi
+          .fn()
+          .mockImplementation((input: Record<string, unknown>) =>
+            input.threadId === "gmail-2"
+              ? Promise.reject(new Error("provider said no"))
+              : Promise.resolve(undefined),
+          );
+        const onToast = vi.fn();
+        await act(async () =>
+          root.render(
+            <MailSurface
+              client={mixedClient(items, { updateThread })}
+              onOpenSettings={() => {}}
+              onToast={onToast}
+            />,
+          ),
+        );
+        await settle();
+
+        await click(findButton("Done — archive 2 of 3 in Newsletters"));
+        await closeWindow(onToast);
+        expect(onToast).toHaveBeenLastCalledWith(
+          "Newsletters partly cleared",
+          expect.objectContaining({
+            subtitle: "1 archived, 1 stayed put, 1 can’t leave",
+          }),
+        );
+        const section = document.body.querySelector(
+          'section[aria-label="Newsletters"]',
+        );
+        expect(section?.textContent).toContain("gmail-2");
+        expect(section?.textContent).not.toContain("gmail-1");
       });
 
       it("draws no Done on a section it could archive nothing in", async () => {
@@ -11441,7 +12879,72 @@ describe("MailSurface", () => {
         ).toHaveLength(0);
       });
 
-      it("undo restores exactly what moved, and only re-flags what it read", async () => {
+      it("takes an archived row out of a deep stream, so the page-one read after it cannot bring it back", async () => {
+        vi.useFakeTimers();
+        // Fifty unread letters fill page one. The three read ones Done will
+        // take sit below it, brought in by Load more, where a page-one read
+        // never reaches and the fold keeps whatever the stream holds.
+        const pageOne = Array.from({ length: 50 }, (_value, index) =>
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: `top-${String(index).padStart(2, "0")}`,
+            lastMessageAt: 1_700_000_100_000 - index * 1_000,
+          }),
+        );
+        const deep = [0, 1, 2].map((index) =>
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: `deep-${index}`,
+            unread: false,
+            lastMessageAt: 1_700_000_000_000 - index,
+          }),
+        );
+        const listThreads = vi.fn().mockImplementation(({ accountId, cursor }) =>
+          Promise.resolve(
+            accountId !== accountA.accountId
+              ? pageOf([])
+              : cursor
+                ? pageOf(deep)
+                : pageOf(pageOne, "cursor-deep"),
+          ),
+        );
+        const updateThread = vi.fn().mockResolvedValue(undefined);
+        const onToast = vi.fn();
+        await act(async () =>
+          root.render(
+            <MailSurface
+              client={unifiedClient(pageOne, { updateThread, listThreads })}
+              onOpenSettings={() => {}}
+              onToast={onToast}
+            />,
+          ),
+        );
+        await settle();
+        await click(findButton("Load more"));
+        await drain();
+
+        await click(findButton("Done — archive all 3 in Seen"));
+        await closeWindow(onToast);
+        expect(updateThread).toHaveBeenCalledTimes(3);
+
+        // The read the archives' own events bring is begun after them. It
+        // ends the hold, and lists page one only.
+        await mailEvent({
+          kind: "mail",
+          changeKind: "sync",
+          accountId: accountA.accountId,
+          mailboxIds: ["inbox"],
+        });
+        await act(async () => vi.advanceTimersByTimeAsync(MAIL_EVENT_DEBOUNCE_MS));
+        await drain();
+        expect(listThreads.mock.calls.at(-1)?.[0]?.cursor).toBeUndefined();
+        expect(
+          document.body.querySelector('section[aria-label="Seen"]'),
+        ).toBeNull();
+        expect(threadsList()).not.toContain("deep-0");
+      });
+
+      it("Undo puts each letter back where its own read state has it", async () => {
         const items = [
           unifiedThread({
             accountId: accountA.accountId,
@@ -11485,40 +12988,18 @@ describe("MailSurface", () => {
 
         await click(findButton("Done — archive all 2 in People"));
         await drain();
-        expect(
-          document.body.querySelector('[aria-label="All inboxes threads"]')
-            ?.textContent ?? "",
-        ).not.toContain("still-unread");
+        expect(threadsList()).not.toContain("still-unread");
 
-        const undo = onToast.mock.calls.at(-1)?.[1]?.onAction as
-          | (() => void)
-          | undefined;
-        expect(undo).toBeTypeOf("function");
-        updateThread.mockClear();
-        await act(async () => undo?.());
+        await act(async () => {
+          donePill(onToast).onAction?.();
+        });
         await drain();
 
-        expect(updateThread.mock.calls.map((call) => call[0])).toEqual([
-          {
-            accountId: accountA.accountId,
-            threadId: "open-one",
-            archive: false,
-          },
-          {
-            accountId: accountA.accountId,
-            threadId: "still-unread",
-            archive: false,
-          },
-          {
-            accountId: accountA.accountId,
-            threadId: "still-unread",
-            read: false,
-          },
-        ]);
-        // Both are back in the inbox, each in the section its own read state
-        // puts it in — the unread one under People, the one the reader had
-        // already opened under Seen (bundled, so the digest counts it rather
-        // than naming it).
+        // Nothing was sent either way, so there is no read flag to give
+        // back: the unread one is under People again, and the one the reader
+        // had already opened is under Seen (bundled, so the digest counts it
+        // rather than naming it). The letter Done closed stays closed.
+        expect(updateThread).not.toHaveBeenCalled();
         const list = document.body.querySelector(
           '[aria-label="All inboxes threads"]',
         );
@@ -11528,10 +13009,7 @@ describe("MailSurface", () => {
         expect(
           list?.querySelector('section[aria-label="Seen"]')?.textContent,
         ).toContain("1 thread, nothing unread");
-        expect(onToast).toHaveBeenLastCalledWith(
-          "Back in your inbox",
-          expect.objectContaining({ subtitle: "2 threads restored" }),
-        );
+        expect(onToast).toHaveBeenCalledTimes(1);
       });
     });
 

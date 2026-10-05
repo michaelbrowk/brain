@@ -577,15 +577,21 @@ describe("defaultMailSurfaceClient system mailboxes", () => {
     };
     expect(new TextEncoder().encode(JSON.stringify(fifty)).length).toBeLessThan(16 * 1024);
 
-    // An answer for the wrong threads is not this batch's answer.
-    fetchMock.mockImplementation(() =>
-      Promise.resolve(
-        response({ apiVersion: 1, results: [{ threadId: "thread_2", status: "stale" }] }),
-      ),
-    );
-    await expect(defaultMailSurfaceClient.archiveThreads(input)).rejects.toThrow(
-      "invalid mail thread batch",
-    );
+    // An answer for the wrong threads, or for the right ones in another
+    // order, is not this batch's answer.
+    for (const results of [
+      [{ threadId: "thread_2", status: "stale" }],
+      [
+        { threadId: "thread_2", status: "stale" },
+        { threadId: THREAD_ID, status: "stale" },
+        { threadId: "thread_3", status: "stale" },
+      ],
+    ]) {
+      fetchMock.mockImplementation(() => Promise.resolve(response({ apiVersion: 1, results })));
+      await expect(defaultMailSurfaceClient.archiveThreads(input)).rejects.toThrow(
+        "invalid mail thread batch",
+      );
+    }
   });
 });
 

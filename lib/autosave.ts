@@ -1,3 +1,4 @@
+import { bodyHash, diffBodyPatch, type BodyPatch } from "./body-patch";
 import { canonicalPageMarkdown } from "./page-markdown";
 
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -17,6 +18,17 @@ export class SaveRequestError extends Error {
   ) {
     super(message);
     this.name = "SaveRequestError";
+  }
+}
+
+/** The server holds a newer body this same tab sent (a closing-tab save that
+ *  got there first). The older save stops: sending it again would put older
+ *  text over newer, and reading it as a conflict would latch a page whose
+ *  only other writer is the person themselves. */
+export class SaveSupersededError extends SaveRequestError {
+  constructor() {
+    super("Superseded by a newer save from this tab");
+    this.name = "SaveSupersededError";
   }
 }
 
@@ -114,6 +126,45 @@ export function encodeSaveRequest(
   return new TextEncoder().encode(withBase).byteLength <= maxBytes
     ? withBase
     : JSON.stringify(withoutBase);
+}
+
+/** The save a tab sends as it goes away, sized for a keepalive request.
+ *
+ * It carries no full body. For each body the server may hold as far as this
+ * tab knows (its confirmed base, and the bodies of its own saves still on the
+ * wire) it carries the one span that turns that body into the newest one,
+ * keyed by the body's hash; the server applies whichever span matches what it
+ * holds, and refuses anything else as a conflict. Spans are added smallest
+ * first while the request stays under `maxBytes`, so a long page with a few
+ * typed words fits, and a huge paste the request cannot carry is null: its
+ * draft stays in localStorage for the next load. */
+export function encodeUnloadSaveRequest(
+  markdown: string,
+  revision: string,
+  knownBodies: readonly string[],
+  maxBytes: number,
+): string | null {
+  const newest = canonicalPageMarkdown(markdown);
+  const seen = new Set<string>();
+  const candidates: { patch: BodyPatch; size: number }[] = [];
+  for (const known of knownBodies) {
+    const body = canonicalPageMarkdown(known);
+    if (seen.has(body)) continue;
+    seen.add(body);
+    const patch = { base: bodyHash(body), ...diffBodyPatch(body, newest) };
+    candidates.push({ patch, size: JSON.stringify(patch).length });
+  }
+  candidates.sort((a, b) => a.size - b.size);
+  const encoder = new TextEncoder();
+  const patches: BodyPatch[] = [];
+  let encoded: string | null = null;
+  for (const { patch } of candidates.slice(0, 8)) {
+    const next = JSON.stringify({ rev: revision, patches: [...patches, patch] });
+    if (encoder.encode(next).byteLength > maxBytes) continue;
+    patches.push(patch);
+    encoded = next;
+  }
+  return encoded;
 }
 
 export function encodeDraft(
@@ -372,6 +423,10 @@ interface SaveMarkdownOptions {
    *  visitor writes to `/api/share-edit/page/<id>?root=…&v=…`. The conflict
    *  GET uses the same URL, so both halves of the 409 dance stay on one route. */
   endpoint?: (id: string) => string;
+  /** Whether a server body is one this tab sent itself out of band (the
+   *  closing-tab patch), and if so whether it is newer or older than this
+   *  save. Asked only on a 409 whose body is neither this save nor its base. */
+  ownBody?: (serverMarkdown: string) => "newer" | "older" | undefined;
 }
 
 /** Persist one markdown body, refreshing the optimistic-concurrency revision on
@@ -388,6 +443,7 @@ export async function saveMarkdown({
   wait = () => new Promise((resolve) => setTimeout(resolve, 1500)),
   maxAttempts = 3,
   endpoint = (pageId: string) => `/api/page/${pageId}`,
+  ownBody,
 }: SaveMarkdownOptions): Promise<string> {
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     let response: Response;
@@ -478,7 +534,17 @@ export async function saveMarkdown({
       const sameAsBase =
         typeof trustedBase === "string" &&
         payload.markdown === canonicalPageMarkdown(trustedBase);
-      if (sameAsLocal || sameAsBase) {
+      // A body this tab wrote itself is no one else's edit. Over an older one
+      // of its own this save goes ahead like over its base; behind a newer one
+      // it stops, adopting that body as the base the next save starts from.
+      const own =
+        sameAsLocal || sameAsBase ? undefined : ownBody?.(payload.markdown);
+      if (own === "newer") {
+        setRevision(payload.rev);
+        setBaseMarkdown?.(payload.markdown);
+        throw new SaveSupersededError();
+      }
+      if (sameAsLocal || sameAsBase || own === "older") {
         setRevision(payload.rev);
         setBaseMarkdown?.(payload.markdown);
         if (attempt + 1 < maxAttempts) {

@@ -5,12 +5,16 @@ import {
   decodeDraft,
   encodeDraft,
   encodeSaveRequest,
+  encodeUnloadSaveRequest,
   isDraftOperation,
   latchDraftConflict,
   persistDraft,
   SaveRequestError,
+  SaveSupersededError,
   saveMarkdown,
 } from "./autosave";
+import { applyBodyPatch, bodyHash } from "./body-patch";
+import { canonicalPageMarkdown } from "./page-markdown";
 
 describe("canResumeConflictedDraft", () => {
   it("resumes a latched metadata-only conflict", () => {
@@ -466,6 +470,138 @@ describe("encodeSaveRequest", () => {
     expect(
       JSON.parse(encodeSaveRequest(markdown, "rev-a", markdown, 60 * 1024)),
     ).toEqual({ markdown, rev: "rev-a" });
+  });
+});
+
+describe("encodeUnloadSaveRequest", () => {
+  const long = "A long paragraph of an old page.\n\n".repeat(4_000);
+
+  it("cuts one span per known body, keyed by that body's hash", () => {
+    const encoded = encodeUnloadSaveRequest(
+      `${long}newest\n`,
+      "rev-a",
+      [long, `${long}new`],
+      60 * 1024,
+    );
+    const request = JSON.parse(encoded ?? "null") as {
+      rev: string;
+      patches: Array<{ base: string; at: number; del: number; ins: string }>;
+    };
+    expect(request.rev).toBe("rev-a");
+    expect(request.patches).toHaveLength(2);
+    for (const known of [long, `${long}new`]) {
+      const canonical = canonicalPageMarkdown(known);
+      const patch = request.patches.find((p) => p.base === bodyHash(canonical));
+      expect(patch && applyBodyPatch(canonical, patch)).toBe(
+        canonicalPageMarkdown(`${long}newest`),
+      );
+    }
+    expect(new TextEncoder().encode(encoded ?? "").byteLength).toBeLessThan(1024);
+  });
+
+  it("keeps the spans that fit and drops the one that does not", () => {
+    const encoded = encodeUnloadSaveRequest(
+      `${long}tail`,
+      "rev-a",
+      ["", long],
+      8 * 1024,
+    );
+    const request = JSON.parse(encoded ?? "null") as {
+      patches: Array<{ base: string }>;
+    };
+    expect(request.patches.map((p) => p.base)).toEqual([
+      bodyHash(canonicalPageMarkdown(long)),
+    ]);
+  });
+
+  it("returns null when no span fits or no body is known", () => {
+    expect(encodeUnloadSaveRequest(long, "rev-a", [""], 1024)).toBeNull();
+    expect(encodeUnloadSaveRequest("text", "rev-a", [], 1024)).toBeNull();
+  });
+});
+
+describe("saveMarkdown and a body this tab sent itself", () => {
+  function conflictThenServer(markdown: string) {
+    return vi
+      .fn()
+      .mockResolvedValueOnce(response({ error: "conflict" }, 409))
+      .mockResolvedValueOnce(response({ markdown, rev: "rev-own" }))
+      .mockResolvedValue(response({ rev: "rev-after" }));
+  }
+
+  it("stops an older save, without a conflict, behind a newer body of its own", async () => {
+    let revision = "rev-0";
+    let base = "Base";
+    const fetcher = conflictThenServer("Base one two");
+
+    const save = saveMarkdown({
+      fetcher,
+      id: "page-a",
+      markdown: "Base one",
+      getRevision: () => revision,
+      setRevision: (next) => {
+        revision = next;
+      },
+      getBaseMarkdown: () => base,
+      setBaseMarkdown: (next) => {
+        base = next;
+      },
+      ownBody: (server) => (server === "Base one two" ? "newer" : undefined),
+      wait: async () => {},
+    });
+
+    await expect(save).rejects.toBeInstanceOf(SaveSupersededError);
+    // Two requests: the refused PUT and the read. The older body is never
+    // sent again over the newer one.
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(revision).toBe("rev-own");
+    expect(base).toBe("Base one two");
+  });
+
+  it("writes a newer body over an older body of its own", async () => {
+    let revision = "rev-0";
+    let base = "Base";
+    const fetcher = conflictThenServer("Base one");
+
+    await expect(
+      saveMarkdown({
+        fetcher,
+        id: "page-a",
+        markdown: "Base one two",
+        getRevision: () => revision,
+        setRevision: (next) => {
+          revision = next;
+        },
+        getBaseMarkdown: () => base,
+        setBaseMarkdown: (next) => {
+          base = next;
+        },
+        ownBody: (server) => (server === "Base one" ? "older" : undefined),
+        wait: async () => {},
+      }),
+    ).resolves.toBe("rev-after");
+    expect(JSON.parse(String(fetcher.mock.calls[2][1]?.body))).toEqual({
+      markdown: "Base one two",
+      rev: "rev-own",
+      baseMarkdown: "Base one",
+    });
+  });
+
+  it("still conflicts on a body nobody in this tab wrote", async () => {
+    const fetcher = conflictThenServer("Written in another tab");
+    await expect(
+      saveMarkdown({
+        fetcher,
+        id: "page-a",
+        markdown: "Local",
+        getRevision: () => "rev-0",
+        setRevision: () => {},
+        getBaseMarkdown: () => "Base",
+        setBaseMarkdown: () => {},
+        ownBody: () => undefined,
+        wait: async () => {},
+      }),
+    ).rejects.toMatchObject({ status: 409 });
   });
 });
 

@@ -6,10 +6,12 @@ import {
   createKeyedQueue,
   decodeDraft,
   encodeSaveRequest,
+  encodeUnloadSaveRequest,
   isDraftOperation,
   latchDraftConflict,
   persistDraft,
   SaveRequestError,
+  SaveSupersededError,
   saveMarkdown,
   type StoredDraft,
 } from "@/lib/autosave";
@@ -748,6 +750,24 @@ export function Shell({
   const queuedSaveRef = useRef<Map<string, { id: string; promise: Promise<boolean> }>>(
     new Map(),
   );
+  // Canonical bodies of this tab's saves that are queued or on the wire, by
+  // page and operation. Any of them may be what the server holds by the time
+  // a closing-tab save lands, so that save cuts a span against each.
+  const sentBodiesRef = useRef<Map<string, Map<string, string>>>(new Map());
+  // Closing-tab saves sent per page, oldest first. `supersedes` holds the
+  // operations that were queued when it left: they are older, and must never
+  // write over it. `landed` is set only when the tab lived to read a 2xx.
+  const unloadSavesRef = useRef<
+    Map<
+      string,
+      {
+        operationId: string;
+        markdown: string;
+        supersedes: Set<string>;
+        landed: boolean;
+      }[]
+    >
+  >(new Map());
   const conflictedPagesRef = useRef<Set<string>>(new Set());
   const localRecoveryUnavailableRef = useRef<Set<string>>(new Set());
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -2331,6 +2351,16 @@ export function Shell({
         // edit visible when the action was invoked. If that edit fails, the
         // rewrite is skipped; edits typed later are already queued after it.
         if (prerequisite && !(await prerequisite)) return false;
+        // A closing-tab save that left after this one was queued, and that
+        // this tab saw land, already holds newer text than this body.
+        const unloadSaves = unloadSavesRef.current.get(id) ?? [];
+        if (
+          unloadSaves.some(
+            (sent) => sent.landed && sent.supersedes.has(operationId),
+          )
+        ) {
+          return false;
+        }
         // What the store held for this note before this save, for the task
         // check below. Read here because `saveMarkdown` moves the base
         // markdown on and `cachePut` moves the cache on.
@@ -2345,7 +2375,23 @@ export function Shell({
             setRevision: (next) => revisionsRef.current.set(id, next),
             getBaseMarkdown: () => baseMarkdownRef.current.get(id),
             setBaseMarkdown: (next) => baseMarkdownRef.current.set(id, next),
+            ownBody: (server) => {
+              const sent = (unloadSavesRef.current.get(id) ?? []).find(
+                (candidate) =>
+                  candidate.operationId !== operationId &&
+                  candidate.markdown === server,
+              );
+              if (!sent) return undefined;
+              return sent.supersedes.has(operationId) ? "newer" : "older";
+            },
           });
+          // A closing-tab save this one has now written over, or that left
+          // before it, is history: keep only those newer than this body.
+          const stillNewer = (unloadSavesRef.current.get(id) ?? []).filter(
+            (sent) => sent.supersedes.has(operationId),
+          );
+          if (stillNewer.length) unloadSavesRef.current.set(id, stillNewer);
+          else unloadSavesRef.current.delete(id);
           setPage((current) =>
             current?.id === id ? { ...current, rev: revision } : current,
           );
@@ -2410,6 +2456,14 @@ export function Shell({
         } catch (error) {
           const currentPending =
             pendingRef.current?.id === id ? pendingRef.current : null;
+          if (error instanceof SaveSupersededError) {
+            // Not a failure and not a conflict: the newer body is this tab's
+            // own. The newest edit saves next, against that body.
+            if (currentPending && currentPending.operationId !== operationId) {
+              queueMicrotask(() => flushPendingRef.current());
+            }
+            return false;
+          }
           if (error instanceof SaveRequestError && error.status === 409) {
             conflictedPagesRef.current.add(id);
             const latest = currentPending ?? { id, md, operationId };
@@ -2439,10 +2493,16 @@ export function Shell({
         }
       });
       queuedSaveRef.current.set(operationKey, { id, promise });
+      const sentBodies = sentBodiesRef.current.get(id) ?? new Map<string, string>();
+      sentBodies.set(operationId, canonicalPageMarkdown(md));
+      sentBodiesRef.current.set(id, sentBodies);
       void promise.finally(() => {
         if (queuedSaveRef.current.get(operationKey)?.promise === promise) {
           queuedSaveRef.current.delete(operationKey);
         }
+        const bodies = sentBodiesRef.current.get(id);
+        bodies?.delete(operationId);
+        if (bodies && !bodies.size) sentBodiesRef.current.delete(id);
       });
       return promise;
     },
@@ -2556,13 +2616,68 @@ export function Shell({
     ],
   );
 
-  // Save as soon as the tab backgrounds. pagehide adds a keepalive fallback;
-  // the local draft remains until a confirmed response, so a hard close can be
-  // recovered even when the browser terminates the request.
+  // Save as soon as the tab backgrounds or goes away. A closing tab, and an
+  // iOS tab frozen right after it hides, never sends an ordinary fetch made
+  // then, so the newest body also leaves as a keepalive request, whatever is
+  // queued. The local draft remains until an ordinary save confirms it, so a
+  // request the browser still drops is recovered on the next load.
   useEffect(() => {
+    const sendUnloadSave = () => {
+      editorFlushRef.current();
+      const p = pendingRef.current;
+      if (!p) return;
+      if (conflictedPagesRef.current.has(p.id)) return;
+      const sent = unloadSavesRef.current.get(p.id) ?? [];
+      // visibilitychange and pagehide both fire on a close: one request per
+      // edit is enough, and a second would only spend the keepalive budget.
+      if (sent.some((entry) => entry.operationId === p.operationId)) return;
+      const revision = revisionsRef.current.get(p.id) ?? "";
+      const base = baseMarkdownRef.current.get(p.id);
+      const queued = sentBodiesRef.current.get(p.id) ?? new Map<string, string>();
+      // Browsers refuse keepalive bodies over 64 KiB in flight per page.
+      const budget = 60 * 1024;
+      const body =
+        encodeUnloadSaveRequest(
+          p.md,
+          revision,
+          [
+            ...queued.values(),
+            ...sent.map((entry) => entry.markdown),
+            ...(base === undefined ? [] : [base]),
+          ],
+          budget,
+        ) ??
+        // A legacy draft with no trusted base and nothing on the wire can
+        // only go whole, under its exact rev, when it fits.
+        (base === undefined && queued.size === 0 && sent.length === 0
+          ? encodeSaveRequest(p.md, revision)
+          : null);
+      if (body === null || new TextEncoder().encode(body).byteLength > budget) {
+        return;
+      }
+      const entry = {
+        operationId: p.operationId,
+        markdown: canonicalPageMarkdown(p.md),
+        supersedes: new Set(
+          [...queued.keys()].filter((op) => op !== p.operationId),
+        ),
+        landed: false,
+      };
+      unloadSavesRef.current.set(p.id, [...sent, entry].slice(-4));
+      void apiFetch(`/api/page/${p.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body,
+        keepalive: true, // survives the unload
+      })
+        .then((response) => {
+          if (response.ok) entry.landed = true;
+        })
+        .catch(() => {});
+    };
     const onVisibilityChange = () => {
       if (document.visibilityState === "hidden") {
-        editorFlushRef.current();
+        sendUnloadSave();
         flushPendingRef.current();
       }
     };
@@ -2570,31 +2685,13 @@ export function Shell({
       editorFlushRef.current();
       flushPendingRef.current();
     };
-    const flushKeepalive = () => {
-      editorFlushRef.current();
-      const p = pendingRef.current;
-      if (!p) return;
-      if (conflictedPagesRef.current.has(p.id)) return;
-      if (saveQueueRef.current.has(p.id)) return;
-      void apiFetch(`/api/page/${p.id}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: encodeSaveRequest(
-            p.md,
-            revisionsRef.current.get(p.id) ?? "",
-            baseMarkdownRef.current.get(p.id),
-            60 * 1024,
-          ),
-          keepalive: true, // survives the unload
-        }).catch(() => {});
-    };
     document.addEventListener("visibilitychange", onVisibilityChange);
     window.addEventListener("online", onOnline);
-    window.addEventListener("pagehide", flushKeepalive);
+    window.addEventListener("pagehide", sendUnloadSave);
     return () => {
       document.removeEventListener("visibilitychange", onVisibilityChange);
       window.removeEventListener("online", onOnline);
-      window.removeEventListener("pagehide", flushKeepalive);
+      window.removeEventListener("pagehide", sendUnloadSave);
     };
   }, []);
 

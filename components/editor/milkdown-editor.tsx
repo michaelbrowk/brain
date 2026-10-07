@@ -406,8 +406,13 @@ function Inner({
   const blockSerialization = useCallback(() => {
     editorSession.blockSerialization();
   }, [editorSession]);
+  // Set before the view exists when the page's load would drop content; the
+  // page then opens read-only and the file stays as it is on disk. The guard
+  // refuses every change to the document; nothing serializes either, so no
+  // path that reaches the save can write the shortened body.
+  const lossyLoad = useRef(false);
   const emitMarkdown = useCallback((markdown: string) => {
-    if (editorSession.isSerializationBlocked()) {
+    if (lossyLoad.current || editorSession.isSerializationBlocked()) {
       onSerialized?.();
       return;
     }
@@ -475,9 +480,6 @@ function Inner({
       pageRefNestingPending,
     ],
   );
-  // Set before the view exists when the page's load would drop content; the
-  // page then opens read-only and the file stays as it is on disk.
-  const lossyLoad = useRef(false);
   const wrap = useRef<HTMLDivElement | null>(null);
   const calloutEmojiTrigger = useRef<HTMLButtonElement | null>(null);
   const calloutEmojiId = useRef(0);
@@ -497,9 +499,14 @@ function Inner({
           // under them — start scrolling inside the band and land below it
           scrollThreshold: { top: 64, right: 0, bottom: 24, left: 0 },
           scrollMargin: { top: 76, right: 0, bottom: 32, left: 0 },
-          attributes: {
+          // A function so the lossy-load state, known only once the page
+          // has been parsed, reaches the element it describes.
+          attributes: () => ({
             "aria-label": "Page content",
             "aria-multiline": "true",
+            ...(lossyLoad.current
+              ? { "aria-readonly": "true", "data-lossy-load": "true" }
+              : {}),
             ...(pageRefNestingPending || mutationsFrozen
               ? {
                   "aria-busy": "true",
@@ -509,7 +516,7 @@ function Inner({
                     : { "data-page-ref-restore-pending-editor": "true" }),
                 }
               : {}),
-          },
+          }),
         });
         ctx
           .get(listenerCtx)
@@ -795,6 +802,8 @@ function Inner({
     const onCalloutEmoji = (event: Event) => {
       if (!(event instanceof CustomEvent) || !isCalloutEmojiDetail(event.detail)) return;
       event.stopPropagation();
+      // A lossy page takes no pick, so it opens no picker either.
+      if (lossyLoad.current) return;
       setCalloutEmoji({ ...event.detail, id: calloutEmojiId.current++ });
     };
 
@@ -823,7 +832,7 @@ function Inner({
   const pickCalloutEmoji = (emoji: string) => {
     const anchor = calloutEmoji;
     setCalloutEmoji(null);
-    if (!anchor) return;
+    if (!anchor || lossyLoad.current) return;
 
     get()?.action((ctx) => {
       const view = ctx.get(editorViewCtx);
@@ -844,10 +853,12 @@ function Inner({
         // A frozen editor takes nothing. Say so during the drag: without a
         // preventDefault here the browser never arms the drop, and `no-drop`
         // is what tells the reader that before they let go.
-        if (mutationsFrozen && e.dataTransfer) e.dataTransfer.dropEffect = "none";
+        if ((mutationsFrozen || lossyLoad.current) && e.dataTransfer) {
+          e.dataTransfer.dropEffect = "none";
+        }
       }}
       onDropCapture={(e) => {
-        if (mutationsFrozen) {
+        if (mutationsFrozen || lossyLoad.current) {
           e.preventDefault();
           e.stopPropagation();
           return;
@@ -900,7 +911,7 @@ function Inner({
         })();
       }}
       onPasteCapture={(e) => {
-        if (mutationsFrozen) {
+        if (mutationsFrozen || lossyLoad.current) {
           e.preventDefault();
           e.stopPropagation();
           return;

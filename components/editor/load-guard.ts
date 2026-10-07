@@ -7,7 +7,9 @@ import {
 } from "@milkdown/kit/core";
 import { createTimer, type MilkdownPlugin } from "@milkdown/kit/ctx";
 import type { Attrs, Node as ProseNode, NodeType, Schema } from "@milkdown/kit/prose/model";
+import { Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import { ParserState } from "@milkdown/kit/transformer";
+import { $prose } from "@milkdown/kit/utils";
 
 /** A PAGE THAT WOULD LOSE CONTENT ON LOAD IS NEVER OPENED FOR EDITING.
  *
@@ -22,7 +24,8 @@ import { ParserState } from "@milkdown/kit/transformer";
  *  closed or added that never reached its parent. The page's load is the first
  *  parse an editor makes, and when it drops anything `onLoss` hears how much,
  *  before the view exists, so the caller can open the page read-only and keep
- *  the file as it is on disk. Later parses (a Markdown paste) are counted the
+ *  the file as it is on disk, and every change to the document is refused
+ *  from then on. Later parses (a Markdown paste) are counted the
  *  same way and not reported: what they lose was never saved. */
 class CountingParserState extends ParserState {
   dropped = 0;
@@ -48,9 +51,21 @@ class CountingParserState extends ParserState {
   }
 }
 
-export function loadGuard(onLoss: (dropped: number) => void): MilkdownPlugin {
+export function loadGuard(onLoss: (dropped: number) => void): MilkdownPlugin[] {
   const ready = createTimer("BrainLoadGuardReady");
-  return (ctx) => {
+  let lossy = false;
+  // Read-only stops typing and nothing else: a task checkbox, a callout's
+  // icon, a file drop and every other control the page draws dispatch on
+  // their own, and each one saved the shortened document. A lossy page
+  // refuses every change to its document, whoever asks.
+  const refuseChanges = $prose(
+    () =>
+      new Plugin({
+        key: new PluginKey("brainLoadGuardRefuse"),
+        filterTransaction: (transaction) => !(lossy && transaction.docChanged),
+      }),
+  );
+  const countingParser: MilkdownPlugin = (ctx) => {
     ctx.record(ready);
     // The editor state parses the page as soon as its timers are done; this
     // one makes it wait until the counting parser is in place.
@@ -66,7 +81,10 @@ export function loadGuard(onLoss: (dropped: number) => void): MilkdownPlugin {
         const doc = state.toDoc();
         if (!loaded) {
           loaded = true;
-          if (state.dropped > 0) onLoss(state.dropped);
+          if (state.dropped > 0) {
+            lossy = true;
+            onLoss(state.dropped);
+          }
         }
         return doc;
       });
@@ -76,4 +94,5 @@ export function loadGuard(onLoss: (dropped: number) => void): MilkdownPlugin {
       };
     };
   };
+  return [countingParser, refuseChanges];
 }

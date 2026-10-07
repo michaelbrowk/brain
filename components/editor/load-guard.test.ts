@@ -80,3 +80,103 @@ describe("loadGuard", () => {
     await editor.destroy();
   });
 });
+
+/** A shape that loses content today, found in real notes: a toggle inside a
+ *  column. The parser drops the column and the toggle's words with it. */
+const LOSSY = [
+  "* [ ] task line",
+  "",
+  ':::callout{icon="💡"}',
+  "aside",
+  ":::",
+  "",
+  "::::cols",
+  ":::col",
+  ':::toggle{summary="Sum"}',
+  "SECRET WORDS",
+  ":::",
+  ":::",
+  "",
+  ":::col",
+  "b",
+  ":::",
+  "::::",
+].join("\n");
+
+describe("a page whose load dropped content", () => {
+  async function lossyPage() {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { taskCheckboxMarkdown } = await import("./task-checkbox");
+    const { callout } = await import("./callout");
+    const { columns } = await import("./columns");
+    const { toggle } = await import("./toggle");
+    const { listener, listenerCtx } = await import("@milkdown/kit/plugin/listener");
+    const { editorViewCtx } = await import("@milkdown/kit/core");
+    const saves: string[] = [];
+    const onLoss = vi.fn();
+    const root = document.createElement("div");
+    document.body.append(root);
+    const editor = await Editor.make()
+      .config((ctx) => {
+        ctx.set(rootCtx, root);
+        ctx.set(defaultValueCtx, LOSSY);
+        ctx.get(listenerCtx).markdownUpdated((_, md, prev) => {
+          if (md !== prev) saves.push(md);
+        });
+      })
+      .use(commonmark)
+      .use(gfm)
+      .use(taskCheckboxMarkdown)
+      .use(columns)
+      .use(callout)
+      .use(toggle)
+      .use(loadGuard(onLoss))
+      .use(listener)
+      .create();
+    const view = editor.action((ctx) => ctx.get(editorViewCtx));
+    return { editor, view, root, saves, onLoss };
+  }
+
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 400));
+
+  // Read-only stops typing, not the controls a NodeView draws, nor the
+  // editor's own dispatches: each of these saved the shortened document.
+  it("refuses a task checkbox tick", async () => {
+    const { editor, view, root, saves, onLoss } = await lossyPage();
+    expect(onLoss).toHaveBeenCalled();
+    const before = view.state.doc;
+    root
+      .querySelector<HTMLElement>(".brain-task-box")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    await settle();
+    expect(view.state.doc.eq(before)).toBe(true);
+    expect(saves).toEqual([]);
+    await editor.destroy();
+  });
+
+  it("refuses a callout icon pick", async () => {
+    const { editor, view, saves } = await lossyPage();
+    const before = view.state.doc;
+    let pos = -1;
+    view.state.doc.descendants((node, at) => {
+      if (node.type.name === "callout") pos = at;
+    });
+    view.dispatch(view.state.tr.setNodeAttribute(pos, "icon", "🔥"));
+    await settle();
+    expect(view.state.doc.eq(before)).toBe(true);
+    expect(saves).toEqual([]);
+    await editor.destroy();
+  });
+
+  it("refuses a drop or any other insertion", async () => {
+    const { editor, view, saves } = await lossyPage();
+    const before = view.state.doc;
+    const { insert } = await import("@milkdown/kit/utils");
+    editor.action(insert("[📎 file.pdf](/_attachments/file.pdf)"));
+    view.dispatch(view.state.tr.insertText("typed", 1));
+    await settle();
+    expect(view.state.doc.eq(before)).toBe(true);
+    expect(saves).toEqual([]);
+    await editor.destroy();
+  });
+});

@@ -152,9 +152,7 @@ test("closing the tab mid-save sends the newest text", async ({ page, context })
   const held = new Promise<void>((resolve) => {
     markHeld = resolve;
   });
-  // On the context, so the closing request is still routed after its page
-  // is gone.
-  await context.route(`**/api/page/${id}`, async (route) => {
+  await page.route(`**/api/page/${id}`, async (route) => {
     if (isOrdinarySave(route)) {
       markHeld();
       await gate;
@@ -168,13 +166,16 @@ test("closing the tab mid-save sends the newest text", async ({ page, context })
   await page.keyboard.type(" One.");
   await held;
   await page.keyboard.type(" Two.");
+  // The older save stays held. Interception ends here: a request a closing
+  // page sends cannot be continued by a route whose page is gone, and the
+  // browser, not the test, has to carry it from now on.
+  await page.unroute(`**/api/page/${id}`);
   await page.close({ runBeforeUnload: true });
 
   const reader = await context.newPage();
   await reader.goto("/");
   await expect.poll(() => serverBody(reader, id)).toBe("Base body. One. Two.");
   release();
-  await context.unroute(`**/api/page/${id}`);
 });
 
 test("@webkit a page over 64 KiB still leaves with the last words typed", async ({

@@ -8,6 +8,7 @@ import {
   TextSelection,
   type Transaction,
 } from "@milkdown/kit/prose/state";
+import { keymap } from "@milkdown/kit/prose/keymap";
 import { Decoration, DecorationSet } from "@milkdown/kit/prose/view";
 import { $prose, $useKeymap } from "@milkdown/kit/utils";
 
@@ -670,6 +671,39 @@ const escapeKeymap = $useKeymap("brainEscapeKeymap", {
   LeaveEditor: { shortcuts: "Escape", priority: 0, command: () => leaveEditor },
 });
 
+/** ENTER ON A PAGE ROW WRITES BELOW IT.
+ *
+ *  A row is a line holding one page ref and nothing else, and a caret on it
+ *  sits before the ref or after it. Before it, Enter did what Enter does at
+ *  the start of any line: an empty line above, and the caret still on the
+ *  row, so every further Enter pushed the row down and the words typed next
+ *  went into the row. The two places look alike (on a phone the caret is drawn
+ *  after the ref whichever it is), so on a row both answer as the place after
+ *  it: the caret moves there, and the preset's own Enter (a new paragraph, a
+ *  new list item) runs from it, which a returned false hands the key to. */
+export const enterAfterPageRow: Command = (state, dispatch, view) => {
+  const { selection } = state;
+  if (!(selection instanceof TextSelection) || !selection.empty) return false;
+  const { $from } = selection;
+  const line = $from.parent;
+  if (
+    $from.parentOffset !== 0 ||
+    line.type.name !== "paragraph" ||
+    line.childCount !== 1 ||
+    line.firstChild?.type.name !== "page_ref"
+  ) {
+    return false;
+  }
+  if (dispatch && view) {
+    view.dispatch(state.tr.setSelection(TextSelection.create(state.doc, $from.end())));
+  }
+  return false;
+};
+
+/** A `$prose` keymap, which Milkdown places before its own merged keymap, so
+ *  the moved caret is what the preset's Enter reads. */
+const pageRowEnterKeymap = $prose(() => keymap({ Enter: enterAfterPageRow }));
+
 export const editingCore = [
   gapCursorPlugin,
   trailingParagraph,
@@ -679,4 +713,5 @@ export const editingCore = [
   codeTabKeymap,
   keepTabKeymap,
   escapeKeymap,
+  pageRowEnterKeymap,
 ].flat();

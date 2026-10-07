@@ -73,10 +73,12 @@ export function loadGuard(onLoss: (dropped: number) => void): MilkdownPlugin[] {
     return async () => {
       await ctx.wait(ParserReady);
       const remark = ctx.get(remarkCtx);
-      const state = new CountingParserState(ctx.get(schemaCtx));
+      const schema = ctx.get(schemaCtx);
       let loaded = false;
       ctx.set(parserCtx, (text: string) => {
-        state.dropped = 0;
+        // A state of its own per parse, so one parse's count never carries
+        // into the next.
+        const state = new CountingParserState(schema);
         state.run(remark, text);
         const doc = state.toDoc();
         if (!loaded) {

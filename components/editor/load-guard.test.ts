@@ -180,3 +180,42 @@ describe("a page whose load dropped content", () => {
     await editor.destroy();
   });
 });
+
+describe("what the guard counts", () => {
+  it("counts a node the parser could not add, not only one it could not close", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { $nodeSchema } = await import("@milkdown/kit/utils");
+    // A block that takes paragraphs, handed bare text: `addNode` cannot
+    // build it and the parser drops it in silence.
+    const box = $nodeSchema("zz_box", () => ({
+      group: "block",
+      content: "paragraph+",
+      parseDOM: [{ tag: "section" }],
+      toDOM: () => ["section", 0],
+      parseMarkdown: {
+        match: (node) => node.type === "zzBox",
+        runner: (state, _node, type) => {
+          state.addNode(type, undefined, [type.schema.text("loose")]);
+        },
+      },
+      toMarkdown: { match: () => false, runner: () => {} },
+    }));
+    const boxes = $remark("zzBoxes", () => () => (tree: Root) => {
+      const root = tree as unknown as MarkdownNode;
+      root.children = root.children?.map((child) =>
+        child.type === "paragraph" ? { type: "zzBox" } : child,
+      );
+    });
+    const { editor, onLoss } = await load("BOX", [box, boxes]);
+    expect(onLoss).toHaveBeenCalledWith(1);
+    await editor.destroy();
+  });
+
+  it("holds the editor state back until the counting parser is in place", async () => {
+    const { editorStateTimerCtx } = await import("@milkdown/kit/core");
+    const { editor } = await load("text");
+    const timers = editor.action((ctx) => ctx.get(editorStateTimerCtx));
+    expect(timers.map((timer) => timer.name)).toContain("BrainLoadGuardReady");
+    await editor.destroy();
+  });
+});

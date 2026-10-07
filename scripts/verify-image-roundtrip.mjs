@@ -58,6 +58,11 @@ async function main() {
     { name: "image: caption only", markdown: "![c](u)" },
     { name: "image: width + center align", markdown: '![c](u "w=320 align=center")' },
     { name: "image: plain empty caption", markdown: "![](u)" },
+    // Inline content keeps its inline image: these two used to lose the whole
+    // heading and the whole row on load.
+    { name: "image: inside a heading", markdown: "## Title ![c](u) end" },
+    { name: "image: inside table cells", markdown: "| a         | b       |\n| --------- | ------- |\n| x ![c](u) | ![c](u) |" },
+    { name: "image: opening a list item", markdown: "* ![c](u)" },
   ];
 
   let failures = 0;

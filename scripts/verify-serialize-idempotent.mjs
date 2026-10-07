@@ -35,7 +35,8 @@ async function installDomGlobals() {
 }
 
 const PLUGIN_FILES = [
-  "normalize", "color-mark", "columns", "empty-block", "callout", "toggle", "image", "math", "page-ref",
+  "normalize", "table-cell", "color-mark", "columns", "empty-block", "callout", "toggle", "image", "math", "page-ref",
+  "load-guard",
 ];
 
 async function importPlugins() {
@@ -96,6 +97,15 @@ const FIXTURES = [
       "![alt text](/_attachments/pic2.jpg)",
     ].join("\n"),
   },
+  {
+    // An image inside inline content once cost the whole heading or row on
+    // load. The load guard below fails the case if anything is dropped.
+    name: "images inside a heading and table cells, line breaks in a cell",
+    md: [
+      "## Shot ![s](/_attachments/s.png) here", "",
+      "| a | b |", "| - | - |", "| x ![i](/_attachments/i.png) | one<br>two |",
+    ].join("\n"),
+  },
 ];
 
 async function collectNotes(dir, out) {
@@ -134,6 +144,7 @@ async function main() {
 
   const plugins = [
     m["normalize"].normalizeLegacy,
+    m["table-cell"].tableCells,
     m["color-mark"].colorMarks,
     m["columns"].columns,
     m["empty-block"].emptyBlocks,
@@ -152,10 +163,13 @@ async function main() {
     cases.push(...real.filter((c) => c.md.length > 0));
   }
 
+  // No document in the corpus may lose content on load: the guard counts the
+  // nodes the parser drops in silence, and the case fails on the first one.
   const serialize = async (md, expectedPageRefs) => {
     const root = document.createElement("div");
     document.body.append(root);
     let editor = null;
+    let dropped = 0;
     try {
       editor = await Editor.make()
         .config((ctx) => {
@@ -165,7 +179,9 @@ async function main() {
         .use(commonmark)
         .use(gfm)
         .use(plugins.flat())
+        .use(m["load-guard"].loadGuard((count) => { dropped = count; }))
         .create();
+      if (dropped > 0) throw new Error(`the load dropped ${dropped} node(s)`);
       if (expectedPageRefs !== undefined) {
         const view = editor.action((ctx) => ctx.get(editorViewCtx));
         let pageRefNodes = 0;

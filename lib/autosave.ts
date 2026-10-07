@@ -138,6 +138,13 @@ export function encodeSaveRequest(
  * first while the request stays under `maxBytes`, so a long page with a few
  * typed words fits, and a huge paste the request cannot carry is null: its
  * draft stays in localStorage for the next load. */
+/** Above this many characters a page is not cut at pagehide. Hashing runs on
+ *  the main thread while the tab is going away: about 30 ms per million
+ *  characters per known body here, and a page of several million characters
+ *  with a few saves on the wire would stall the close for most of a second.
+ *  Such a page keeps its local draft and the ordinary save made on hide. */
+export const UNLOAD_PATCH_MAX_CHARS = 1_000_000;
+
 export function encodeUnloadSaveRequest(
   markdown: string,
   revision: string,
@@ -145,11 +152,12 @@ export function encodeUnloadSaveRequest(
   maxBytes: number,
 ): string | null {
   const newest = canonicalPageMarkdown(markdown);
+  if (newest.length > UNLOAD_PATCH_MAX_CHARS) return null;
   const seen = new Set<string>();
   const candidates: { patch: BodyPatch; size: number }[] = [];
   for (const known of knownBodies) {
     const body = canonicalPageMarkdown(known);
-    if (seen.has(body)) continue;
+    if (seen.has(body) || body.length > UNLOAD_PATCH_MAX_CHARS) continue;
     seen.add(body);
     const patch = { base: bodyHash(body), ...diffBodyPatch(body, newest) };
     candidates.push({ patch, size: JSON.stringify(patch).length });

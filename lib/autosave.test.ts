@@ -16,6 +16,7 @@ import {
   saveMarkdown,
   saveOperationSeq,
   ownSavesAround,
+  UNLOAD_PATCH_MAX_CHARS,
   type FetchLike,
   type OwnSaves,
 } from "./autosave";
@@ -518,6 +519,27 @@ describe("encodeUnloadSaveRequest", () => {
     expect(request.patches.map((p) => p.base)).toEqual([
       bodyHash(canonicalPageMarkdown(long)),
     ]);
+  });
+
+  it("prefers the small span when the two do not fit together", () => {
+    const page = "x".repeat(2_000);
+    const small = JSON.stringify({ base: "0".repeat(64), at: 0, del: 0, ins: "tail" });
+    const big = JSON.stringify({ base: "0".repeat(64), at: 0, del: 0, ins: `${page}tail` });
+    // Room for either alone, not for both.
+    const budget = big.length + 60;
+    expect(small.length + big.length).toBeGreaterThan(budget);
+    const encoded = encodeUnloadSaveRequest(`${page}tail`, "r", ["", page], budget);
+    const request = JSON.parse(encoded ?? "null") as { patches: Array<{ base: string }> };
+    expect(request.patches.map((p) => p.base)).toEqual([bodyHash(page)]);
+  });
+
+  it("does not hash a page over a million characters at pagehide", () => {
+    const huge = "Привет мир 😀 ".repeat(80_000);
+    expect(huge.length).toBeGreaterThan(UNLOAD_PATCH_MAX_CHARS);
+    expect(encodeUnloadSaveRequest(`${huge} tail`, "r", [huge], 60 * 1024)).toBeNull();
+    // Under the bound it still goes.
+    const large = huge.slice(0, UNLOAD_PATCH_MAX_CHARS - 10);
+    expect(encodeUnloadSaveRequest(`${large} tail`, "r", [large], 60 * 1024)).not.toBeNull();
   });
 
   it("returns null when no span fits or no body is known", () => {

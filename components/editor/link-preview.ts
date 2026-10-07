@@ -527,13 +527,27 @@ export function pasteLinkCard(state: EditorState, pasted: string): Transaction |
   return tr.setSelection(TextSelection.create(tr.doc, after + 1)).scrollIntoView();
 }
 
-function linkMarkedTo(node: ProseNode, link: MarkType, href: string) {
+/** Whether every piece of the line is already linked to its text. The same
+ *  allowance a card makes on reading: a label that differs from its href by a
+ *  trailing slash is that URL, and rewriting the href to match would change a
+ *  file nobody edited. */
+function linkMarkedTo(node: ProseNode, link: MarkType, text: string) {
   let marked = true;
   node.forEach((child) => {
     const mark = link.isInSet(child.marks);
-    if (!child.isText || !mark || mark.attrs.href !== href) marked = false;
+    if (!child.isText || !mark || !sameUrlText(text, String(mark.attrs.href ?? ""))) marked = false;
   });
   return marked;
+}
+
+/** The title the line's link carries, which an edit of its address keeps. */
+function linkTitle(node: ProseNode, link: MarkType) {
+  let title: unknown = null;
+  node.forEach((child) => {
+    const mark = link.isInSet(child.marks);
+    if (title === null && mark) title = mark.attrs.title ?? null;
+  });
+  return title;
 }
 
 /** The line a card was opened into, after each change.
@@ -574,7 +588,7 @@ export function settleLinkCardEditing(
     const to = pos + node.nodeSize - 1;
     return state.tr
       .removeMark(from, to, link)
-      .addMark(from, to, link.create({ href: text }))
+      .addMark(from, to, link.create({ href: text, title: linkTitle(node, link) }))
       .setMeta("addToHistory", false);
   }
 

@@ -382,3 +382,31 @@ describe("link card: an opened URL edited through an IME", () => {
     expect(hrefOfFirstLine(view)).toBe(`${URL_TEXT}/x`);
   });
 });
+
+describe("link card: Backspace and leaving, at the edges", () => {
+  it("Backspace inside the line after a card deletes a character, the card stays", async () => {
+    const { view } = await mount(`<${URL_TEXT}>\n\nafter`);
+    caretAt(view, startOf(view, 1) + 2);
+    expect(key(view, "Backspace")).toBe(false);
+    expect(blockNames(view)).toEqual(["link_card", "paragraph"]);
+  });
+
+  it("opening and leaving a trailing-slash card without an edit keeps its spelling", async () => {
+    const source = "[https://example.com/a/](https://example.com/a)\n\nnext";
+    const { view, markdown } = await mount(source);
+    caretAt(view, startOf(view, 1));
+    key(view, "Backspace");
+    caretAt(view, view.state.doc.content.size - 1);
+    expect(blockNames(view)).toEqual(["link_card", "paragraph"]);
+    expect(markdown()).toBe(source);
+  });
+
+  it("editing a titled card keeps its title", async () => {
+    const { view, markdown } = await mount(`[${URL_TEXT}](${URL_TEXT} "Title")\n\nnext`);
+    caretAt(view, startOf(view, 1));
+    key(view, "Backspace");
+    type(view, "/x");
+    caretAt(view, view.state.doc.content.size - 1);
+    expect(markdown()).toBe(`[${URL_TEXT}/x](${URL_TEXT}/x "Title")\n\nnext`);
+  });
+});

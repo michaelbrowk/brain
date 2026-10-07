@@ -86,19 +86,38 @@ function sameUrlText(text: string, href: string) {
   return visible.replace(/\/$/, "") === href.replace(/\/$/, "");
 }
 
-/** The link a paragraph would become a card for, or null. */
-function bareExternalLink(node: ProseNode) {
-  if (node.type.name !== "paragraph" || node.childCount !== 1) return null;
+/** The card an opened line is drawn as when the caret leaves it, or null.
+ *
+ *  The line has to be a URL and nothing else: text alone, no whitespace, and
+ *  every piece of it inside a link with no other mark. The address is the
+ *  text. An IME composition writes its characters into the line without the
+ *  link following them, so a line can carry a stale href, and the text is
+ *  what the reader saw and checked. */
+function cardForLine(node: ProseNode) {
+  if (node.type.name !== "paragraph" || node.childCount === 0) return null;
+  const text = node.textContent;
+  if (!isUrlText(text)) return null;
 
-  const child = node.child(0);
-  if (!child.isText || child.marks.length !== 1) return null;
+  let href: string | null = null;
+  let title: unknown = null;
+  let linked = true;
+  node.forEach((child) => {
+    const mark = child.marks[0];
+    if (!child.isText || child.marks.length !== 1 || mark.type.name !== "link") {
+      linked = false;
+      return;
+    }
+    const markHref = typeof mark.attrs.href === "string" ? mark.attrs.href : "";
+    if (href === null) {
+      href = markHref;
+      title = mark.attrs.title ?? null;
+    } else if (href !== markHref) {
+      href = "";
+    }
+  });
+  if (!linked || href === null) return null;
 
-  const link = child.marks[0];
-  if (link.type.name !== "link") return null;
-  const href = typeof link.attrs.href === "string" ? link.attrs.href : "";
-  if (!externalHttpUrl(href) || !sameUrlText(child.text ?? "", href)) return null;
-
-  return { href, text: child.text ?? href, title: link.attrs.title ?? null };
+  return { href: sameUrlText(text, href) ? (href as string) : text, text, title };
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string) {
@@ -522,9 +541,10 @@ function linkMarkedTo(node: ProseNode, link: MarkType, href: string) {
  *  While the caret is in it, the link's address follows its text, so an
  *  edited URL is saved as the URL the reader sees rather than the one the
  *  card had. Not during an IME composition, whose text node must not be
- *  rewritten under it; the next keystroke catches up. Once the caret leaves,
- *  a line that is still a bare URL is drawn as a card again, and anything else
- *  stays the text it now is.
+ *  rewritten under it; the next change of any kind catches up. Once the caret
+ *  leaves, a line that is still a URL is drawn as a card again with that text
+ *  as its address (`cardForLine`), and anything else stays the text it now
+ *  is.
  *
  *  Only that one line is looked at, never the document. */
 export function settleLinkCardEditing(
@@ -541,8 +561,11 @@ export function settleLinkCardEditing(
   const { selection } = state;
   const inside = selection.from > pos && selection.to < pos + node.nodeSize;
   if (inside) {
+    // A change that only moved the selection counts too: one of those is
+    // what follows the end of a composition, and it is the first chance to
+    // bring the href up to the text the composition wrote.
     const link = state.schema.marks.link;
-    if (!link || !transactions.some((tr) => tr.docChanged)) return null;
+    if (!link) return null;
     if (transactions.some((tr) => tr.getMeta("composition") !== undefined)) return null;
     const text = node.textContent;
     if (!isUrlText(text)) return null;
@@ -556,10 +579,10 @@ export function settleLinkCardEditing(
   }
 
   const tr = state.tr.setMeta(linkCardEditingKey, null);
-  const bare = bareExternalLink(node);
+  const card = cardForLine(node);
   const cardType = state.schema.nodes[LINK_CARD_NODE];
-  if (bare && cardType) {
-    tr.replaceWith(pos, pos + node.nodeSize, cardFromLink(cardType, bare));
+  if (card && cardType) {
+    tr.replaceWith(pos, pos + node.nodeSize, cardFromLink(cardType, card));
   }
   return tr;
 }

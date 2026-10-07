@@ -337,3 +337,48 @@ describe("link card: words typed after an opened URL", () => {
     expect(view.dom.querySelector(".brain-embed")).toBeNull();
   });
 });
+
+describe("link card: an opened URL edited through an IME", () => {
+  function openAfterCard(view: EditorView) {
+    caretAt(view, startOf(view, 1));
+    key(view, "Backspace");
+  }
+
+  function compose(view: EditorView, text: string, from: number, to = from) {
+    const tr = view.state.tr.insertText(text, from, to).setMeta("composition", 1);
+    view.dispatch(tr);
+  }
+
+  function hrefOfFirstLine(view: EditorView) {
+    const child = view.state.doc.firstChild?.firstChild;
+    const mark = child?.marks.find((m) => m.type.name === "link");
+    return mark?.attrs.href;
+  }
+
+  it("leaving the line draws the card for the text that is there", async () => {
+    const { view, markdown } = await mount(`<${URL_TEXT}>\n\nnext`);
+    openAfterCard(view);
+    compose(view, "/x", view.state.selection.from);
+    caretAt(view, view.state.doc.content.size - 1);
+    expect(blockNames(view)).toEqual(["link_card", "paragraph"]);
+    expect(markdown()).toBe(`<${URL_TEXT}/x>\n\nnext`);
+  });
+
+  it("a host replaced by composition is the host saved, never the old one", async () => {
+    const { view, markdown } = await mount(`<${URL_TEXT}>\n\nnext`);
+    openAfterCard(view);
+    const start = 1 + "https://".length;
+    compose(view, "evil", start, start + "example".length);
+    caretAt(view, view.state.doc.content.size - 1);
+    expect(markdown()).toBe("<https://evil.com/post>\n\nnext");
+  });
+
+  it("the caret moving after the composition ends brings the href up to the text", async () => {
+    const { view } = await mount(`<${URL_TEXT}>\n\nnext`);
+    openAfterCard(view);
+    compose(view, "/x", view.state.selection.from);
+    expect(hrefOfFirstLine(view)).toBe(URL_TEXT);
+    caretAt(view, 3);
+    expect(hrefOfFirstLine(view)).toBe(`${URL_TEXT}/x`);
+  });
+});

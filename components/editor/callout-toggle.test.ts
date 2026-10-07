@@ -316,6 +316,13 @@ describe("inserting a block anywhere the caret can be", () => {
     ["the start of a line with words", "hello", at(() => 1)],
     ["the middle of a line with words", "hello", at(() => 3)],
     ["the end of a line with words", "hello", at(() => 6)],
+    ["the middle of a line inside a callout", '::::callout{icon="💡"}\nfirst\n\nhello\n::::', (view) => {
+      let pos = -1;
+      view.state.doc.descendants((node, nodePos) => {
+        if (pos < 0 && node.isText && node.text === "hello") pos = nodePos + 3;
+      });
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, pos)));
+    }],
     ["a selection", "hello world", (view) =>
       view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 2, 8)))],
     ["a selected image", "![a](x.png) caption", (view) =>
@@ -367,6 +374,31 @@ describe("inserting a block anywhere the caret can be", () => {
 });
 
 describe("the toggle's smaller edges", () => {
+  it("opens a new first body line when Enter leaves a title over words", async () => {
+    const { view, serialize } = await mount(':::toggle{summary="Title"}\nbody\n:::');
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 7)));
+    expect(press(view, "Enter")).toBe(true);
+    type(view, "x");
+    expect(serialize()).toBe(':::toggle{summary="Title"}\nx\n\nbody\n:::');
+  });
+
+  it("keeps the body's empty lines when Backspace unwraps a toggle", async () => {
+    const { view, serialize } = await mount(':::toggle{summary="T"}\nx\n:::');
+    // an empty first body line, as Enter in the title leaves one
+    view.dispatch(view.state.tr.insert(4, view.state.schema.nodes.paragraph.create()));
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 2)));
+    expect(press(view, "Backspace")).toBe(true);
+    expect(serialize()).toBe("T\n\n<br />\n\nx");
+  });
+
+  it("leaves the browser's own Enter alone outside a title", async () => {
+    const { view } = await mount(':::toggle{summary="T"}\nbody\n:::\n\nafter');
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, view.state.doc.content.size - 1)));
+    const split = new InputEvent("beforeinput", { inputType: "insertParagraph", bubbles: true, cancelable: true });
+    view.dom.dispatchEvent(split);
+    expect(split.defaultPrevented).toBe(false);
+  });
+
   it("takes Shift+Enter in the title the way it takes Enter", async () => {
     const { view, serialize } = await mount(':::toggle{summary="Title"}\nbody\n:::');
     view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 4)));

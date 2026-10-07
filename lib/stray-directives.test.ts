@@ -88,6 +88,20 @@ describe("container fences of one length, nested", () => {
     );
   });
 
+  it("use only the fences the chain needs, and leave the rest as written", () => {
+    // what follows the last needed fence stays outside, even with a later fence
+    expect(
+      outline(':::toggle{summary="O"}\n:::callout\nIn\n:::\n\n:::\n\nafter\n\n:::'),
+    ).toBe('toggle(callout(paragraph("In"))) paragraph("after") paragraph(":::")');
+    expect(
+      outline(':::toggle{summary="O"}\n:::callout\nIn\n:::\n\nmid\n\n:::\n\nafter'),
+    ).toBe('toggle(callout(paragraph("In")) paragraph("mid")) paragraph("after")');
+    // a second fence on the same paragraph has nothing left to close
+    expect(outline(':::toggle{summary="O"}\n:::callout\nIn\n:::\n\n:::\n:::')).toBe(
+      'toggle(callout(paragraph("In"))) paragraph(":::")',
+    );
+  });
+
   it("keep the server's page rows where the editor sees them", () => {
     // One-length fences closed `cols` at the first column's fence, so the
     // second column stood outside the row and its card was no row at all.

@@ -214,3 +214,20 @@ test("a click below the last line of prose puts the caret at its end", async ({
   await page.keyboard.type(" and more");
   await expect.poll(() => savedMarkdown(page, id)).toBe("Only line and more");
 });
+
+test("words typed after an opened URL stay visible words, not a card", async ({ page }) => {
+  const { id, content } = await openPage(page, "Link card words", `<${URL}>\n\nafter`);
+  const card = content.locator("a.brain-embed");
+  await expect(card).toHaveCount(1);
+
+  await caretAtEdge(content.locator("p", { hasText: "after" }), "start");
+  await page.keyboard.press("Backspace");
+  await expect(card).toHaveCount(0);
+  await page.keyboard.type(" see this");
+  await content.locator("p", { hasText: "after" }).click();
+
+  await expect(card).toHaveCount(0);
+  await expect(content.locator("p", { hasText: "see this" })).toBeVisible();
+  await expect.poll(() => savedMarkdown(page, id)).toContain("see this");
+  expect(await savedMarkdown(page, id)).not.toContain("see%20this");
+});

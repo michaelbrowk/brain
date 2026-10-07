@@ -89,6 +89,7 @@ import { requestCompose } from "./mail-commands";
 import { StickersLayer, stickerPrintCanvasHeight } from "./stickers";
 import type { Sticker } from "@/lib/store/types";
 import {
+  LOSSY_LOAD_EVENT,
   NESTED_TABLE_BLOCKED_EVENT,
   TASKS_CHANGED_EVENT,
 } from "@/lib/editor-events";
@@ -1120,12 +1121,21 @@ export function Shell({
     const onNestedTableBlocked = () => {
       showToast("Tables can't be nested");
     };
+    const onLossyLoad = () => {
+      showToast("Opened read-only", {
+        subtitle: "Part of this page can't be shown, and an edit would lose it.",
+        id: "editor-lossy-load",
+      });
+    };
     window.addEventListener(NESTED_TABLE_BLOCKED_EVENT, onNestedTableBlocked);
-    return () =>
+    window.addEventListener(LOSSY_LOAD_EVENT, onLossyLoad);
+    return () => {
       window.removeEventListener(
         NESTED_TABLE_BLOCKED_EVENT,
         onNestedTableBlocked,
       );
+      window.removeEventListener(LOSSY_LOAD_EVENT, onLossyLoad);
+    };
   }, [showToast]);
 
   const nextSaveOperation = useCallback(

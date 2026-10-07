@@ -65,6 +65,7 @@ import { handleWrapperImageDrop, imageUploadPlugin } from "./image-upload";
 import { math } from "./math";
 import { linkPreviewPlugin } from "./link-preview";
 import { noNestedTables } from "./table-guard";
+import { loadGuard } from "./load-guard";
 import { EditorBoundary } from "./editor-boundary";
 import { EmojiPicker } from "../emoji-picker";
 
@@ -105,6 +106,7 @@ import "./milkdown.css";
 import "./table-block.css";
 import { hasTemplateCaret, takeTemplateCaret } from "@/lib/templates";
 import { canonicalPageMarkdown } from "@/lib/page-markdown";
+import { notifyLossyLoad } from "@/lib/editor-events";
 import type {
   SearchHighlightRequest,
   SearchHighlightStatus,
@@ -472,6 +474,17 @@ function Inner({
       pageRefNestingPending,
     ],
   );
+  // Set before the view exists when the page's load would drop content; the
+  // page then opens read-only and the file stays as it is on disk.
+  const lossyLoad = useRef(false);
+  const guardLoad = useMemo(
+    () =>
+      loadGuard(() => {
+        lossyLoad.current = true;
+        notifyLossyLoad();
+      }),
+    [],
+  );
   const wrap = useRef<HTMLDivElement | null>(null);
   const calloutEmojiTrigger = useRef<HTMLButtonElement | null>(null);
   const calloutEmojiId = useRef(0);
@@ -484,7 +497,8 @@ function Inner({
         ctx.set(defaultValueCtx, value);
         setPageRefOrigin(window.location.origin);
         ctx.set(editorViewOptionsCtx, {
-          editable: () => !pageRefNestingPending && !mutationsFrozen,
+          editable: () =>
+            !lossyLoad.current && !pageRefNestingPending && !mutationsFrozen,
           // B6: the toolbar pills float over the top of the canvas (36 +
           // inset 12); the caret and a typed line must never scroll up
           // under them — start scrolling inside the band and land below it
@@ -569,6 +583,7 @@ function Inner({
       .use(columnDrop)
       .use(searchHighlightPlugin)
       .use(immediateDirty)
+      .use(guardLoad)
       .use(listener),
   );
 

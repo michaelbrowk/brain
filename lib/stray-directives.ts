@@ -234,89 +234,24 @@ function directiveLabelText(node: StrayDirectiveNode): string {
   return (node.children ?? []).map(directiveLabelText).join("");
 }
 
-const FENCE_LINE = /^:{3,}[ \t]*$/;
-const RAW_FENCE_LINE = /^ {0,3}:{3,}[ \t]*$/gm;
+const FENCE_LINE = /^ {0,3}:{3,}[ \t]*$/;
 
-type FenceSegment = { fence: string } | { fence: null; node: StrayDirectiveNode };
-
-/** A paragraph cut at the lines that are a bare closing fence. Null when it
- *  has none, or when the decoded text shows a fence the source does not (an
- *  escaped `\:::` is prose the writer meant). */
-function splitAtFences(
-  paragraph: StrayDirectiveNode,
-  source: string,
-): FenceSegment[] | null {
-  if (paragraph.type !== "paragraph") return null;
-  // A line ends at a newline in a text node or at a `break`: the editor's
-  // remark stack turns every soft line break into one.
-  type Line = { separator?: StrayDirectiveNode; nodes: StrayDirectiveNode[] };
-  const lines: Line[] = [{ nodes: [] }];
-  for (const child of paragraph.children ?? []) {
-    if (child.type === "break") {
-      lines.push({ separator: child, nodes: [] });
-      continue;
-    }
-    if (child.type !== "text" || typeof child.value !== "string") {
-      lines.at(-1)!.nodes.push(child);
-      continue;
-    }
-    child.value.split("\n").forEach((piece, index) => {
-      if (index > 0) lines.push({ separator: { type: "text", value: "\n" }, nodes: [] });
-      if (piece) lines.at(-1)!.nodes.push({ type: "text", value: piece });
-    });
-  }
-  const isFence = ({ nodes }: Line) =>
-    nodes.length === 1 && nodes[0].type === "text" && FENCE_LINE.test(nodes[0].value ?? "");
-  const fences = lines.filter(isFence).length;
-  if (fences === 0) return null;
-  const raw = directiveSource(paragraph, source)?.match(RAW_FENCE_LINE)?.length ?? 0;
-  if (raw !== fences) return null;
-
-  const segments: FenceSegment[] = [];
-  let open: Line[] = [];
-  const flush = () => {
-    if (open.length === 0) return;
-    const children = mergeText(
-      open.flatMap((line, index) =>
-        index === 0 || !line.separator ? line.nodes : [line.separator, ...line.nodes],
-      ),
-    );
-    segments.push({ fence: null, node: { type: "paragraph", children, position: spanOf(children) } });
-    open = [];
-  };
-  for (const line of lines) {
-    if (isFence(line)) {
-      flush();
-      segments.push({ fence: line.nodes[0].value ?? ":::" });
-    } else {
-      open.push(line);
-    }
-  }
-  flush();
-  return segments;
+/** The lines of a paragraph that is nothing but bare closing fences, read
+ *  from its source, or null. A `:::` inside a sentence is prose, and so is
+ *  an escaped `\:::`, which the source shows. */
+function fenceLines(node: StrayDirectiveNode, source: string): string[] | null {
+  if (node.type !== "paragraph") return null;
+  const lines = directiveSource(node, source)?.split(/\r?\n/);
+  return lines && lines.every((line) => FENCE_LINE.test(line)) ? lines : null;
 }
 
-/** The text pieces are new nodes, so adjacent ones are one text again. */
-function mergeText(children: StrayDirectiveNode[]): StrayDirectiveNode[] {
-  const merged: StrayDirectiveNode[] = [];
-  for (const child of children) {
-    const last = merged.at(-1);
-    if (child.type === "text" && last?.type === "text") {
-      last.value = `${last.value ?? ""}${child.value ?? ""}`;
-    } else {
-      merged.push(child);
-    }
-  }
-  return merged;
-}
-
-/** A cut paragraph's source span, from its first and last child, when both
- *  kept theirs. A page row is a paragraph of one link, and a link keeps its
- *  position, so a row cut out of a paragraph is still bound to its bytes. */
-function spanOf(children: StrayDirectiveNode[]): StrayDirectiveNode["position"] {
-  const start = children[0]?.position?.start;
-  const end = children.at(-1)?.position?.end;
-  return start && end ? { start, end } : undefined;
+/** A container Brain draws (the ones `stripStrayDirectiveNodes` keeps). */
+function isBrainContainer(node: StrayDirectiveNode | undefined): node is StrayDirectiveNode {
+  return (
+    node?.type === "containerDirective" &&
+    KNOWN_CONTAINER_DIRECTIVES.has(node.name ?? "") &&
+    isKnownContainerDirective(node)
+  );
 }
 
 function hasExplicitClosing(node: StrayDirectiveNode, source: string): boolean {
@@ -335,60 +270,64 @@ function hasExplicitClosing(node: StrayDirectiveNode, source: string): boolean {
  *  serializer always writes the outer fence longer, but an agent's
  *  `write_page` or a hand-edited file does not.
  *
- *  The repair runs only on that shape: a container closed by a fence while
- *  the container that is its last child was still open, followed by bare
- *  fences. Each fence closes the innermost container still open, and the
- *  blocks before it go back into that container. Blocks after the last such
- *  fence stay where the parser put them. The nodes moved keep their source
+ *  The repair runs only on that shape, and only on Brain's own containers: a
+ *  callout, toggle or column closed by a fence while the one that is its last
+ *  child was still open, followed by paragraphs (or containers) and then a
+ *  paragraph of nothing but fences. Each fence closes the innermost container
+ *  still open, and the blocks before it go back into that container. The
+ *  read-ahead stops at the first block of any other kind, so a list, a
+ *  heading or a code block never travels, and blocks after the last fence
+ *  stay where the parser put them. The nodes moved keep their source
  *  positions, and document order is unchanged, so the server's row
  *  numbering (`lib/page-ref-nesting.ts`) agrees with the editor's. */
 function rejoinNestedClosings(siblings: StrayDirectiveNode[], source: string | undefined) {
   if (source === undefined) return;
   for (let index = 0; index < siblings.length; index += 1) {
     const container = siblings[index];
-    if (container.type !== "containerDirective" || !hasExplicitClosing(container, source)) continue;
+    if (!isBrainContainer(container) || !hasExplicitClosing(container, source)) continue;
     const chain = [container];
     for (;;) {
       const last = chain.at(-1)!.children?.at(-1);
-      if (last?.type !== "containerDirective" || hasExplicitClosing(last, source)) break;
+      if (!isBrainContainer(last) || hasExplicitClosing(last, source)) break;
       chain.push(last);
     }
     if (chain.length < 2) continue;
 
-    // Read ahead: which blocks and fences belong to the chain. Nothing moves
-    // unless a fence is found, and nothing after the last fence moves.
-    const plan: Array<{ sibling: number; segments: FenceSegment[] | null }> = [];
+    // Read ahead to the last fence the chain needs. Nothing moves unless one
+    // is found.
     let fences = 0;
-    let used = 0;
+    let end = -1;
     for (let next = index + 1; next < siblings.length && fences < chain.length - 1; next += 1) {
-      const segments = splitAtFences(siblings[next], source);
-      plan.push({ sibling: next, segments });
-      if (segments) {
-        fences += segments.filter((segment) => segment.fence !== null).length;
-        used = plan.length;
+      const sibling = siblings[next];
+      const lines = fenceLines(sibling, source);
+      if (lines) {
+        fences += lines.length;
+        end = next;
+      } else if (sibling.type !== "paragraph" && sibling.type !== "containerDirective") {
+        break;
       }
     }
-    if (fences === 0) continue;
+    if (end < 0) continue;
 
     let level = chain.length - 2;
     const kept: StrayDirectiveNode[] = [];
-    for (const { sibling, segments } of plan.slice(0, used)) {
-      if (!segments) {
-        chain[level].children!.push(siblings[sibling]);
+    for (let next = index + 1; next <= end; next += 1) {
+      const lines = fenceLines(siblings[next], source);
+      if (!lines) {
+        chain[level].children!.push(siblings[next]);
         continue;
       }
-      for (const segment of segments) {
-        if (segment.fence === null) {
-          (level >= 0 ? chain[level].children! : kept).push(segment.node);
-        } else if (level >= 0) {
-          level -= 1;
-        } else {
-          // a fence past the last container is prose, as the parser read it
-          kept.push({ type: "paragraph", children: [{ type: "text", value: segment.fence }] });
-        }
+      const closing = Math.min(lines.length, level + 1);
+      level -= closing;
+      // a fence past the last open container is prose, as the parser read it
+      if (lines.length > closing) {
+        kept.push({
+          type: "paragraph",
+          children: [{ type: "text", value: lines.slice(closing).map((line) => line.trim()).join("\n") }],
+        });
       }
     }
-    siblings.splice(index + 1, used, ...kept);
+    siblings.splice(index + 1, end - index, ...kept);
   }
 }
 

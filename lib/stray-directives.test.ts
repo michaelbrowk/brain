@@ -28,10 +28,45 @@ describe("container fences of one length, nested", () => {
 
   it("put what stands between two fences back in the outer container", () => {
     expect(
-      outline(':::toggle{summary="O"}\n:::callout\nIn\n:::\nafter\n:::\n\nnext'),
+      outline(':::toggle{summary="O"}\n:::callout\nIn\n:::\n\nafter\n\n:::\n\nnext'),
     ).toBe('toggle(callout(paragraph("In")) paragraph("after")) paragraph("next")');
-    expect(outline(":::toggle\n:::callout\n:::toggle\nx\n:::\ny\n:::\nz\n:::")).toBe(
-      'toggle(callout(toggle(paragraph("x")) paragraph("y")) paragraph("z"))',
+    expect(
+      outline(":::toggle\n:::callout\n:::toggle\nx\n:::\n\ny\n\n:::\n\nz\n\n:::"),
+    ).toBe('toggle(callout(toggle(paragraph("x")) paragraph("y")) paragraph("z"))');
+  });
+
+  it("never read a ::: inside a paragraph of prose as a fence", () => {
+    // literalInProse: the sentence explains the syntax, it closes nothing
+    expect(
+      outline(
+        ':::toggle{summary="A"}\n:::callout\ninner\n:::\n\nTo close a block, type\n:::\non its own line.\n\nlast',
+      ),
+    ).toBe(
+      'toggle(callout(paragraph("inner"))) paragraph("To close a block, type\\n:::\\non its own line.") paragraph("last")',
+    );
+    // a fence glued under a line of prose is prose too
+    expect(outline(':::toggle{summary="O"}\n:::callout\nIn\n:::\nafter\n:::')).toBe(
+      'toggle(callout(paragraph("In"))) paragraph("after\\n:::")',
+    );
+  });
+
+  it("stop reading ahead at the first block that is not prose or a container", () => {
+    // farFence: the closing fence far below would have pulled a list, a
+    // second toggle and a code block into toggle A
+    expect(
+      outline(
+        ':::toggle{summary="A"}\n:::callout\ninner\n:::\n\nPara 1\n\n- list\n\n:::toggle{summary="B"}\nb\n:::\n\n```\n:::\n```\n\nPara 2\n\n:::',
+      ),
+    ).toBe(
+      'toggle(callout(paragraph("inner"))) paragraph("Para 1") list(listItem(paragraph("list"))) toggle(paragraph("b")) code() paragraph("Para 2") paragraph(":::")',
+    );
+  });
+
+  it("build the chain from Brain's own containers only", () => {
+    // strayInner: a foreign `:::note` inside a toggle stays the literal it
+    // becomes, and the fence after it keeps its colons
+    expect(outline(':::toggle{summary="A"}\n:::note\nn\n:::\n\nmid\n\n:::\n\nafter')).toBe(
+      'toggle(paragraph(":::note") paragraph("n")) paragraph("mid") paragraph(":::") paragraph("after")',
     );
   });
 

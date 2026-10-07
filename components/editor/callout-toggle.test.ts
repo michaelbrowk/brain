@@ -391,7 +391,7 @@ describe("a callout and a toggle nested in each other", () => {
         '::::callout{icon="💡"}\n:::toggle{summary="T"}\nx\n:::\n::::',
       ],
       [
-        ':::toggle{summary="Outer"}\n:::callout{icon="💡"}\nIn\n:::\nafter\n:::\n\nnext',
+        ':::toggle{summary="Outer"}\n:::callout{icon="💡"}\nIn\n:::\n\nafter\n\n:::\n\nnext',
         '::::toggle{summary="Outer"}\n:::callout{icon="💡"}\nIn\n:::\n\nafter\n::::\n\nnext',
       ],
     ];

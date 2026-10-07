@@ -2405,8 +2405,17 @@ export function Shell({
           if (selectedIdRef.current === id && isCurrentOperation) setSave("saved");
           // Keep the server-authoritative cache current. The operation identity
           // below, rather than markdown equality, decides draft cleanup.
+          // The rev paired with this body is the one `saveMarkdown` kept: after
+          // the server merged a tick in, that is the old rev, so a save typed
+          // on the cached copy after coming back is merged again too.
           const prev = pageCache.current.get(id);
-          if (prev) cachePut({ ...prev, markdown: md, rev: revision });
+          if (prev) {
+            cachePut({
+              ...prev,
+              markdown: md,
+              rev: revisionsRef.current.get(id) ?? revision,
+            });
+          }
           // A TICK AND A DELETED LINE ARE TASK WRITES TOO, AND THIS IS THE
           // ONLY PLACE THEY SETTLE.
           //

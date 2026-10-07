@@ -99,6 +99,9 @@ describe("the newest text leaves when the tab goes away", () => {
   /** The closing-tab save reaches the server, and its answer never reaches
    *  the tab: frozen, or closed and restored from the back-forward cache. */
   let keepaliveAnswerLost: boolean;
+  /** Reads of the note never answer: the revalidation after a cached paint
+   *  is still out. */
+  let holdReads: boolean;
   /** Every body the server held, in order. */
   let history: string[];
   const apiFetchMock = vi.mocked(apiFetch);
@@ -191,6 +194,7 @@ describe("the newest text leaves when the tab goes away", () => {
     frozen = false;
     failingPuts = 0;
     keepaliveAnswerLost = false;
+    holdReads = false;
     history = [];
     apiFetchMock.mockImplementation((input, init) => {
       const url = String(input);
@@ -228,12 +232,18 @@ describe("the newest text leaves when the tab goes away", () => {
           if (sent.keepalive && keepaliveAnswerLost) return new Promise<Response>(() => {});
           return Promise.resolve(answer);
         }
+        if (holdReads) return new Promise<Response>(() => {});
         return Promise.resolve(
           response({
             meta: { id: "note", title: "Note" },
             markdown: server.markdown,
             rev: `rev-${server.rev}`,
           }),
+        );
+      }
+      if (url === "/api/page/other") {
+        return Promise.resolve(
+          response({ meta: { id: "other", title: "Other" }, markdown: "Other page", rev: "rev-o" }),
         );
       }
       if (url.startsWith("/api/tasks")) return Promise.resolve(response({ tasks: [] }));
@@ -278,8 +288,21 @@ describe("the newest text leaves when the tab goes away", () => {
   async function open(markdown = "Base") {
     server = { markdown, rev: 1 };
     await act(async () =>
-      root.render(<Shell tree={[node("note", "Note")]} initialSelectedId="note" />),
+      root.render(
+        <Shell
+          tree={[node("note", "Note"), node("other", "Other")]}
+          initialSelectedId="note"
+        />,
+      ),
     );
+    await flushFrames();
+    await settle();
+  }
+
+  async function go(id: string) {
+    const row = document.querySelector<HTMLElement>(`[data-tree-page-id="${id}"]`);
+    if (!row) throw new Error(`no tree row for ${id}`);
+    await act(async () => row.click());
     await flushFrames();
     await settle();
   }
@@ -424,6 +447,24 @@ describe("the newest text leaves when the tab goes away", () => {
       expect(server.markdown).toBe("- [x] task\n\ntext more and more");
     });
   }
+
+  it("a merged tick survives leaving the page and typing on the cached copy", async () => {
+    await open("- [ ] t\n\nbody");
+    tickElsewhere("- [ ] t", "- [x] t");
+    await type("- [ ] t\n\nbody one");
+    await advance(700);
+    expect(server.markdown).toBe("- [x] t\n\nbody one");
+
+    await go("other");
+    // Back to the note: the cache paints at once, and its revalidation is
+    // still out when the next words go.
+    holdReads = true;
+    await go("note");
+    await type("- [ ] t\n\nbody one two");
+    await advance(700);
+
+    expect(server.markdown).toBe("- [x] t\n\nbody one two");
+  });
 
   it("an older save queued behind a closing save cannot tick-merge over it", async () => {
     await open("- [ ] a\n- [ ] b");

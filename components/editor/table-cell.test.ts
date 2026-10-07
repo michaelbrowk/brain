@@ -189,6 +189,70 @@ describe("paste into a table cell", () => {
     await editor.destroy();
   });
 
+  // What Google Sheets puts on the clipboard: an HTML table and the same
+  // range as tab-separated text.
+  const SHEETS =
+    '<meta charset="utf-8"><google-sheets-html-origin><table data-sheets-root="1"><tbody>' +
+    "<tr><td>x</td><td>y</td></tr><tr><td>u</td><td><b>v</b></td></tr></tbody></table>";
+
+  it("fills cells from a spreadsheet range that carries an HTML table too", async () => {
+    const { editor, view, markdownNow } = await mount(TABLE);
+    caret(view, after(view.state.doc, "a1"));
+    const errors: string[] = [];
+    window.addEventListener("error", (event) => errors.push(event.message));
+    paste(view, "x\ty\nu\tv", SHEETS);
+    expect(errors).toEqual([]);
+    expect(count(view.state.doc, "table")).toBe(1);
+    expect(rows(markdownNow())).toEqual([
+      ["h1", "h2"],
+      ["x", "y"],
+      ["u", "v"],
+    ]);
+    await editor.destroy();
+  });
+
+  it("fills cells from an HTML table alone, Brain's own cell copy among them", async () => {
+    const { editor, view, markdownNow } = await mount(TABLE);
+    // What copying two cells of a Brain table writes: the text has no tab.
+    const copied =
+      '<table data-pm-slice="1 1 -2 []"><tbody><tr><td style="text-align: left;"><p><strong>a1</strong></p></td>' +
+      '<td style="text-align: left;"><p>a2</p></td></tr></tbody></table>';
+    caret(view, after(view.state.doc, "b1"));
+    paste(view, "a1\n\na2", copied);
+    expect(count(view.state.doc, "table")).toBe(1);
+    expect(rows(markdownNow())).toEqual([
+      ["h1", "h2"],
+      ["a1", "a2"],
+      ["a1", "a2"],
+    ]);
+    caret(view, after(view.state.doc, "h1"));
+    paste(view, "", "<table><tr><td>p</td><td>q</td></tr></table>");
+    expect(rows(markdownNow())[0]).toEqual(["p", "q"]);
+    await editor.destroy();
+  });
+
+  it("keeps the links and marks of a rich multi-line paste, one line per block", async () => {
+    const { editor, view, markdownNow } = await mount(TABLE);
+    caret(view, after(view.state.doc, "a1"));
+    paste(
+      view,
+      "one link\ntwo",
+      '<p>one <a href="https://x.io">link</a></p><p><strong>two</strong></p>',
+    );
+    expect(count(view.state.doc, "table")).toBe(1);
+    expect(markdownNow()).toContain("| a1one [link](https://x.io)<br>**two** | a2 |");
+    await editor.destroy();
+  });
+
+  it("treats one line with a tab and HTML as text for the cell, not as cells", async () => {
+    const { editor, view, markdownNow } = await mount(TABLE);
+    caret(view, after(view.state.doc, "a1"));
+    paste(view, "p\tq", "<p>p\tq</p>");
+    // HTML reads the tab as white space, as a browser shows it.
+    expect(rows(markdownNow())[1]).toEqual(["a1p q", "a2"]);
+    await editor.destroy();
+  });
+
   it("leaves a paste outside a table to the clipboard", async () => {
     const { editor, view } = await mount("para");
     caret(view, after(view.state.doc, "para"));

@@ -5,6 +5,7 @@ import { tableCellSchema, tableHeaderSchema } from "@milkdown/kit/preset/gfm";
 import {
   Fragment,
   type Node as ProseNode,
+  type ResolvedPos,
   type Schema,
   Slice,
 } from "@milkdown/kit/prose/model";
@@ -30,6 +31,7 @@ import type {
   Root,
   SerializerState,
 } from "@milkdown/kit/transformer";
+import * as proseView from "@milkdown/kit/prose/view";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import { $prose, $useKeymap } from "@milkdown/kit/utils";
 import { isInTable } from "./table-guard";
@@ -160,24 +162,122 @@ function linesSlice(schema: Schema, text: string): Slice {
   return new Slice(Fragment.from(nodes), 0, 0);
 }
 
-/** Whether a plain-text paste into a cell was taken here; false leaves it to
- *  the clipboard. Tab-separated text is cells from the caret on, the table
- *  growing to fit. Several lines are line breaks in the cell. */
+/** The view's own clipboard parser: the paste props (transformPastedHTML,
+ *  the clipboard parser), the context of the caret and ProseMirror's own
+ *  slice markers, as a paste would read them. prosemirror-view exports it for
+ *  exactly this and leaves it out of its types. */
+const parseFromClipboard = (
+  proseView as unknown as {
+    __parseFromClipboard: (
+      view: EditorView,
+      text: string,
+      html: string | null,
+      plainText: boolean,
+      $context: ResolvedPos,
+    ) => Slice;
+  }
+).__parseFromClipboard;
+
+/** The rows of the first HTML table on the clipboard as tab-separated text,
+ *  or null when there is none. A cell's own line breaks and tabs become
+ *  spaces: each one is a single cell's text. */
+function htmlTableText(html: string): string | null {
+  if (!/<table[\s>]/i.test(html)) return null;
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  const table = template.content.querySelector("table");
+  if (!table) return null;
+  const rows = Array.from(table.querySelectorAll("tr")).map((row) =>
+    Array.from(row.querySelectorAll("td, th"))
+      .map((cell) => (cell.textContent ?? "").replace(/\s+/g, " ").trim())
+      .join("\t"),
+  );
+  return rows.length ? rows.join("\n") : null;
+}
+
+/** What a paste into a cell is: cells (tab-separated rows), lines of plain
+ *  text, rich content to flatten into the cell, or nothing for this handler.
+ *
+ *  A spreadsheet range is cells from its text whenever it carries text, and
+ *  from its HTML table when it does not (Brain's own cell copy writes no tab).
+ *  Without a table, a paste is cells only when it reads like a range: plain
+ *  text with a tab, or at least two tab-separated lines. One line with a tab
+ *  from a web page is a sentence that happens to hold one. */
+type CellPaste =
+  | { kind: "cells"; text: string }
+  | { kind: "lines"; text: string }
+  | { kind: "rich"; text: string; html: string }
+  | null;
+
+function readCellPaste(rawText: string, html: string): CellPaste {
+  const text = rawText.replace(/\r\n?/g, "\n").replace(/\n$/, "");
+  if (/<table[\s>]/i.test(html)) {
+    if (text.includes("\t")) return { kind: "cells", text };
+    const fromHtml = htmlTableText(html);
+    return fromHtml ? { kind: "cells", text: fromHtml } : null;
+  }
+  const tabbedLines = text.split("\n").filter((line) => line.includes("\t")).length;
+  if (tabbedLines >= 2 || (!html && tabbedLines > 0)) return { kind: "cells", text };
+  if (html) return { kind: "rich", text, html };
+  return text.includes("\n") ? { kind: "lines", text } : null;
+}
+
+/** Pasted blocks as one run of inline content: each block's inline content,
+ *  a hard break between blocks, marks, links and page references kept. A
+ *  block image becomes the inline image a cell can hold. Code keeps its
+ *  lines as breaks. */
+function flattenToInline(schema: Schema, slice: Slice): Slice {
+  const lines: ProseNode[][] = [];
+  slice.content.descendants((node) => {
+    if (node.type.name === "brain_image" && schema.nodes.image) {
+      const { src, alt, title } = node.attrs;
+      lines.push([schema.nodes.image.create({ src, alt, title })]);
+      return false;
+    }
+    if (!node.isTextblock) return true;
+    if (node.type.spec.code) {
+      for (const line of node.textContent.split("\n")) {
+        lines.push(line ? [schema.text(line)] : []);
+      }
+      return false;
+    }
+    const inline: ProseNode[] = [];
+    node.content.forEach((child) => inline.push(child));
+    lines.push(inline);
+    return false;
+  });
+  const nodes: ProseNode[] = [];
+  lines.forEach((line, index) => {
+    if (index) nodes.push(schema.nodes.hardbreak.create());
+    nodes.push(...line);
+  });
+  return new Slice(Fragment.from(nodes), 0, 0);
+}
+
+/** Whether a paste into a cell was taken here; false leaves it to the
+ *  clipboard. */
 function pasteIntoCell(view: EditorView, event: ClipboardEvent): boolean {
   const { state } = view;
-  const raw = event.clipboardData?.getData("text/plain") ?? "";
-  const text = raw.replace(/\r\n?/g, "\n").replace(/\n$/, "");
-  if (text.includes("\t")) {
-    return pasteTableCells(view, event, tsvSlice(state, text));
+  const paste = readCellPaste(
+    event.clipboardData?.getData("text/plain") ?? "",
+    event.clipboardData?.getData("text/html") ?? "",
+  );
+  if (!paste) return false;
+  if (paste.kind === "cells") {
+    return pasteTableCells(view, event, tsvSlice(state, paste.text));
   }
-  if (!text.includes("\n")) return false;
+  const slice =
+    paste.kind === "lines"
+      ? linesSlice(state.schema, paste.text)
+      : flattenToInline(
+          state.schema,
+          parseFromClipboard(view, paste.text, paste.html, false, state.selection.$from),
+        );
   if (state.selection instanceof CellSelection) {
-    return pasteTableCells(view, event, linesSlice(state.schema, text));
+    return pasteTableCells(view, event, slice);
   }
   if (!state.selection.$from.sameParent(state.selection.$to)) return false;
-  view.dispatch(
-    state.tr.replaceSelection(linesSlice(state.schema, text)).scrollIntoView(),
-  );
+  view.dispatch(state.tr.replaceSelection(slice).scrollIntoView());
   return true;
 }
 
@@ -187,11 +287,10 @@ function pasteIntoCell(view: EditorView, event: ClipboardEvent): boolean {
  *  the cell it lands in by making each line a cell of its own, so
  *  prosemirror-tables laid the lines out across the row with their tabs still
  *  in them. Milkdown's clipboard, next in line, parses the same text as
- *  Markdown blocks and splits the table around them. This answers the DOM
- *  event before either of them, from the plain text, even when the source
- *  also offered HTML: paragraphs of a web page fit the same way. Only HTML
- *  that is itself a table (a spreadsheet range, another table's cells) goes
- *  on to prosemirror-tables, which reads its cells and keeps their marks. */
+ *  Markdown blocks and splits the table around them. And a spreadsheet's HTML
+ *  table reached prosemirror-tables with a header row the schema had added to
+ *  it, which threw and pasted nothing. This answers the DOM event before any
+ *  of them. */
 const cellPaste = $prose(
   () =>
     new Plugin({
@@ -200,8 +299,6 @@ const cellPaste = $prose(
         handleDOMEvents: {
           paste: (view, event) => {
             if (!view.editable || !isInTable(view.state.selection.$from)) return false;
-            const html = event.clipboardData?.getData("text/html") ?? "";
-            if (/<table[\s>]/i.test(html)) return false;
             if (!pasteIntoCell(view, event)) return false;
             event.preventDefault();
             return true;

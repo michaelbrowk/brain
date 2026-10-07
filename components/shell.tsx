@@ -1121,21 +1121,12 @@ export function Shell({
     const onNestedTableBlocked = () => {
       showToast("Tables can't be nested");
     };
-    const onLossyLoad = () => {
-      showToast("Opened read-only", {
-        subtitle: "Part of this page can't be shown, and an edit would lose it.",
-        id: "editor-lossy-load",
-      });
-    };
     window.addEventListener(NESTED_TABLE_BLOCKED_EVENT, onNestedTableBlocked);
-    window.addEventListener(LOSSY_LOAD_EVENT, onLossyLoad);
-    return () => {
+    return () =>
       window.removeEventListener(
         NESTED_TABLE_BLOCKED_EVENT,
         onNestedTableBlocked,
       );
-      window.removeEventListener(LOSSY_LOAD_EVENT, onLossyLoad);
-    };
   }, [showToast]);
 
   const nextSaveOperation = useCallback(
@@ -1454,6 +1445,24 @@ export function Shell({
     setHistoryBaseRevision(revisionsRef.current.get(id) ?? "");
     setHistoryDialog({ open: true, owner });
   }, [startDialogFocus]);
+
+  // A page the editor could not load whole opens read-only. The toast says
+  // so and offers the one way the owner can see the file as it is on disk:
+  // its History, which reads the stored revisions rather than the editor.
+  useEffect(() => {
+    const onLossyLoad = () => {
+      showToast("Opened read-only", {
+        subtitle: "Part of this page can't be shown, and an edit would lose it.",
+        actionLabel: "Open history",
+        onAction: () => {
+          void openHistory(null);
+        },
+        id: "editor-lossy-load",
+      });
+    };
+    window.addEventListener(LOSSY_LOAD_EVENT, onLossyLoad);
+    return () => window.removeEventListener(LOSSY_LOAD_EVENT, onLossyLoad);
+  }, [openHistory, showToast]);
   useEffect(() => {
     let es: EventSource | null = null;
     let t: ReturnType<typeof setTimeout>;

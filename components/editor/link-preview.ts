@@ -70,7 +70,16 @@ function externalHttpUrl(href: unknown) {
   }
 }
 
+/** Whether a line of text is a URL a card can stand for. Whitespace rules it
+ *  out: `new URL` accepts a space and encodes it, so without this check
+ *  "https://example.com/post see this" read as one address, and the words
+ *  typed after a URL vanished into the card that address drew. */
+function isUrlText(text: string) {
+  return text.length > 0 && !/\s/.test(text) && externalHttpUrl(text) !== null;
+}
+
 function sameUrlText(text: string, href: string) {
+  if (/\s/.test(text) || /\s/.test(href)) return false;
   const visible = text.trim();
   if (!visible || visible !== text) return false;
   if (visible === href) return true;
@@ -455,7 +464,7 @@ export function lineAfterSelectedCard(state: EditorState): Transaction | null {
  *  this does not decide, and the clipboard plugin takes it. */
 export function pasteLinkCard(state: EditorState, pasted: string): Transaction | null {
   const text = pasted.trim();
-  if (!text || /\s/.test(text) || !externalHttpUrl(text)) return null;
+  if (!isUrlText(text)) return null;
   const { schema, selection } = state;
   const cardType = schema.nodes[LINK_CARD_NODE];
   const link = schema.marks.link;
@@ -536,7 +545,7 @@ export function settleLinkCardEditing(
     if (!link || !transactions.some((tr) => tr.docChanged)) return null;
     if (transactions.some((tr) => tr.getMeta("composition") !== undefined)) return null;
     const text = node.textContent;
-    if (text !== text.trim() || !externalHttpUrl(text)) return null;
+    if (!isUrlText(text)) return null;
     if (linkMarkedTo(node, link, text)) return null;
     const from = pos + 1;
     const to = pos + node.nodeSize - 1;

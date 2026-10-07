@@ -304,3 +304,36 @@ describe("link card: pasting several lines", () => {
     expect(markdown()).toBe(`intro\n\n<${URL_TEXT}>\n\noutro`);
   });
 });
+
+describe("link card: words typed after an opened URL", () => {
+  it("stay visible words: a line with a space is never a card, and its href is never the words", async () => {
+    const { view, markdown } = await mount(`<${URL_TEXT}>\n\nnext`);
+    caretAt(view, startOf(view, 1));
+    key(view, "Backspace");
+    type(view, " see this");
+    caretAt(view, view.state.doc.content.size - 1);
+    expect(blockNames(view)).toEqual(["paragraph", "paragraph"]);
+    expect(view.state.doc.firstChild?.textContent).toBe(`${URL_TEXT} see this`);
+    expect(markdown()).not.toContain("see%20this");
+    expect(markdown()).not.toContain("<https://example.com/post see this>");
+    const again = await mount(markdown());
+    expect(blockNames(again.view)[0]).toBe("paragraph");
+    expect(again.view.dom.textContent).toContain("see this");
+  });
+
+  it("a stored link whose text and href hold a space opens as a link, not a card", async () => {
+    const { view } = await mount(
+      "[https://example.com/post see this](<https://example.com/post see this>)\n\nnext",
+    );
+    expect(blockNames(view)[0]).toBe("paragraph");
+    expect(view.dom.querySelector(".brain-embed")).toBeNull();
+    expect(view.dom.textContent).toContain("see this");
+  });
+
+  it("a pasted URL with a space in it is not a card", async () => {
+    const { view } = await mount("");
+    caretAt(view, 1);
+    paste(view, "https://example.com/a b");
+    expect(view.dom.querySelector(".brain-embed")).toBeNull();
+  });
+});

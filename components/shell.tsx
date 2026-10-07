@@ -19,6 +19,7 @@ import {
   saveMarkdown,
   type SentUnloadSave,
   type StoredDraft,
+  unloadSaveBases,
 } from "@/lib/autosave";
 import { canonicalPageMarkdown } from "@/lib/page-markdown";
 import { openTodayCount } from "./tasks-lists";
@@ -2686,27 +2687,19 @@ export function Shell({
       const revision = revisionsRef.current.get(p.id) ?? "";
       const base = baseMarkdownRef.current.get(p.id);
       const seq = saveOperationSeq(p.operationId, CLIENT_ID);
-      // Only bodies of this edit or earlier ones: a rewrite queued after it
-      // (Smart Sort, undo) is newer, and this save must not land over it.
-      const queued = [
-        ...(sentBodiesRef.current.get(p.id) ?? new Map<string, string>()),
-      ].filter(([operationId]) => saveOperationSeq(operationId, CLIENT_ID) <= seq);
+      const queued = sentBodiesRef.current.get(p.id) ?? new Map<string, string>();
       // Browsers refuse keepalive bodies over 64 KiB in flight per page.
       const budget = 60 * 1024;
       const body =
         encodeUnloadSaveRequest(
           p.md,
           revision,
-          [
-            ...queued.map(([, markdown]) => markdown),
-            ...sent.map((entry) => entry.markdown),
-            ...(base === undefined ? [] : [base]),
-          ],
+          unloadSaveBases(queued, sent, base, seq, CLIENT_ID),
           budget,
         ) ??
         // A legacy draft with no trusted base and nothing on the wire can
         // only go whole, under its exact rev, when it fits.
-        (base === undefined && queued.length === 0 && sent.length === 0
+        (base === undefined && queued.size === 0 && sent.length === 0
           ? encodeSaveRequest(p.md, revision)
           : null);
       if (body === null || new TextEncoder().encode(body).byteLength > budget) {

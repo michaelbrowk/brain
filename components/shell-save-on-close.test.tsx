@@ -375,6 +375,26 @@ describe("the newest text leaves when the tab goes away", () => {
     await advance(2_000);
   });
 
+  it("the next save after a landed closing save starts from it, not from the old base", async () => {
+    await open();
+    // The ordinary save made on hide fails; only the closing save gets there.
+    failingPuts = 3;
+    await type("Base one");
+    await act(async () => hide());
+    await settle();
+    await advance(1_500);
+    await advance(1_500);
+    expect(server.markdown).toBe("Base one");
+    const landedRev = `rev-${server.rev}`;
+    const before = puts.length;
+
+    await type("Base one two");
+    await advance(700);
+
+    expect(puts[before].body).toMatchObject({ rev: landedRev, baseMarkdown: "Base one" });
+    expect(server.markdown).toBe("Base one two");
+  });
+
   // The reviewer's shape: the closing save lands, somebody ticks a box, and
   // the tab comes back and keeps typing. Nobody else edited text, so nothing
   // here may come out as a conflict.

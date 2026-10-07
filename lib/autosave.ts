@@ -458,6 +458,27 @@ export interface SentUnloadSave {
   landed: boolean;
 }
 
+/** The bodies a closing-tab save of edit `seq` cuts its spans against: the
+ *  saves of this edit or earlier ones still queued or on the wire, the
+ *  closing-tab saves already sent, and the confirmed base. A rewrite queued
+ *  after the edit (Smart Sort, undo) is newer, and the server holding it must
+ *  refuse this save rather than have it applied over the rewrite. */
+export function unloadSaveBases(
+  queued: ReadonlyMap<string, string>,
+  sent: readonly SentUnloadSave[],
+  base: string | undefined,
+  seq: number,
+  clientId: string,
+): string[] {
+  return [
+    ...[...queued]
+      .filter(([operationId]) => saveOperationSeq(operationId, clientId) <= seq)
+      .map(([, markdown]) => markdown),
+    ...sent.map((entry) => entry.markdown),
+    ...(base === undefined ? [] : [base]),
+  ];
+}
+
 /** An edit id this tab minted reads `<client>:<seq>.<random>`, so the order
  *  of two edits is a number comparison. What came before this document's
  *  lifetime (a recovered draft, another tab's id, an older format) is 0:

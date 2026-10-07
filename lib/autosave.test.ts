@@ -16,6 +16,7 @@ import {
   saveMarkdown,
   saveOperationSeq,
   ownSavesAround,
+  unloadSaveBases,
   UNLOAD_PATCH_MAX_CHARS,
   type FetchLike,
   type OwnSaves,
@@ -537,8 +538,12 @@ describe("encodeUnloadSaveRequest", () => {
     const huge = "Привет мир 😀 ".repeat(80_000);
     expect(huge.length).toBeGreaterThan(UNLOAD_PATCH_MAX_CHARS);
     expect(encodeUnloadSaveRequest(`${huge} tail`, "r", [huge], 60 * 1024)).toBeNull();
-    // Under the bound it still goes.
+    // A known body just under the bound does not let the newest one over it in.
     const large = huge.slice(0, UNLOAD_PATCH_MAX_CHARS - 10);
+    expect(
+      encodeUnloadSaveRequest(`${large} and the words that cross it`, "r", [large], 60 * 1024),
+    ).toBeNull();
+    // Under the bound it still goes.
     expect(encodeUnloadSaveRequest(`${large} tail`, "r", [large], 60 * 1024)).not.toBeNull();
   });
 
@@ -592,6 +597,23 @@ describe("edit order and closing-tab saves", () => {
     // it even when it sat in the queue behind it.
     expect(ownSavesAround(sent, 10)).toMatchObject({ newer: undefined, older: "nine" });
     expect(ownSavesAround(sent, 5)).toMatchObject({ newer: "nine", older: "four" });
+  });
+
+  it("cuts a closing save only against bodies of its edit or earlier ones", () => {
+    const queued = new Map([
+      ["tab:3.a", "typed before"],
+      ["tab:5.a", "the closing edit"],
+      ["tab:6.a", "sorted after it"],
+      ["legacy-v2:x", "recovered draft"],
+    ]);
+    const sent = [{ operationId: "tab:2.a", seq: 2, markdown: "closed before", landed: false }];
+    expect(unloadSaveBases(queued, sent, "base", 5, "tab")).toEqual([
+      "typed before",
+      "the closing edit",
+      "recovered draft",
+      "closed before",
+      "base",
+    ]);
   });
 });
 

@@ -136,6 +136,8 @@ export function WikiLinkMenu({
         e.preventDefault();
         run(results[active]);
       } else if (e.key === "Escape") {
+        // Taken: the editor's own Escape would carry the focus out of it.
+        e.preventDefault();
         setState(null);
       }
     };

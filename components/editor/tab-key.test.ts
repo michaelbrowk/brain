@@ -154,3 +154,41 @@ describe("Tab outside a code block or a table", () => {
     await editor.destroy();
   });
 });
+
+describe("Escape", () => {
+  // Tab stays in the page, so the keyboard needs another way out of it
+  // (WCAG 2.1.2): Escape moves the focus on to what follows the editor.
+  it("moves the focus to the first control after the editor", async () => {
+    const before = document.createElement("button");
+    document.body.prepend(before);
+    const { editor, view } = await mount("prose");
+    const after = document.createElement("button");
+    const hidden = document.createElement("button");
+    hidden.disabled = true;
+    document.body.append(hidden, after);
+    select(view, "pro");
+    const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    view.dom.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(after);
+    await editor.destroy();
+  });
+
+  it("leaves the focus alone when a menu took the Escape first", async () => {
+    const { editor, view } = await mount("prose");
+    document.body.append(document.createElement("button"));
+    const menu = (event: KeyboardEvent) => {
+      if (event.key === "Escape") event.preventDefault();
+    };
+    document.addEventListener("keydown", menu, true);
+    try {
+      view.dom.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+      );
+      expect(document.activeElement).toBe(view.dom);
+    } finally {
+      document.removeEventListener("keydown", menu, true);
+      await editor.destroy();
+    }
+  });
+});

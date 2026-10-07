@@ -543,6 +543,46 @@ const keepTabKeymap = $useKeymap("brainKeepTabKeymap", {
   },
 });
 
+const FOCUSABLE =
+  'a[href], button, input, select, textarea, [contenteditable="true"], [tabindex]:not([tabindex="-1"])';
+
+/** The first control after `element` in document order that can take the
+ *  focus, or null. */
+function nextFocusableAfter(element: HTMLElement): HTMLElement | null {
+  for (const candidate of element.ownerDocument.querySelectorAll<HTMLElement>(FOCUSABLE)) {
+    if (element.contains(candidate)) continue;
+    if (!(element.compareDocumentPosition(candidate) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+      continue;
+    }
+    if (candidate.matches(":disabled") || candidate.closest("[inert], [hidden]")) continue;
+    if (candidate.getClientRects().length === 0) continue;
+    return candidate;
+  }
+  return null;
+}
+
+/** ESCAPE LEAVES THE PAGE'S TEXT.
+ *
+ *  Tab stays in the editor (`keepTabInEditor`), so without this a keyboard
+ *  could not get out of a page at all. Escape moves the focus on to the first
+ *  control after the editor, which is where Tab would have gone, rather than
+ *  up to the page title: the title is a text field, and the keys a reader
+ *  types next would rename the page. With nothing after the editor it lets
+ *  go of the focus. A menu, a picker or a popover that answered Escape first
+ *  prevents the key, and ProseMirror never hands a prevented key to a keymap,
+ *  so closing one of those keeps the caret where it was. */
+export const leaveEditor: Command = (_state, _dispatch, view) => {
+  if (!view) return false;
+  const next = nextFocusableAfter(view.dom);
+  if (next) next.focus();
+  else view.dom.blur();
+  return true;
+};
+
+const escapeKeymap = $useKeymap("brainEscapeKeymap", {
+  LeaveEditor: { shortcuts: "Escape", priority: 0, command: () => leaveEditor },
+});
+
 export const editingCore = [
   gapCursorPlugin,
   trailingParagraph,
@@ -550,4 +590,5 @@ export const editingCore = [
   slashHint,
   codeTabKeymap,
   keepTabKeymap,
+  escapeKeymap,
 ].flat();

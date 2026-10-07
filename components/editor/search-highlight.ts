@@ -286,7 +286,20 @@ export function showSearchHighlight(
     .setMeta(searchHighlightPluginKey, meta)
     .setMeta("addToHistory", false);
   view.dispatch(transaction);
+  if (resolution.status === "exact") openFoldsAround(view, resolution.ranges);
   return resolution;
+}
+
+/** A match inside a folded toggle is unfolded, or the jump lands on text
+ *  nobody can see. */
+function openFoldsAround(view: EditorView, ranges: readonly { from: number }[]) {
+  for (const { from } of ranges) {
+    let element: Node | null = view.domAtPos(from).node;
+    while (element && element !== view.dom) {
+      if (element instanceof HTMLDetailsElement && !element.open) element.open = true;
+      element = element.parentNode;
+    }
+  }
 }
 
 export function clearSearchHighlight(

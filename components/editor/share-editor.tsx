@@ -1157,6 +1157,9 @@ function ShareEditorForPage({
         // in a refusal. The Markdown half is still applied, so a `- [ ]` line
         // in a shared note draws a checkbox and ticks like any other.
         tasksEnabled={false}
+        // A visitor's folded toggles are kept in the visitor's own browser,
+        // apart from the owner's copy of the same page.
+        toggleMemoryKey={`share:${rootId}:${pageId}`}
         // The directory the page-ref blocks draw from: the pages this share
         // reaches, with the titles they carry now, so a ref written before a
         // rename reads as it does for the owner. A page outside the share

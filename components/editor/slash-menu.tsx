@@ -145,7 +145,12 @@ export function visibleSlashItems(
   const query = context.query.toLowerCase();
   return items.filter(
     (item) =>
-      (!context.inTable || item.command !== insertTableCommand) &&
+      // A cell holds one line, and a table, a callout or a toggle put in
+      // one split the table around it.
+      (!context.inTable ||
+        (item.command !== insertTableCommand &&
+          item.command !== insertCalloutCommand &&
+          item.command !== insertToggleCommand)) &&
       (!context.inQuote || item.command !== ensureTaskCommand) &&
       (query ? item.keywords.includes(query) || item.label.toLowerCase().includes(query) : true),
   );

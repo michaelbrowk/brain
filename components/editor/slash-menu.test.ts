@@ -44,6 +44,9 @@ describe("slashMenuItems", () => {
     expect(quoted).not.toContain("Task");
     expect(quoted).toContain("Quote");
     expect(labels(visibleSlashItems(all, { ...here, inTable: true }))).not.toContain("Table");
+    // a cell holds one line: a callout or a toggle there split the table
+    expect(labels(visibleSlashItems(all, { ...here, inTable: true }))).not.toContain("Callout");
+    expect(labels(visibleSlashItems(all, { ...here, inTable: true }))).not.toContain("Toggle");
     expect(labels(visibleSlashItems(all, { ...here, query: "task" }))).toEqual(["Task"]);
   });
 

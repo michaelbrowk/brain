@@ -362,6 +362,27 @@ describe("Notion MCP route validation", () => {
     expect(mocks.verifyMcpBearerToken).not.toHaveBeenCalled();
   });
 
+  it("serves a call under the endpoint's cap that is over the SDK's own default", async () => {
+    // The SDK's HTTP transport refuses a body over 4 MiB since 1.30.1, and
+    // mcp-handler builds that transport with no way to raise it. An app page
+    // may carry ten mebibytes of assets, so a call this endpoint accepts has
+    // to reach its tool rather than come back 413 from one layer down.
+    const writePage = vi.fn().mockResolvedValue({ rev: "rev-2" });
+    mocks.getStore.mockResolvedValue({ writePage });
+    const markdown = "a".repeat(6 * 1024 * 1024);
+
+    const response = await callTool(
+      "write_page",
+      { id: "write-target", markdown, rev: "rev-1" },
+      105,
+    );
+
+    expect(response.status).toBe(200);
+    expect((await toolPayload(response)).isError).toBe(false);
+    expect(writePage).toHaveBeenCalledTimes(1);
+    expect(writePage.mock.calls[0]?.[1]).toBe(markdown);
+  });
+
   it("blocks write tools for a read-only OAuth connection before Store access", async () => {
     const response = await POST(
       new Request("https://brain.example.test/api/mcp", {

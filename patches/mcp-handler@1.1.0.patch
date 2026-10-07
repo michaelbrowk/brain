@@ -1,0 +1,28 @@
+diff --git a/dist/index.js b/dist/index.js
+index 11072f724e74ff9e0b4c3bfec04a6fafa1b0a7bd..3b7530282a8a06cde247382c7efe036f67a55671 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -331,7 +331,8 @@ function initializeMcpApiHandler(initializeServer, serverOptions = {}, config =
+             });
+             webReq.auth = req.auth;
+             const webResp = yield transport.handleRequest(webReq, {
+-              authInfo: req.auth
++              authInfo: req.auth,
++              parsedBody: bodyContent
+             });
+             res.writeHead(webResp.status, Object.fromEntries(webResp.headers));
+             if (webResp.body) {
+diff --git a/dist/index.mjs b/dist/index.mjs
+index c1110409315d81bd1d440dc5910ba720c17f3722..915855faa621ddfa532117b5bc257ca82ba55dd5 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -325,7 +325,8 @@ function initializeMcpApiHandler(initializeServer, serverOptions = {}, config =
+             });
+             webReq.auth = req.auth;
+             const webResp = yield transport.handleRequest(webReq, {
+-              authInfo: req.auth
++              authInfo: req.auth,
++              parsedBody: bodyContent
+             });
+             res.writeHead(webResp.status, Object.fromEntries(webResp.headers));
+             if (webResp.body) {

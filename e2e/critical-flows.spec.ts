@@ -924,12 +924,10 @@ test("exact internal page links stay local without hijacking native links", asyn
 
   const currentParent = await browserJson(page, `/api/page/${parent.id}`);
   const markdown = [
-    // A ref in a sentence carries the label the serializer writes for one,
-    // an icon and a title, and draws the page's title as it is now.
-    `Relative [📄 Stale relative](/p/${relativeTarget.id}) remains inline.`,
-    `Absolute [📄 Stale absolute](${origin}/p/${absoluteTarget.id}) remains inline.`,
-    // Words the reader linked to a page are their words, not a ref.
-    `Words [the destination](/p/${relativeTarget.id}) stay words.`,
+    `Relative [Stale relative](/p/${relativeTarget.id}) remains inline.`,
+    `Absolute [Stale absolute](${origin}/p/${absoluteTarget.id}) remains inline.`,
+    // Words linked with a title are the reader's words, not a ref.
+    `Words [the destination](/p/${relativeTarget.id} "the destination") stay words.`,
     `Foreign [Foreign page](https://foreign.example/p/${relativeTarget.id}) remains external.`,
     `Query [Query variant](/p/${relativeTarget.id}?view=full) remains ordinary.`,
     `Hash [Hash variant](${origin}/p/${absoluteTarget.id}#section) remains ordinary.`,

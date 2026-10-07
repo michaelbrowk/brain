@@ -85,12 +85,16 @@ export function insertInline(
 
 /** "Link to page" over selected words: the words become the link and stay
  *  the words. Replacing them with the page's title threw away what the
- *  reader wrote. Null on an empty selection, where there are no words. */
+ *  reader wrote. The link carries the words as its title too, which is how
+ *  the next open tells it from a ref (`keepsLinkWords` in `page-ref.ts`).
+ *  Null on an empty selection, where there are no words. */
 export function linkSelection(state: EditorState, href: string): Transaction | null {
   const link = state.schema.marks.link;
   const { from, to, empty } = state.selection;
   if (!link || empty) return null;
-  return state.tr.addMark(from, to, link.create({ href })).scrollIntoView();
+  const words = state.doc.textBetween(from, to, " ", " ").replace(/\s+/g, " ").trim();
+  if (!words) return null;
+  return state.tr.addMark(from, to, link.create({ href, title: words })).scrollIntoView();
 }
 
 /** An image from the picker. On a line of its own it becomes the block image

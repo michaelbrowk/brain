@@ -1,5 +1,18 @@
 export const INTERNAL_PAGE_LINK_CLASS = "brain-internal-page-link";
 
+/** Words the reader linked to a page, which stay their words.
+ *
+ *  A page link draws the page's current title, and that is how every `/p/`
+ *  link in a body reads, old notes and Notion imports included. "Link to
+ *  page" over selected words writes its link with a title,
+ *  `[the spec](/p/x "the spec")`, and the title is what tells the two apart:
+ *  no ref was ever written with one. Other Markdown viewers show it as the
+ *  link's tooltip and nothing else. The editor and the read-only renderer
+ *  both ask this. */
+export function keepsLinkWords(title: unknown): boolean {
+  return typeof title === "string" && title.length > 0;
+}
+
 export interface InternalPageLink {
   id: string;
   href: `/p/${string}`;

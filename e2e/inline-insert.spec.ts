@@ -171,7 +171,9 @@ test("Link to page over selected words keeps the words as the link", async ({ pa
   await page.getByRole("textbox", { name: "Link to page" }).fill("Target Toolbar");
   await page.keyboard.press("Enter");
 
-  await expect.poll(() => savedMarkdown(page, id)).toBe(`read [the spec](/p/${targetId}) today`);
+  await expect
+    .poll(() => savedMarkdown(page, id))
+    .toBe(`read [the spec](/p/${targetId} "the spec") today`);
   await page.reload();
   const reloaded = page.getByRole("textbox", { name: "Page content" });
   await expect(reloaded.locator("a", { hasText: "the spec" })).toHaveAttribute("href", `/p/${targetId}`);

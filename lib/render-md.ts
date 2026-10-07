@@ -4,6 +4,7 @@ import {
   localAttachmentName,
   stripEditorDirectiveFences,
 } from "./attachments";
+import { keepsLinkWords } from "./internal-page-link";
 
 /** One read-only markdown → sanitized HTML renderer for every non-editor
  *  surface (shared pages, version-history preview). The editor's custom blocks
@@ -87,6 +88,11 @@ class ReadOnlyRenderer extends Renderer {
           pageRef[1] === this.shareNavigation.rootId
             ? rootHref
             : `${rootHref}?page=${encodeURIComponent(pageRef[1])}`;
+        // Words the reader linked keep their words, the way the editor draws
+        // them; only a ref takes the page's current title.
+        if (keepsLinkWords(token.title)) {
+          return `<a href="${href}">${this.parser.parseInline(token.tokens)}</a>`;
+        }
         // The live title, the way the editor's page-ref node draws it for the
         // owner. A rename does not rewrite the label in this body — Markdown
         // is the source of truth — so the written one is only the fallback,

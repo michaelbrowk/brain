@@ -34,15 +34,14 @@ async function main() {
   ]);
 
   const cases = [
-    // A ref in a sentence carries the label the serializer writes for one.
-    { name: "internal page link", markdown: "See [📄 Page Title](/p/abc123) here", pageRefs: 1 },
+    { name: "internal page link", markdown: "See [Page Title](/p/abc123) here", pageRefs: 1 },
     { name: "page link with emoji", markdown: "[🦊 People](/p/def456)", pageRefs: 1 },
-    { name: "page row with a plain label", markdown: "[Page Title](/p/abc123)", pageRefs: 1 },
-    // Words the reader linked to a page stay their words (`keepsLinkWords`).
-    { name: "linked words", markdown: "See [the spec](/p/abc123) here", pageRefs: 0 },
-    { name: "title with markdown syntax", markdown: "See [📄 a\\]b \\*c\\*](/p/abc123) here", pageRefs: 1 },
     { name: "external link untouched", markdown: "Visit [Google](https://google.com) now", pageRefs: 0 },
-    { name: "mixed", markdown: "[🏠 Home](/p/h1) and [Docs](https://x.com) and [Wiki](/p/w2)", pageRefs: 1 },
+    { name: "mixed", markdown: "[Home](/p/h1) and [Docs](https://x.com) and [Wiki](/p/w2)", pageRefs: 2 },
+    // Words linked by "Link to page" carry a title and stay words.
+    { name: "linked words", markdown: 'See [the spec](/p/abc123 "the spec") here', pageRefs: 0 },
+    { name: "linked words, whole line", markdown: '[the spec](/p/abc123 "the spec")', pageRefs: 0 },
+    { name: "linked words beside a ref", markdown: '[Home](/p/h1) or [the spec](/p/h1 "the spec")', pageRefs: 1 },
   ];
 
   let failures = 0;

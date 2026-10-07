@@ -240,10 +240,10 @@ describe("Link to page over selected words", () => {
         view.state.tr.setSelection(TextSelection.create(view.state.doc, to - "the spec".length, to)),
       );
       view.dispatch(linkSelection(view.state, "/p/abc123")!);
-      expect(markdownNow()).toBe("read [the spec](/p/abc123) today");
+      expect(markdownNow()).toBe('read [the spec](/p/abc123 "the spec") today');
 
       const back = await reopen(markdownNow());
-      expect(back.markdown).toBe("read [the spec](/p/abc123) today");
+      expect(back.markdown).toBe('read [the spec](/p/abc123 "the spec") today');
       expect(back.refs).toBe(0);
       expect(back.doc.textContent).toBe("read the spec today");
     } finally {
@@ -253,13 +253,14 @@ describe("Link to page over selected words", () => {
 });
 
 describe("which page links read as refs", () => {
-  it("a row, the serializer's label and the current title are refs; other words stay words", async () => {
+  it("every /p/ link is a ref as before, except words linked with a title", async () => {
     const back = await reopen(
       [
         "[Stale row](/p/plain)",
+        "see [Old title](/p/plain) here",
         "see [📄 Old title](/p/plain) here",
-        "see [Plain](/p/plain) here",
-        "see [the plan](/p/plain) here",
+        'see [the plan](/p/plain "the plan") here',
+        '[whole line](/p/plain "whole line")',
       ].join("\n\n"),
     );
     expect(back.refs).toBe(3);
@@ -268,7 +269,8 @@ describe("which page links read as refs", () => {
         "[📄 Plain](/p/plain)",
         "see [📄 Plain](/p/plain) here",
         "see [📄 Plain](/p/plain) here",
-        "see [the plan](/p/plain) here",
+        'see [the plan](/p/plain "the plan") here',
+        '[whole line](/p/plain "whole line")',
       ].join("\n\n"),
     );
   });

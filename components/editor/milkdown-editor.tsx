@@ -64,7 +64,9 @@ import { images } from "./image";
 import { handleWrapperImageDrop, imageUploadPlugin } from "./image-upload";
 import { math } from "./math";
 import { linkPreviewPlugin } from "./link-preview";
-import { noNestedTables } from "./table-guard";
+import { isInTable, noNestedTables } from "./table-guard";
+import { tableCells } from "./table-cell";
+import { loadGuard } from "./load-guard";
 import { EditorBoundary } from "./editor-boundary";
 import { EmojiPicker } from "../emoji-picker";
 
@@ -105,6 +107,7 @@ import "./milkdown.css";
 import "./table-block.css";
 import { hasTemplateCaret, takeTemplateCaret } from "@/lib/templates";
 import { canonicalPageMarkdown } from "@/lib/page-markdown";
+import { notifyLossyLoad } from "@/lib/editor-events";
 import type {
   SearchHighlightRequest,
   SearchHighlightStatus,
@@ -403,8 +406,13 @@ function Inner({
   const blockSerialization = useCallback(() => {
     editorSession.blockSerialization();
   }, [editorSession]);
+  // Set before the view exists when the page's load would drop content; the
+  // page then opens read-only and the file stays as it is on disk. The guard
+  // refuses every change to the document; nothing serializes either, so no
+  // path that reaches the save can write the shortened body.
+  const lossyLoad = useRef(false);
   const emitMarkdown = useCallback((markdown: string) => {
-    if (editorSession.isSerializationBlocked()) {
+    if (lossyLoad.current || editorSession.isSerializationBlocked()) {
       onSerialized?.();
       return;
     }
@@ -484,15 +492,21 @@ function Inner({
         ctx.set(defaultValueCtx, value);
         setPageRefOrigin(window.location.origin);
         ctx.set(editorViewOptionsCtx, {
-          editable: () => !pageRefNestingPending && !mutationsFrozen,
+          editable: () =>
+            !lossyLoad.current && !pageRefNestingPending && !mutationsFrozen,
           // B6: the toolbar pills float over the top of the canvas (36 +
           // inset 12); the caret and a typed line must never scroll up
           // under them — start scrolling inside the band and land below it
           scrollThreshold: { top: 64, right: 0, bottom: 24, left: 0 },
           scrollMargin: { top: 76, right: 0, bottom: 32, left: 0 },
-          attributes: {
+          // A function so the lossy-load state, known only once the page
+          // has been parsed, reaches the element it describes.
+          attributes: () => ({
             "aria-label": "Page content",
             "aria-multiline": "true",
+            ...(lossyLoad.current
+              ? { "aria-readonly": "true", "data-lossy-load": "true" }
+              : {}),
             ...(pageRefNestingPending || mutationsFrozen
               ? {
                   "aria-busy": "true",
@@ -502,7 +516,7 @@ function Inner({
                     : { "data-page-ref-restore-pending-editor": "true" }),
                 }
               : {}),
-          },
+          }),
         });
         ctx
           .get(listenerCtx)
@@ -536,6 +550,7 @@ function Inner({
       // after the preset: the extended image and link schemas replace it
       .use(attachmentRefs)
       .use(noNestedTables)
+      .use(tableCells)
       .use(normalizeLegacy)
       .use(editingCore)
       .use(colorMarks)
@@ -569,6 +584,12 @@ function Inner({
       .use(columnDrop)
       .use(searchHighlightPlugin)
       .use(immediateDirty)
+      .use(
+        loadGuard(() => {
+          lossyLoad.current = true;
+          notifyLossyLoad();
+        }),
+      )
       .use(listener),
   );
 
@@ -781,6 +802,8 @@ function Inner({
     const onCalloutEmoji = (event: Event) => {
       if (!(event instanceof CustomEvent) || !isCalloutEmojiDetail(event.detail)) return;
       event.stopPropagation();
+      // A lossy page takes no pick, so it opens no picker either.
+      if (lossyLoad.current) return;
       setCalloutEmoji({ ...event.detail, id: calloutEmojiId.current++ });
     };
 
@@ -809,7 +832,7 @@ function Inner({
   const pickCalloutEmoji = (emoji: string) => {
     const anchor = calloutEmoji;
     setCalloutEmoji(null);
-    if (!anchor) return;
+    if (!anchor || lossyLoad.current) return;
 
     get()?.action((ctx) => {
       const view = ctx.get(editorViewCtx);
@@ -830,10 +853,12 @@ function Inner({
         // A frozen editor takes nothing. Say so during the drag: without a
         // preventDefault here the browser never arms the drop, and `no-drop`
         // is what tells the reader that before they let go.
-        if (mutationsFrozen && e.dataTransfer) e.dataTransfer.dropEffect = "none";
+        if ((mutationsFrozen || lossyLoad.current) && e.dataTransfer) {
+          e.dataTransfer.dropEffect = "none";
+        }
       }}
       onDropCapture={(e) => {
-        if (mutationsFrozen) {
+        if (mutationsFrozen || lossyLoad.current) {
           e.preventDefault();
           e.stopPropagation();
           return;
@@ -886,7 +911,7 @@ function Inner({
         })();
       }}
       onPasteCapture={(e) => {
-        if (mutationsFrozen) {
+        if (mutationsFrozen || lossyLoad.current) {
           e.preventDefault();
           e.stopPropagation();
           return;
@@ -907,8 +932,13 @@ function Inner({
           return;
         }
         const t = e.clipboardData?.getData("text/plain")?.trim();
-        // pasting a range from Excel/Sheets becomes a table
-        const tsv = t ? parseTsv(t) : null;
+        // pasting a range from Excel/Sheets becomes a table, except inside a
+        // table, where the range fills cells from the caret instead
+        // (`table-cell.ts`): a table inserted there split the one it was in
+        const inTable = get()?.action((ctx) =>
+          isInTable(ctx.get(editorViewCtx).state.selection.$from),
+        );
+        const tsv = t && !inTable ? parseTsv(t) : null;
         if (tsv) {
           e.preventDefault();
           get()?.action(insert(toGfmTable(tsv)));

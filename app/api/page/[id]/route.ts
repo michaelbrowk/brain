@@ -3,6 +3,7 @@ import {
   pageWriteConflictResponse,
   resolvePageWrite,
 } from "@/lib/api/page-write";
+import { parseBodyPatches } from "@/lib/body-patch";
 import { DEFAULT_PAGE_ICON } from "@/lib/constants";
 import {
   getStore,
@@ -106,8 +107,24 @@ export async function PUT(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  const { markdown, rev, baseMarkdown } = await req.json();
+  const { markdown, rev, baseMarkdown, patches } = await req.json();
   const store = await getStore();
+  // A closing tab's save: spans against bodies it knows, no full body. It has
+  // its own conflict rule (`writePageBodyPatch`), and no historical base: the
+  // tab that sent it is gone and keeps its full draft for the next load.
+  if (patches !== undefined) {
+    const parsed = parseBodyPatches(patches);
+    if (!parsed || (rev !== undefined && typeof rev !== "string")) {
+      return NextResponse.json({ error: "invalid body patch" }, { status: 400 });
+    }
+    const outcome = await resolvePageWrite(store, { id }, () =>
+      store.writePageBodyPatch(id, parsed, rev, "me", src(req)),
+    );
+    if (outcome.status === "conflict") return pageWriteConflictResponse(outcome);
+    if (outcome.status === "not-found")
+      return NextResponse.json({ error: "not found" }, { status: 404 });
+    return NextResponse.json(redactPage(outcome.page));
+  }
   const outcome = await resolvePageWrite(
     store,
     { id, rev, baseMarkdown },

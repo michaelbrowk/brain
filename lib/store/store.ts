@@ -8,6 +8,7 @@ import { nanoid } from "nanoid";
 import { generateKeyBetween, generateNKeysBetween } from "fractional-indexing";
 import { parsePage, serializeLivePage, serializePage } from "./frontmatter";
 import { atomicWrite, hashRev, syncDirectory } from "./atomic";
+import { applyBodyPatch, bodyHash, type BodyPatch } from "../body-patch";
 import { slugify, assertInRoot, isReservedDir } from "./paths";
 import {
   APP_ASSETS_DIR,
@@ -3813,7 +3814,55 @@ export class Store {
     src?: string,
     expectedMarkdown?: string,
   ): Promise<Page> {
+    return this.mutate(() =>
+      this.writePageUnlocked(id, markdown, expectedRev, by, src, expectedMarkdown),
+    );
+  }
+
+  /** The save a closing tab sends (see `lib/body-patch.ts`): one span per body
+   *  the tab knows the page may hold, keyed by that body's hash. The span whose
+   *  body is the page's body now is applied, and that body becomes the
+   *  expected one, so the write is exactly an ordinary save made against it.
+   *  A page holding any other body is a 409: no tick merge, because a merge
+   *  needs the full baseline this request is too small to carry, and the
+   *  tab's local draft stays behind for the next load to save in full. */
+  async writePageBodyPatch(
+    id: string,
+    patches: readonly BodyPatch[],
+    expectedRev?: string,
+    by?: "me" | "claude",
+    src?: string,
+  ): Promise<Page> {
     return this.mutate(async () => {
+      const e = this.get(id);
+      const indexPath = assertInRoot(this.root, path.join(e.dir, "index.md"));
+      const currentRaw = await fs.readFile(indexPath, "utf8");
+      const currentRev = hashRev(currentRaw);
+      const parsed = parsePage(currentRaw);
+      const current = bodyHash(parsed.markdown);
+      const patch = patches.find((candidate) => candidate.base === current);
+      const body = patch ? applyBodyPatch(parsed.markdown, patch) : null;
+      // The barrier refuses a matching body under a stale rev in an ordinary
+      // save too; a hash match is no stronger than a body match.
+      if (
+        body === null ||
+        (parsed.meta.structureWriteBarrier === true && expectedRev !== currentRev)
+      ) {
+        throw new RevConflictError(currentRev, expectedRev ?? "");
+      }
+      return this.writePageUnlocked(id, body, currentRev, by, src, parsed.markdown);
+    });
+  }
+
+  private async writePageUnlocked(
+    id: string,
+    markdown: string,
+    expectedRev?: string,
+    by?: "me" | "claude",
+    src?: string,
+    expectedMarkdown?: string,
+  ): Promise<Page> {
+    {
       const e = this.get(id);
       const indexPath = assertInRoot(this.root, path.join(e.dir, "index.md"));
       const currentRaw = await fs.readFile(indexPath, "utf8");
@@ -3872,7 +3921,7 @@ export class Store {
       const rev = hashRev(content);
       emitStore({ type: "write", id, rev, src });
       return { meta: e.meta, markdown: body.trimEnd(), rev };
-    });
+    }
   }
 
   /** Append inside the mutation queue. Keeping read + join + atomic write in

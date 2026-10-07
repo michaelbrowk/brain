@@ -6,12 +6,20 @@ import {
   createKeyedQueue,
   decodeDraft,
   encodeSaveRequest,
+  encodeUnloadSaveRequest,
   isDraftOperation,
+  isRetryableSaveFailure,
   latchDraftConflict,
+  ownSavesAround,
   persistDraft,
   SaveRequestError,
+  saveOperationSeq,
+  saveRetryDelay,
+  SaveSupersededError,
   saveMarkdown,
+  type SentUnloadSave,
   type StoredDraft,
+  unloadSaveBases,
 } from "@/lib/autosave";
 import { canonicalPageMarkdown } from "@/lib/page-markdown";
 import { openTodayCount } from "./tasks-lists";
@@ -89,6 +97,7 @@ import { requestCompose } from "./mail-commands";
 import { StickersLayer, stickerPrintCanvasHeight } from "./stickers";
 import type { Sticker } from "@/lib/store/types";
 import {
+  LOSSY_LOAD_EVENT,
   NESTED_TABLE_BLOCKED_EVENT,
   TASKS_CHANGED_EVENT,
 } from "@/lib/editor-events";
@@ -748,6 +757,26 @@ export function Shell({
   const queuedSaveRef = useRef<Map<string, { id: string; promise: Promise<boolean> }>>(
     new Map(),
   );
+  // Canonical bodies of this tab's saves that are queued or on the wire, by
+  // page and operation. Any of them may be what the server holds by the time
+  // a closing-tab save lands, so that save cuts a span against each.
+  const sentBodiesRef = useRef<Map<string, Map<string, string>>>(new Map());
+  // Closing-tab saves sent per page, oldest first. An edit made before one
+  // (by `saveOperationSeq`) is stale behind it and must never write over it;
+  // an edit made after it, a typed one or a rewrite, is newer.
+  const unloadSavesRef = useRef<Map<string, SentUnloadSave[]>>(new Map());
+  // Numbers this document's edits in the order they are made.
+  const saveSeqRef = useRef(0);
+  // A save that failed for a reason time can fix is tried again while the tab
+  // lives, further apart each round (`saveRetryDelay`), until one lands. The
+  // failure toast has told the owner, and the save dot stays on error until
+  // then. One timer per page.
+  const saveRetriesRef = useRef(
+    new Map<string, { timer: ReturnType<typeof setTimeout> | null; failures: number }>(),
+  );
+  const retrySaveLaterRef = useRef<(id: string, operationId: string) => void>(
+    () => {},
+  );
   const conflictedPagesRef = useRef<Set<string>>(new Set());
   const localRecoveryUnavailableRef = useRef<Set<string>>(new Set());
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1128,15 +1157,17 @@ export function Shell({
       );
   }, [showToast]);
 
-  const nextSaveOperation = useCallback(
-    () =>
-      `${CLIENT_ID}:${
-        typeof crypto !== "undefined" && "randomUUID" in crypto
-          ? crypto.randomUUID()
-          : `${Date.now()}-${Math.random().toString(36).slice(2)}`
-      }`,
-    [],
-  );
+  // `<client>:<seq>.<random>`: the sequence orders this tab's edits against
+  // its closing-tab saves (`saveOperationSeq`), the random part keeps the id
+  // unique across reloads of the same draft.
+  const nextSaveOperation = useCallback(() => {
+    saveSeqRef.current += 1;
+    return `${CLIENT_ID}:${saveSeqRef.current}.${
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    }`;
+  }, []);
 
   const clearDraftOperation = useCallback(
     (id: string, operationId: string) => {
@@ -1444,6 +1475,24 @@ export function Shell({
     setHistoryBaseRevision(revisionsRef.current.get(id) ?? "");
     setHistoryDialog({ open: true, owner });
   }, [startDialogFocus]);
+
+  // A page the editor could not load whole opens read-only. The toast says
+  // so and offers the one way the owner can see the file as it is on disk:
+  // its History, which reads the stored revisions rather than the editor.
+  useEffect(() => {
+    const onLossyLoad = () => {
+      showToast("Opened read-only", {
+        subtitle: "Part of this page can't be shown, and an edit would lose it.",
+        actionLabel: "Open history",
+        onAction: () => {
+          void openHistory(null);
+        },
+        id: "editor-lossy-load",
+      });
+    };
+    window.addEventListener(LOSSY_LOAD_EVENT, onLossyLoad);
+    return () => window.removeEventListener(LOSSY_LOAD_EVENT, onLossyLoad);
+  }, [openHistory, showToast]);
   useEffect(() => {
     let es: EventSource | null = null;
     let t: ReturnType<typeof setTimeout>;
@@ -2331,6 +2380,13 @@ export function Shell({
         // edit visible when the action was invoked. If that edit fails, the
         // rewrite is skipped; edits typed later are already queued after it.
         if (prerequisite && !(await prerequisite)) return false;
+        // A closing-tab save of a later edit, seen to land, already holds
+        // newer text than this body.
+        const seq = saveOperationSeq(operationId, CLIENT_ID);
+        const unloadSaves = unloadSavesRef.current.get(id) ?? [];
+        if (unloadSaves.some((sent) => sent.landed && sent.seq > seq)) {
+          return false;
+        }
         // What the store held for this note before this save, for the task
         // check below. Read here because `saveMarkdown` moves the base
         // markdown on and `cachePut` moves the cache on.
@@ -2345,7 +2401,19 @@ export function Shell({
             setRevision: (next) => revisionsRef.current.set(id, next),
             getBaseMarkdown: () => baseMarkdownRef.current.get(id),
             setBaseMarkdown: (next) => baseMarkdownRef.current.set(id, next),
+            ownSaves: () =>
+              ownSavesAround(unloadSavesRef.current.get(id) ?? [], seq),
           });
+          // A closing-tab save this one has now written over, or that left
+          // before it, is history: keep only those of later edits.
+          const stillNewer = (unloadSavesRef.current.get(id) ?? []).filter(
+            (sent) => sent.seq > seq,
+          );
+          if (stillNewer.length) unloadSavesRef.current.set(id, stillNewer);
+          else unloadSavesRef.current.delete(id);
+          const retry = saveRetriesRef.current.get(id);
+          if (retry?.timer) clearTimeout(retry.timer);
+          saveRetriesRef.current.delete(id);
           setPage((current) =>
             current?.id === id ? { ...current, rev: revision } : current,
           );
@@ -2356,8 +2424,17 @@ export function Shell({
           if (selectedIdRef.current === id && isCurrentOperation) setSave("saved");
           // Keep the server-authoritative cache current. The operation identity
           // below, rather than markdown equality, decides draft cleanup.
+          // The rev paired with this body is the one `saveMarkdown` kept: after
+          // the server merged a tick in, that is the old rev, so a save typed
+          // on the cached copy after coming back is merged again too.
           const prev = pageCache.current.get(id);
-          if (prev) cachePut({ ...prev, markdown: md, rev: revision });
+          if (prev) {
+            cachePut({
+              ...prev,
+              markdown: md,
+              rev: revisionsRef.current.get(id) ?? revision,
+            });
+          }
           // A TICK AND A DELETED LINE ARE TASK WRITES TOO, AND THIS IS THE
           // ONLY PLACE THEY SETTLE.
           //
@@ -2410,6 +2487,21 @@ export function Shell({
         } catch (error) {
           const currentPending =
             pendingRef.current?.id === id ? pendingRef.current : null;
+          if (error instanceof SaveSupersededError) {
+            // Not a failure and not a conflict: the newer body is this tab's
+            // own. The newest edit saves next, against that body. When the
+            // server was seen holding it (it became the base), it has landed,
+            // and every other stale save of this page stays unsent: under
+            // the rev just adopted one would otherwise be accepted.
+            const base = baseMarkdownRef.current.get(id);
+            for (const sent of unloadSavesRef.current.get(id) ?? []) {
+              if (sent.seq > seq && sent.markdown === base) sent.landed = true;
+            }
+            if (currentPending && currentPending.operationId !== operationId) {
+              queueMicrotask(() => flushPendingRef.current());
+            }
+            return false;
+          }
           if (error instanceof SaveRequestError && error.status === 409) {
             conflictedPagesRef.current.add(id);
             const latest = currentPending ?? { id, md, operationId };
@@ -2435,14 +2527,23 @@ export function Shell({
             (!currentPending || currentPending.operationId === operationId)
           )
             setSave("error");
+          if (isRetryableSaveFailure(error)) {
+            retrySaveLaterRef.current(id, operationId);
+          }
           return false;
         }
       });
       queuedSaveRef.current.set(operationKey, { id, promise });
+      const sentBodies = sentBodiesRef.current.get(id) ?? new Map<string, string>();
+      sentBodies.set(operationId, canonicalPageMarkdown(md));
+      sentBodiesRef.current.set(id, sentBodies);
       void promise.finally(() => {
         if (queuedSaveRef.current.get(operationKey)?.promise === promise) {
           queuedSaveRef.current.delete(operationKey);
         }
+        const bodies = sentBodiesRef.current.get(id);
+        bodies?.delete(operationId);
+        if (bodies && !bodies.size) sentBodiesRef.current.delete(id);
       });
       return promise;
     },
@@ -2463,6 +2564,46 @@ export function Shell({
       return doSave(pending.id, pending.md, pending.operationId);
     };
   }, [doSave]);
+
+  useEffect(() => {
+    const retries = saveRetriesRef.current;
+    retrySaveLaterRef.current = (id, operationId) => {
+      const retry = retries.get(id) ?? { timer: null, failures: 0 };
+      retry.failures += 1;
+      if (retry.timer) clearTimeout(retry.timer);
+      retry.timer = setTimeout(() => {
+        retry.timer = null;
+        // Only the page's newest edit is worth sending: a newer one carries
+        // everything the failed body had. That is the pending edit while the
+        // page is open, or the failed one itself while its draft is still
+        // the page's newest. A programmatic save that failed has no draft;
+        // its caller reported it and decides whether to try again.
+        const pending = pendingRef.current?.id === id ? pendingRef.current : null;
+        if (pending) {
+          void doSave(pending.id, pending.md, pending.operationId);
+          return;
+        }
+        try {
+          const raw = localStorage.getItem(draftStorageKey(id));
+          if (raw !== null && isDraftOperation(raw, operationId)) {
+            void doSave(id, decodeDraft(raw).markdown, operationId);
+          }
+        } catch {}
+      }, saveRetryDelay(retry.failures));
+      retries.set(id, retry);
+    };
+  }, [doSave]);
+
+  useEffect(() => {
+    const retries = saveRetriesRef.current;
+    return () => {
+      retrySaveLaterRef.current = () => {};
+      for (const retry of retries.values()) {
+        if (retry.timer) clearTimeout(retry.timer);
+      }
+      retries.clear();
+    };
+  }, []);
 
   // Every navigation path, including internal setSelectedId calls, flushes the
   // page being left before the next editor can start producing changes.
@@ -2556,13 +2697,98 @@ export function Shell({
     ],
   );
 
-  // Save as soon as the tab backgrounds. pagehide adds a keepalive fallback;
-  // the local draft remains until a confirmed response, so a hard close can be
-  // recovered even when the browser terminates the request.
+  // Save as soon as the tab backgrounds or goes away. A closing tab, and an
+  // iOS tab frozen right after it hides, never sends an ordinary fetch made
+  // then, so the newest body also leaves as a keepalive request, whatever is
+  // queued. The local draft remains until an ordinary save confirms it, so a
+  // request the browser still drops is recovered on the next load.
   useEffect(() => {
+    const sendUnloadSave = () => {
+      editorFlushRef.current();
+      const p = pendingRef.current;
+      if (!p) return;
+      if (conflictedPagesRef.current.has(p.id)) return;
+      const sent = unloadSavesRef.current.get(p.id) ?? [];
+      // visibilitychange and pagehide both fire on a close: one request per
+      // edit is enough, and a second would only spend the keepalive budget.
+      if (sent.some((entry) => entry.operationId === p.operationId)) return;
+      const revision = revisionsRef.current.get(p.id) ?? "";
+      const base = baseMarkdownRef.current.get(p.id);
+      const seq = saveOperationSeq(p.operationId, CLIENT_ID);
+      const queued = sentBodiesRef.current.get(p.id) ?? new Map<string, string>();
+      // Browsers refuse keepalive bodies over 64 KiB in flight per page.
+      const budget = 60 * 1024;
+      const body =
+        encodeUnloadSaveRequest(
+          p.md,
+          revision,
+          unloadSaveBases(queued, sent, base, seq, CLIENT_ID),
+          budget,
+        ) ??
+        // A legacy draft with no trusted base and nothing on the wire can
+        // only go whole, under its exact rev, when it fits.
+        (base === undefined && queued.size === 0 && sent.length === 0
+          ? encodeSaveRequest(p.md, revision)
+          : null);
+      if (body === null || new TextEncoder().encode(body).byteLength > budget) {
+        return;
+      }
+      const entry: SentUnloadSave = {
+        operationId: p.operationId,
+        seq,
+        markdown: canonicalPageMarkdown(p.md),
+        landed: false,
+      };
+      const pageId = p.id;
+      unloadSavesRef.current.set(pageId, [...sent, entry].slice(-4));
+      void apiFetch(`/api/page/${pageId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body,
+        keepalive: true, // survives the unload
+      })
+        .then(async (response) => {
+          if (!response.ok) return;
+          entry.landed = true;
+          const page = (await response.json()) as { markdown?: unknown; rev?: unknown };
+          // Adopt the landed body as the tab's base, unless a save of this
+          // edit or a later one already confirmed something newer (it drops
+          // the entry when it does).
+          if (
+            typeof page.markdown !== "string" ||
+            typeof page.rev !== "string" ||
+            !page.rev ||
+            !(unloadSavesRef.current.get(pageId) ?? []).includes(entry)
+          ) {
+            return;
+          }
+          revisionsRef.current.set(pageId, page.rev);
+          baseMarkdownRef.current.set(pageId, page.markdown);
+          setPage((current) =>
+            current?.id === pageId ? { ...current, rev: page.rev as string } : current,
+          );
+          // And in the draft, so a reload starts from it too.
+          const pending = pendingRef.current?.id === pageId ? pendingRef.current : null;
+          if (!pending) return;
+          const persisted = persistDraft(
+            localStorage,
+            draftStorageKey(pageId),
+            pending.md,
+            page.rev,
+            pending.operationId,
+            Date.now(),
+            page.markdown,
+            false,
+            draftSourcesForOperation(pageId, pending.operationId),
+          );
+          if (persisted) clearLocalRecoveryUnavailable(pageId);
+          else markLocalRecoveryUnavailable(pageId);
+        })
+        .catch(() => {});
+    };
     const onVisibilityChange = () => {
       if (document.visibilityState === "hidden") {
-        editorFlushRef.current();
+        sendUnloadSave();
         flushPendingRef.current();
       }
     };
@@ -2570,33 +2796,15 @@ export function Shell({
       editorFlushRef.current();
       flushPendingRef.current();
     };
-    const flushKeepalive = () => {
-      editorFlushRef.current();
-      const p = pendingRef.current;
-      if (!p) return;
-      if (conflictedPagesRef.current.has(p.id)) return;
-      if (saveQueueRef.current.has(p.id)) return;
-      void apiFetch(`/api/page/${p.id}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: encodeSaveRequest(
-            p.md,
-            revisionsRef.current.get(p.id) ?? "",
-            baseMarkdownRef.current.get(p.id),
-            60 * 1024,
-          ),
-          keepalive: true, // survives the unload
-        }).catch(() => {});
-    };
     document.addEventListener("visibilitychange", onVisibilityChange);
     window.addEventListener("online", onOnline);
-    window.addEventListener("pagehide", flushKeepalive);
+    window.addEventListener("pagehide", sendUnloadSave);
     return () => {
       document.removeEventListener("visibilitychange", onVisibilityChange);
       window.removeEventListener("online", onOnline);
-      window.removeEventListener("pagehide", flushKeepalive);
+      window.removeEventListener("pagehide", sendUnloadSave);
     };
-  }, []);
+  }, [clearLocalRecoveryUnavailable, markLocalRecoveryUnavailable]);
 
   // ── mutations ───────────────────────────────────────
   const requestCreatePage = useCallback(

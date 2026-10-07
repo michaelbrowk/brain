@@ -13,6 +13,16 @@ export function notifyNestedTableBlocked() {
   window.dispatchEvent(new CustomEvent(NESTED_TABLE_BLOCKED_EVENT));
 }
 
+/** The page opened read-only because its load would have dropped content
+ *  (`components/editor/load-guard.ts`). The editor knows it; the shell owns
+ *  the toast that says so. */
+export const LOSSY_LOAD_EVENT = "brain:editor-lossy-load";
+
+export function notifyLossyLoad() {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(LOSSY_LOAD_EVENT));
+}
+
 /** A task record changed somewhere the open note cannot see: another tab, the
  *  Tasks surface, an MCP call, a repeat rule advancing. Dispatched on `window`
  *  by the shell's store-event forwarder, which is the one place that already

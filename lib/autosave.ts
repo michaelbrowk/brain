@@ -1,3 +1,4 @@
+import { bodyHash, diffBodyPatch, type BodyPatch } from "./body-patch";
 import { canonicalPageMarkdown } from "./page-markdown";
 
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -17,6 +18,17 @@ export class SaveRequestError extends Error {
   ) {
     super(message);
     this.name = "SaveRequestError";
+  }
+}
+
+/** The server holds a newer body this same tab sent (a closing-tab save that
+ *  got there first). The older save stops: sending it again would put older
+ *  text over newer, and reading it as a conflict would latch a page whose
+ *  only other writer is the person themselves. */
+export class SaveSupersededError extends SaveRequestError {
+  constructor() {
+    super("Superseded by a newer save from this tab");
+    this.name = "SaveSupersededError";
   }
 }
 
@@ -114,6 +126,53 @@ export function encodeSaveRequest(
   return new TextEncoder().encode(withBase).byteLength <= maxBytes
     ? withBase
     : JSON.stringify(withoutBase);
+}
+
+/** The save a tab sends as it goes away, sized for a keepalive request.
+ *
+ * It carries no full body. For each body the server may hold as far as this
+ * tab knows (its confirmed base, and the bodies of its own saves still on the
+ * wire) it carries the one span that turns that body into the newest one,
+ * keyed by the body's hash; the server applies whichever span matches what it
+ * holds, and refuses anything else as a conflict. Spans are added smallest
+ * first while the request stays under `maxBytes`, so a long page with a few
+ * typed words fits, and a huge paste the request cannot carry is null: its
+ * draft stays in localStorage for the next load. */
+/** Above this many characters a page is not cut at pagehide. Hashing runs on
+ *  the main thread while the tab is going away: about 30 ms per million
+ *  characters per known body here, and a page of several million characters
+ *  with a few saves on the wire would stall the close for most of a second.
+ *  Such a page keeps its local draft and the ordinary save made on hide. */
+export const UNLOAD_PATCH_MAX_CHARS = 1_000_000;
+
+export function encodeUnloadSaveRequest(
+  markdown: string,
+  revision: string,
+  knownBodies: readonly string[],
+  maxBytes: number,
+): string | null {
+  const newest = canonicalPageMarkdown(markdown);
+  if (newest.length > UNLOAD_PATCH_MAX_CHARS) return null;
+  const seen = new Set<string>();
+  const candidates: { patch: BodyPatch; size: number }[] = [];
+  for (const known of knownBodies) {
+    const body = canonicalPageMarkdown(known);
+    if (seen.has(body) || body.length > UNLOAD_PATCH_MAX_CHARS) continue;
+    seen.add(body);
+    const patch = { base: bodyHash(body), ...diffBodyPatch(body, newest) };
+    candidates.push({ patch, size: JSON.stringify(patch).length });
+  }
+  candidates.sort((a, b) => a.size - b.size);
+  const encoder = new TextEncoder();
+  const patches: BodyPatch[] = [];
+  let encoded: string | null = null;
+  for (const { patch } of candidates.slice(0, 8)) {
+    const next = JSON.stringify({ rev: revision, patches: [...patches, patch] });
+    if (encoder.encode(next).byteLength > maxBytes) continue;
+    patches.push(patch);
+    encoded = next;
+  }
+  return encoded;
 }
 
 export function encodeDraft(
@@ -372,6 +431,89 @@ interface SaveMarkdownOptions {
    *  visitor writes to `/api/share-edit/page/<id>?root=…&v=…`. The conflict
    *  GET uses the same URL, so both halves of the 409 dance stay on one route. */
   endpoint?: (id: string) => string;
+  /** The closing-tab saves this tab sent for the page (canonical bodies),
+   *  read afresh at each use because one can leave while this save is in
+   *  flight. `newer` is the newest one sent after this edit: while it is
+   *  outstanding this save is stale, goes without a base so the server cannot
+   *  merge it over the newer body, and stops on a 409. `older` is the newest
+   *  one sent at or before this edit, which the server may hold under
+   *  somebody's tick. `bodies` is all of them. */
+  ownSaves?: () => OwnSaves;
+}
+
+export interface OwnSaves {
+  newer: string | undefined;
+  older: string | undefined;
+  /** Every one sent at or before this edit, newest first (`older` leads). */
+  olders: readonly string[];
+  bodies: readonly string[];
+}
+
+/** A closing-tab save as the tab remembers it. */
+export interface SentUnloadSave {
+  operationId: string;
+  /** The order of the edit it carried; see `saveOperationSeq`. */
+  seq: number;
+  /** Canonical body. */
+  markdown: string;
+  /** True only once the tab lived to read a 2xx for it. */
+  landed: boolean;
+}
+
+/** The bodies a closing-tab save of edit `seq` cuts its spans against: the
+ *  saves of this edit or earlier ones still queued or on the wire, the
+ *  closing-tab saves already sent, and the confirmed base. A rewrite queued
+ *  after the edit (Smart Sort, undo) is newer, and the server holding it must
+ *  refuse this save rather than have it applied over the rewrite. */
+export function unloadSaveBases(
+  queued: ReadonlyMap<string, string>,
+  sent: readonly SentUnloadSave[],
+  base: string | undefined,
+  seq: number,
+  clientId: string,
+): string[] {
+  return [
+    ...[...queued]
+      .filter(([operationId]) => saveOperationSeq(operationId, clientId) <= seq)
+      .map(([, markdown]) => markdown),
+    ...sent.map((entry) => entry.markdown),
+    ...(base === undefined ? [] : [base]),
+  ];
+}
+
+/** An edit id this tab minted reads `<client>:<seq>.<random>`, so the order
+ *  of two edits is a number comparison. What came before this document's
+ *  lifetime (a recovered draft, another tab's id, an older format) is 0:
+ *  older than every edit made here, which is what it is. */
+export function saveOperationSeq(operationId: string, clientId: string): number {
+  const prefix = `${clientId}:`;
+  if (!operationId.startsWith(prefix)) return 0;
+  const seq = Number.parseInt(operationId.slice(prefix.length), 10);
+  return Number.isSafeInteger(seq) && seq > 0 ? seq : 0;
+}
+
+/** What the closing-tab saves sent for a page mean to one save, by order:
+ *  the newest sent after its edit, and the newest sent at or before it. An
+ *  edit made later is never stale behind a body that left before it existed,
+ *  however it was queued. */
+export function ownSavesAround(
+  sent: readonly SentUnloadSave[],
+  seq: number,
+): OwnSaves {
+  let newer: SentUnloadSave | undefined;
+  for (const entry of sent) {
+    if (entry.seq > seq && (!newer || entry.seq > newer.seq)) newer = entry;
+  }
+  const olders = sent
+    .filter((entry) => entry.seq <= seq)
+    .sort((a, b) => b.seq - a.seq)
+    .map((entry) => entry.markdown);
+  return {
+    newer: newer?.markdown,
+    older: olders[0],
+    olders,
+    bodies: sent.map((entry) => entry.markdown),
+  };
 }
 
 /** Persist one markdown body, refreshing the optimistic-concurrency revision on
@@ -388,16 +530,29 @@ export async function saveMarkdown({
   wait = () => new Promise((resolve) => setTimeout(resolve, 1500)),
   maxAttempts = 3,
   endpoint = (pageId: string) => `/api/page/${pageId}`,
+  ownSaves,
 }: SaveMarkdownOptions): Promise<string> {
+  // The rev this save started from. A stale save sends it on every attempt,
+  // so a closing save that lands and is adopted during a backoff cannot hand
+  // the older body a rev the server would accept; an attempt over an own
+  // body sends it too, for the server's tick merge to judge.
+  const startRev = getRevision();
+  // The body of one of this tab's own closing-tab saves, standing in for the
+  // base when the server holds it under a later tick; each is tried once.
+  let ownBase: string | undefined;
+  let ownBaseFrom: string | undefined;
+  const triedOwn = new Set<string>();
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     let response: Response;
     let attemptBaseMarkdown: string | undefined;
     try {
-      attemptBaseMarkdown = getBaseMarkdown?.();
+      const stale = ownSaves?.().newer !== undefined;
+      attemptBaseMarkdown = stale ? undefined : (ownBase ?? getBaseMarkdown?.());
+      const revision = stale || ownBase !== undefined ? startRev : getRevision();
       response = await fetcher(endpoint(id), {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: encodeSaveRequest(markdown, getRevision(), attemptBaseMarkdown),
+        body: encodeSaveRequest(markdown, revision, attemptBaseMarkdown),
       });
     } catch {
       if (attempt + 1 < maxAttempts) {
@@ -408,11 +563,19 @@ export async function saveMarkdown({
     }
 
     if (response.ok) {
-      const payload = (await response.json()) as { rev?: unknown };
+      const payload = (await response.json()) as { rev?: unknown; markdown?: unknown };
       if (typeof payload.rev !== "string" || !payload.rev) {
         throw new SaveRequestError("Save response did not include a revision", response.status);
       }
-      setRevision(payload.rev);
+      // The server merged somebody's tick into this body. The editor still
+      // shows this body without it, so the next save must be merged too:
+      // keep the rev this request carried, which tells the server the tab
+      // has not seen the merged version, and keep this body as the base.
+      // Taking the new rev would let the next save write the tick away.
+      const merged =
+        typeof payload.markdown === "string" &&
+        canonicalPageMarkdown(payload.markdown) !== canonicalPageMarkdown(markdown);
+      if (!merged) setRevision(payload.rev);
       setBaseMarkdown?.(canonicalPageMarkdown(markdown));
       return payload.rev;
     }
@@ -456,13 +619,40 @@ export async function saveMarkdown({
       ) {
         throw new SaveRequestError("Revision response was invalid", 409);
       }
+      const sameAsLocal =
+        payload.markdown === canonicalPageMarkdown(markdown);
+      const own = ownSaves?.();
+      // Behind a newer closing-tab save of this tab's own, this body is stale
+      // whatever the server holds: the newer edit carries all of it and saves
+      // next. Stopping here is not a conflict, and writing would put older
+      // text over newer. The server's body becomes the base only when it is
+      // exactly that newer body.
+      // Even when the server holds this very body: its newer edit still has
+      // to be written, and this one, held to its first rev, can only 409.
+      if (own?.newer !== undefined) {
+        if (payload.markdown === own.newer) {
+          setRevision(payload.rev);
+          setBaseMarkdown?.(payload.markdown);
+        }
+        throw new SaveSupersededError();
+      }
       const liveBase = getBaseMarkdown?.();
+      // The live base moves under an in-flight save when SSE or a reload
+      // adopts a server body, and then it must not authorize this write. It
+      // also moves when a closing-tab save of this tab's own is seen to land,
+      // and that body is no one else's. An attempt made over an own body
+      // compares with the base as it stood when that started.
+      const expectedLiveBase =
+        ownBase === undefined ? attemptBaseMarkdown : ownBaseFrom;
       const baselineStillCurrent =
-        attemptBaseMarkdown === undefined
+        (expectedLiveBase === undefined
           ? liveBase === undefined
           : typeof liveBase === "string" &&
             canonicalPageMarkdown(liveBase) ===
-              canonicalPageMarkdown(attemptBaseMarkdown);
+              canonicalPageMarkdown(expectedLiveBase)) ||
+        (typeof liveBase === "string" &&
+          own !== undefined &&
+          own.bodies.includes(canonicalPageMarkdown(liveBase)));
       if (!baselineStillCurrent) {
         throw new SaveRequestError("Page changed elsewhere", 409);
       }
@@ -473,18 +663,32 @@ export async function saveMarkdown({
       // An SSE/reload can update the caller's live ref while the conflict GET
       // is in flight; trusting that newer value would authorize overwriting it.
       const trustedBase = attemptBaseMarkdown ?? historicalBase;
-      const sameAsLocal =
-        payload.markdown === canonicalPageMarkdown(markdown);
       const sameAsBase =
         typeof trustedBase === "string" &&
         payload.markdown === canonicalPageMarkdown(trustedBase);
-      if (sameAsLocal || sameAsBase) {
+      // An older closing-tab save of this tab's own is no one else's edit:
+      // over it this save goes ahead as over its base.
+      const sameAsOwn = own !== undefined && own.olders.includes(payload.markdown);
+      const nextOwn = own?.olders.find((body) => !triedOwn.has(body));
+      if (sameAsLocal || sameAsBase || sameAsOwn) {
         setRevision(payload.rev);
         setBaseMarkdown?.(payload.markdown);
+        // The rev just read is the one to send now.
+        ownBase = undefined;
         if (attempt + 1 < maxAttempts) {
           await wait(attempt + 1);
           continue;
         }
+      } else if (nextOwn !== undefined) {
+        // The server holds something else: maybe one of those own saves
+        // under a tick from Tasks or a phone. Ask with each as the base,
+        // newest first, under the ORIGINAL rev, so the server's tick merge
+        // decides. The rev is never refreshed here: that would claim this tab
+        // saw the new body.
+        if (ownBase === undefined) ownBaseFrom = liveBase;
+        ownBase = nextOwn;
+        triedOwn.add(nextOwn);
+        if (attempt + 1 < maxAttempts) continue;
       }
       throw new SaveRequestError("Page changed elsewhere", 409);
     }
@@ -502,6 +706,25 @@ export async function saveMarkdown({
   }
 
   throw new SaveRequestError("Save attempts exhausted");
+}
+
+/** Whether a later attempt could succeed where this save failed: the network
+ *  was down, or the server was busy or broken. A conflict, a refusal (422), a
+ *  page that is gone and a superseded save are answers, and asking again gets
+ *  the same one. */
+export function isRetryableSaveFailure(error: unknown): boolean {
+  if (!(error instanceof SaveRequestError) || error instanceof SaveSupersededError) {
+    return false;
+  }
+  const { status } = error;
+  return status === undefined || status === 429 || status >= 500;
+}
+
+/** How long a failed save waits before its next round, after `failures`
+ *  failed rounds: 5 s, doubling, never more than a minute. A round is itself
+ *  `saveMarkdown`'s three quick attempts. */
+export function saveRetryDelay(failures: number): number {
+  return Math.min(60_000, 5_000 * 2 ** Math.max(0, failures - 1));
 }
 
 /** A tiny keyed promise queue. Failure in one task never poisons later work for

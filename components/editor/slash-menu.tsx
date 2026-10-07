@@ -522,6 +522,8 @@ export function SlashMenu({
         e.preventDefault();
         if (results[active]) run(results[active]);
       } else if (e.key === "Escape") {
+        // Taken: the editor's own Escape would carry the focus out of it.
+        e.preventDefault();
         setState(null);
       }
     };

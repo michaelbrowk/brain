@@ -444,6 +444,8 @@ interface SaveMarkdownOptions {
 export interface OwnSaves {
   newer: string | undefined;
   older: string | undefined;
+  /** Every one sent at or before this edit, newest first (`older` leads). */
+  olders: readonly string[];
   bodies: readonly string[];
 }
 
@@ -499,17 +501,17 @@ export function ownSavesAround(
   seq: number,
 ): OwnSaves {
   let newer: SentUnloadSave | undefined;
-  let older: SentUnloadSave | undefined;
   for (const entry of sent) {
-    if (entry.seq > seq) {
-      if (!newer || entry.seq > newer.seq) newer = entry;
-    } else if (!older || entry.seq > older.seq) {
-      older = entry;
-    }
+    if (entry.seq > seq && (!newer || entry.seq > newer.seq)) newer = entry;
   }
+  const olders = sent
+    .filter((entry) => entry.seq <= seq)
+    .sort((a, b) => b.seq - a.seq)
+    .map((entry) => entry.markdown);
   return {
     newer: newer?.markdown,
-    older: older?.markdown,
+    older: olders[0],
+    olders,
     bodies: sent.map((entry) => entry.markdown),
   };
 }
@@ -530,21 +532,27 @@ export async function saveMarkdown({
   endpoint = (pageId: string) => `/api/page/${pageId}`,
   ownSaves,
 }: SaveMarkdownOptions): Promise<string> {
-  // Set once, for one retry: the body of this tab's own closing-tab save,
-  // standing in for the base when the server holds it under a later tick.
+  // The rev this save started from. A stale save sends it on every attempt,
+  // so a closing save that lands and is adopted during a backoff cannot hand
+  // the older body a rev the server would accept; an attempt over an own
+  // body sends it too, for the server's tick merge to judge.
+  const startRev = getRevision();
+  // The body of one of this tab's own closing-tab saves, standing in for the
+  // base when the server holds it under a later tick; each is tried once.
   let ownBase: string | undefined;
+  let ownBaseFrom: string | undefined;
+  const triedOwn = new Set<string>();
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     let response: Response;
     let attemptBaseMarkdown: string | undefined;
     try {
-      attemptBaseMarkdown =
-        ownSaves?.().newer !== undefined
-          ? undefined
-          : (ownBase ?? getBaseMarkdown?.());
+      const stale = ownSaves?.().newer !== undefined;
+      attemptBaseMarkdown = stale ? undefined : (ownBase ?? getBaseMarkdown?.());
+      const revision = stale || ownBase !== undefined ? startRev : getRevision();
       response = await fetcher(endpoint(id), {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: encodeSaveRequest(markdown, getRevision(), attemptBaseMarkdown),
+        body: encodeSaveRequest(markdown, revision, attemptBaseMarkdown),
       });
     } catch {
       if (attempt + 1 < maxAttempts) {
@@ -619,7 +627,9 @@ export async function saveMarkdown({
       // next. Stopping here is not a conflict, and writing would put older
       // text over newer. The server's body becomes the base only when it is
       // exactly that newer body.
-      if (!sameAsLocal && own?.newer !== undefined) {
+      // Even when the server holds this very body: its newer edit still has
+      // to be written, and this one, held to its first rev, can only 409.
+      if (own?.newer !== undefined) {
         if (payload.markdown === own.newer) {
           setRevision(payload.rev);
           setBaseMarkdown?.(payload.markdown);
@@ -630,15 +640,17 @@ export async function saveMarkdown({
       // The live base moves under an in-flight save when SSE or a reload
       // adopts a server body, and then it must not authorize this write. It
       // also moves when a closing-tab save of this tab's own is seen to land,
-      // and that body is no one else's.
+      // and that body is no one else's. An attempt made over an own body
+      // compares with the base as it stood when that started.
+      const expectedLiveBase =
+        ownBase === undefined ? attemptBaseMarkdown : ownBaseFrom;
       const baselineStillCurrent =
-        (attemptBaseMarkdown === undefined
+        (expectedLiveBase === undefined
           ? liveBase === undefined
           : typeof liveBase === "string" &&
             canonicalPageMarkdown(liveBase) ===
-              canonicalPageMarkdown(attemptBaseMarkdown)) ||
-        (ownBase === undefined &&
-          typeof liveBase === "string" &&
+              canonicalPageMarkdown(expectedLiveBase)) ||
+        (typeof liveBase === "string" &&
           own !== undefined &&
           own.bodies.includes(canonicalPageMarkdown(liveBase)));
       if (!baselineStillCurrent) {
@@ -656,20 +668,26 @@ export async function saveMarkdown({
         payload.markdown === canonicalPageMarkdown(trustedBase);
       // An older closing-tab save of this tab's own is no one else's edit:
       // over it this save goes ahead as over its base.
-      const sameAsOwn = own?.older !== undefined && payload.markdown === own.older;
+      const sameAsOwn = own !== undefined && own.olders.includes(payload.markdown);
+      const nextOwn = own?.olders.find((body) => !triedOwn.has(body));
       if (sameAsLocal || sameAsBase || sameAsOwn) {
         setRevision(payload.rev);
         setBaseMarkdown?.(payload.markdown);
+        // The rev just read is the one to send now.
+        ownBase = undefined;
         if (attempt + 1 < maxAttempts) {
           await wait(attempt + 1);
           continue;
         }
-      } else if (own?.older !== undefined && ownBase === undefined) {
-        // The server holds something else: maybe that own save under a tick
-        // from Tasks or a phone. Ask once more with its body as the base and
-        // the ORIGINAL rev, so the server's tick merge decides. The rev is
-        // never refreshed here: that would claim this tab saw the new body.
-        ownBase = own.older;
+      } else if (nextOwn !== undefined) {
+        // The server holds something else: maybe one of those own saves
+        // under a tick from Tasks or a phone. Ask with each as the base,
+        // newest first, under the ORIGINAL rev, so the server's tick merge
+        // decides. The rev is never refreshed here: that would claim this tab
+        // saw the new body.
+        if (ownBase === undefined) ownBaseFrom = liveBase;
+        ownBase = nextOwn;
+        triedOwn.add(nextOwn);
         if (attempt + 1 < maxAttempts) continue;
       }
       throw new SaveRequestError("Page changed elsewhere", 409);

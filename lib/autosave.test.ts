@@ -589,6 +589,7 @@ describe("edit order and closing-tab saves", () => {
     expect(ownSavesAround(sent, 2)).toEqual({
       newer: "nine",
       older: undefined,
+      olders: [],
       bodies: ["four", "nine"],
     });
     // The closing save's own edit is not stale behind itself.
@@ -597,6 +598,8 @@ describe("edit order and closing-tab saves", () => {
     // it even when it sat in the queue behind it.
     expect(ownSavesAround(sent, 10)).toMatchObject({ newer: undefined, older: "nine" });
     expect(ownSavesAround(sent, 5)).toMatchObject({ newer: "nine", older: "four" });
+    // Every own save at or before the edit, newest first.
+    expect(ownSavesAround(sent, 9).olders).toEqual(["nine", "four"]);
   });
 
   it("cuts a closing save only against bodies of its edit or earlier ones", () => {
@@ -657,11 +660,11 @@ describe("saveMarkdown and a body this tab sent itself", () => {
     });
     return { promise, state };
   }
-  const none: OwnSaves = { newer: undefined, older: undefined, bodies: [] };
+  const none: OwnSaves = { newer: undefined, older: undefined, olders: [], bodies: [] };
 
   it("stops an older save, without a conflict, behind a newer body of its own", async () => {
     const fetcher = scripted(conflict(), server("Base one two", "rev-own"));
-    const own = { newer: "Base one two", older: undefined, bodies: ["Base one two"] };
+    const own = { newer: "Base one two", older: undefined, olders: [], bodies: ["Base one two"] };
     const { promise, state } = save(fetcher, "Base one", () => own);
 
     await expect(promise).rejects.toBeInstanceOf(SaveSupersededError);
@@ -672,7 +675,7 @@ describe("saveMarkdown and a body this tab sent itself", () => {
 
   it("stops behind a newer own save the server holds under a tick, adopting nothing", async () => {
     const fetcher = scripted(conflict(), server("- [x] Base one two"));
-    const own = { newer: "- [ ] Base one two", older: undefined, bodies: ["- [ ] Base one two"] };
+    const own = { newer: "- [ ] Base one two", older: undefined, olders: [], bodies: ["- [ ] Base one two"] };
     const { promise, state } = save(fetcher, "- [ ] Base one", () => own, {
       base: "- [ ] Base",
     });
@@ -684,7 +687,7 @@ describe("saveMarkdown and a body this tab sent itself", () => {
 
   it("sends a save that is already stale without a base, so the server cannot merge it", async () => {
     const fetcher = scripted(conflict(), server("- [ ] a\n- [x] b"));
-    const own = { newer: "- [ ] a\n- [x] b", older: undefined, bodies: ["- [ ] a\n- [x] b"] };
+    const own = { newer: "- [ ] a\n- [x] b", older: undefined, olders: [], bodies: ["- [ ] a\n- [x] b"] };
     const { promise } = save(fetcher, "- [x] a\n- [ ] b", () => own, {
       base: "- [ ] a\n- [ ] b",
     });
@@ -695,7 +698,7 @@ describe("saveMarkdown and a body this tab sent itself", () => {
 
   it("writes a newer body over an older body of its own", async () => {
     const fetcher = scripted(conflict(), server("Base one", "rev-own"), response({ rev: "rev-after" }));
-    const own = { newer: undefined, older: "Base one", bodies: ["Base one"] };
+    const own = { newer: undefined, older: "Base one", olders: ["Base one"], bodies: ["Base one"] };
     const { promise } = save(fetcher, "Base one two", () => own);
 
     await expect(promise).resolves.toBe("rev-after");
@@ -712,7 +715,7 @@ describe("saveMarkdown and a body this tab sent itself", () => {
       server("- [x] task\n\ntext more", "rev-ticked"),
       response({ rev: "rev-merged" }),
     );
-    const own = { newer: undefined, older: "- [ ] task\n\ntext more", bodies: ["- [ ] task\n\ntext more"] };
+    const own = { newer: undefined, older: "- [ ] task\n\ntext more", olders: ["- [ ] task\n\ntext more"], bodies: ["- [ ] task\n\ntext more"] };
     const { promise, state } = save(fetcher, "- [ ] task\n\ntext more and more", () => own, {
       base: "- [ ] task\n\ntext",
     });
@@ -728,7 +731,7 @@ describe("saveMarkdown and a body this tab sent itself", () => {
 
   it("is a real conflict when that one retry is refused too", async () => {
     const fetcher = scripted(conflict(), server("Written in another tab"), conflict(), server("Written in another tab"));
-    const own = { newer: undefined, older: "Base one", bodies: ["Base one"] };
+    const own = { newer: undefined, older: "Base one", olders: ["Base one"], bodies: ["Base one"] };
     const { promise } = save(fetcher, "Base one two", () => own);
 
     await expect(promise).rejects.toMatchObject({ status: 409 });
@@ -736,7 +739,7 @@ describe("saveMarkdown and a body this tab sent itself", () => {
   });
 
   it("does not read a base moved to its own landed save as a change elsewhere", async () => {
-    const own = { newer: undefined, older: "Base one two", bodies: ["Base one two"] };
+    const own = { newer: undefined, older: "Base one two", olders: ["Base one two"], bodies: ["Base one two"] };
     const holder: { state?: { revision: string; base: string } } = {};
     const fetcher = vi
       .fn()

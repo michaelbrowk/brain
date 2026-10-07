@@ -51,7 +51,8 @@ function fits($from: ResolvedPos, $to: ResolvedPos, content: ProseNode) {
  *  `<br />`, so a line the writer never typed on would stay in the note as a
  *  blank they did not ask for. This remembers the line it added, and takes it
  *  out once the caret has left it empty. Out of the undo history: the undo of
- *  the insertion takes the line with it anyway. */
+ *  the insertion takes the line with it anyway. Typing on it, or Enter on
+ *  it, makes it the writer's, and it is never taken. */
 const addedLineKey = new PluginKey<number | null>("brainAddedLine");
 
 export const addedLine = $prose(
@@ -66,6 +67,22 @@ export const addedLine = $prose(
           if (previous === null || !tr.docChanged) return previous;
           const mapped = tr.mapping.mapResult(previous, 1);
           return mapped.deleted ? null : mapped.pos;
+        },
+      },
+      props: {
+        // Enter on the added line is the writer taking it: it stays, as a
+        // line they made, and Enter opens the next one the ordinary way.
+        // Without this the new line took the caret and the one it left was
+        // taken away, so Enter looked like it did nothing.
+        handleKeyDown(view, event) {
+          if (event.key !== "Enter" || event.isComposing) return false;
+          const pos = addedLineKey.getState(view.state);
+          if (pos === null || pos === undefined) return false;
+          const line = view.state.doc.nodeAt(pos);
+          const { from, to } = view.state.selection;
+          if (!line || from < pos || to > pos + line.nodeSize) return false;
+          view.dispatch(view.state.tr.setMeta(addedLineKey, null));
+          return false;
         },
       },
       appendTransaction(_transactions, _old, state) {

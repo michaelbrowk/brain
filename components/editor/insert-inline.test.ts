@@ -15,7 +15,7 @@ import { listener } from "@milkdown/kit/plugin/listener";
 import { commonmark, syncHeadingIdPlugin } from "@milkdown/kit/preset/commonmark";
 import { gfm } from "@milkdown/kit/preset/gfm";
 import type { Node as ProseNode } from "@milkdown/kit/prose/model";
-import { undo } from "@milkdown/kit/prose/history";
+import { closeHistory, undo } from "@milkdown/kit/prose/history";
 import { TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import { afterEach, describe, expect, it } from "vitest";
@@ -308,6 +308,140 @@ describe("a page ref placed at the caret", () => {
     try {
       caret(view, after(view.state.doc, "co"));
       expect(insertInline(view.state, createPageRef(view.state.schema, PAGE))).toBeNull();
+    } finally {
+      await editor.destroy();
+    }
+  });
+});
+
+describe("the line added for the caret", () => {
+  /** "Intro / row / added line / Outro", the caret on the added line. */
+  async function rowWithAddedLine() {
+    const mounted = await mount("Intro\n\nX\n\nOutro");
+    const { view } = mounted;
+    const x = after(view.state.doc, "X");
+    view.dispatch(view.state.tr.delete(x - 1, x));
+    caret(view, x - 1);
+    view.dispatch(insertInline(view.state, createPageRef(view.state.schema, PAGE))!);
+    expect(view.state.doc.childCount).toBe(4);
+    return { ...mounted, added: view.state.selection.$from.before() };
+  }
+
+  it("keeps the words typed on it when the caret leaves", async () => {
+    const { editor, view, markdownNow } = await rowWithAddedLine();
+    try {
+      type(view, "kept");
+      caret(view, after(view.state.doc, "Outro"));
+      expect(markdownNow()).toBe(`Intro\n\n${REF}\n\nkept\n\nOutro`);
+    } finally {
+      await editor.destroy();
+    }
+  });
+
+  it("is the writer's after Enter on it, and Enter opens the next line", async () => {
+    const { editor, view, markdownNow } = await rowWithAddedLine();
+    try {
+      press(view, "Enter");
+      expect(view.state.doc.childCount).toBe(5);
+      type(view, "next");
+      caret(view, after(view.state.doc, "Outro"));
+      expect(markdownNow()).toBe(`Intro\n\n${REF}\n\n<br />\n\nnext\n\nOutro`);
+    } finally {
+      await editor.destroy();
+    }
+  });
+
+  it("goes without a step of its own in the undo history", async () => {
+    const { editor, view, markdownNow } = await mount("Intro\n\nX\n\nOutro");
+    try {
+      const x = after(view.state.doc, "X");
+      view.dispatch(view.state.tr.delete(x - 1, x));
+      caret(view, x - 1);
+      view.dispatch(closeHistory(view.state.tr));
+      const before = view.state.doc;
+      view.dispatch(insertInline(view.state, createPageRef(view.state.schema, PAGE))!);
+      caret(view, after(view.state.doc, "Outro"));
+      expect(markdownNow()).toBe(`Intro\n\n${REF}\n\nOutro`);
+      undo(view.state, view.dispatch);
+      expect(view.state.doc.eq(before)).toBe(true);
+    } finally {
+      await editor.destroy();
+    }
+  });
+
+  it("follows the added line, not a block put right before it", async () => {
+    const { editor, view, markdownNow } = await rowWithAddedLine();
+    try {
+      const paragraph = view.state.schema.nodes.paragraph;
+      // A block lands exactly where the added line starts; the caret stays on
+      // the added line, which has moved down by one block.
+      view.dispatch(view.state.tr.insert(added(view), paragraph.create(null, view.state.schema.text("other"))));
+      caret(view, after(view.state.doc, "Outro"));
+      expect(markdownNow()).toBe(`Intro\n\n${REF}\n\nother\n\nOutro`);
+    } finally {
+      await editor.destroy();
+    }
+
+    function added(v: EditorView) {
+      return v.state.selection.$from.before();
+    }
+  });
+
+  it("forgets the line once it is gone, and never takes another empty line in its place", async () => {
+    const { editor, view, markdownNow, added } = await rowWithAddedLine();
+    try {
+      const paragraph = view.state.schema.nodes.paragraph;
+      // The writer's own empty line after it ...
+      view.dispatch(view.state.tr.insert(added + 2, paragraph.create()));
+      // ... and the added line deleted, with the caret elsewhere.
+      const tr = view.state.tr.delete(added, added + 2);
+      tr.setSelection(TextSelection.create(tr.doc, after(tr.doc, "Intro")));
+      view.dispatch(tr);
+      expect(markdownNow()).toBe(`Intro\n\n${REF}\n\n<br />\n\nOutro`);
+    } finally {
+      await editor.destroy();
+    }
+  });
+});
+
+describe("the space after a lone ref", () => {
+  it("is dropped only when it is a ref's spacer at the end of the line", async () => {
+    // A space between a ref and more words is the writer's.
+    const words = await reopen(`${REF} **b**`);
+    expect(words.markdown).toBe(`${REF} **b**`);
+    for (const [line, tail, kept] of [
+      [`* ${REF}`, "\u00a0", true],
+      ["* [x](https://example.com)", " ", true],
+      [`* ${REF}`, " ", false],
+    ] as const) {
+      const { editor, view } = await mount(line);
+      try {
+        let end = -1;
+        view.state.doc.descendants((node, pos) => {
+          if (end < 0 && node.type.name === "paragraph") end = pos + node.nodeSize - 1;
+        });
+        view.dispatch(view.state.tr.insertText(tail, end));
+        const raw = editor.action((ctx) => ctx.get(serializerCtx)(view.state.doc)).replace(/\n+$/, "");
+        expect(raw.endsWith(tail)).toBe(kept);
+      } finally {
+        await editor.destroy();
+      }
+    }
+  });
+});
+
+describe("Enter at the start of a line that has more than a ref", () => {
+  it("splits the line where the caret is", async () => {
+    const { editor, view, markdownNow } = await mount(`Intro\n\n${REF} tail`);
+    try {
+      let ref = -1;
+      view.state.doc.descendants((node, pos) => {
+        if (node.type.name === "page_ref") ref = pos;
+      });
+      caret(view, ref);
+      press(view, "Enter");
+      type(view, "x");
+      expect(markdownNow()).toBe(`Intro\n\n<br />\n\nx${REF} tail`);
     } finally {
       await editor.destroy();
     }

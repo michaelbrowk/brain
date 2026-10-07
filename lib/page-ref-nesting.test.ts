@@ -487,6 +487,19 @@ describe("what counts as a page row — the editor's rule", () => {
   });
 });
 
+describe("linked words are not page rows", () => {
+  it("never counts, sweeps or removes a line of linked words, however alone", () => {
+    const markdown =
+      "Intro\n\n[the spec we agreed](/p/abc123#words)\n\nSee [the spec](/p/abc123#words) inline.\n\n[📄 Row](/p/abc123)\n";
+    expect(standalonePageRefOccurrences(markdown, "abc123", null)).toEqual(["[📄 Row](/p/abc123)"]);
+    const swept = removeStandalonePageRefs(markdown, "abc123", null);
+    expect(swept.removed).toBe(1);
+    expect(swept.markdown).toContain("[the spec we agreed](/p/abc123#words)");
+    expect(swept.markdown).toContain("See [the spec](/p/abc123#words) inline.");
+    expect(swept.markdown).not.toContain("[📄 Row]");
+  });
+});
+
 describe("appendStandalonePageRef", () => {
   it("adds one row at the end of an ordinary body, and to an empty one", () => {
     expect(appendStandalonePageRef("Intro\n\n", "📄 Child", "c")).toBe(

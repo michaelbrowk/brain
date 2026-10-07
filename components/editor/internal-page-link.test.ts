@@ -182,6 +182,35 @@ describe("followEditorAnchor", () => {
     expect(open).not.toHaveBeenCalled();
   });
 
+  it("opens linked words as their page in the app, for the owner and inside a share", () => {
+    const navigate = vi.fn();
+    const open = vi.fn();
+    const words = anchor({ href: "/p/abc#words" });
+    expect(followEditorAnchor(words, ORIGIN, navigate, open)).toBe(true);
+    expect(navigate).toHaveBeenCalledWith("abc");
+    expect(open).not.toHaveBeenCalled();
+    expect(classifyEditorLinkNavigation(`${ORIGIN}/p/abc#words`, ORIGIN)).toEqual({
+      kind: "internal",
+      id: "abc",
+    });
+    // Any other fragment is an ordinary link, as it always was.
+    expect(classifyEditorLinkNavigation("/p/abc#heading", ORIGIN)?.kind).toBe("external");
+
+    setPageRefHrefResolver((id) => (id === "abc" ? "/share/root?page=abc" : null));
+    try {
+      const island = vi.fn();
+      expect(followEditorAnchor(anchor({ href: "/p/abc#words" }), ORIGIN, island, open)).toBe(true);
+      expect(island).toHaveBeenCalledWith("abc");
+      // A near miss is still taken and not followed inside a share.
+      const nearMiss = vi.fn();
+      expect(followEditorAnchor(anchor({ href: "/p/abc#heading" }), ORIGIN, nearMiss, open)).toBe(true);
+      expect(nearMiss).not.toHaveBeenCalled();
+      expect(open).not.toHaveBeenCalled();
+    } finally {
+      setPageRefHrefResolver(null);
+    }
+  });
+
   it("follows an ordinary anchor through its href, resolved first", () => {
     const navigate = vi.fn();
     const open = vi.fn();

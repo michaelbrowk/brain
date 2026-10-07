@@ -926,8 +926,8 @@ test("exact internal page links stay local without hijacking native links", asyn
   const markdown = [
     `Relative [Stale relative](/p/${relativeTarget.id}) remains inline.`,
     `Absolute [Stale absolute](${origin}/p/${absoluteTarget.id}) remains inline.`,
-    // Words linked with a title are the reader's words, not a ref.
-    `Words [the destination](/p/${relativeTarget.id} "the destination") stay words.`,
+    // Words linked by "Link to page" are the reader's words, not a ref.
+    `Words [the destination](/p/${relativeTarget.id}#words) stay words.`,
     `Foreign [Foreign page](https://foreign.example/p/${relativeTarget.id}) remains external.`,
     `Query [Query variant](/p/${relativeTarget.id}?view=full) remains ordinary.`,
     `Hash [Hash variant](${origin}/p/${absoluteTarget.id}#section) remains ordinary.`,
@@ -968,7 +968,7 @@ test("exact internal page links stay local without hijacking native links", asyn
     await expect(absolute).toHaveText(`📄 ${absoluteTarget.title}`);
     await expect(absolute).toHaveAttribute("href", `/p/${absoluteTarget.id}`);
     const words = page.getByRole("link", { name: "the destination", exact: true });
-    await expect(words).toHaveAttribute("href", `/p/${relativeTarget.id}`);
+    await expect(words).toHaveAttribute("href", `/p/${relativeTarget.id}#words`);
     await expect(words).toHaveClass(/brain-internal-page-link/);
     for (const ordinary of [foreign, query, hash]) {
       await expect(ordinary).not.toHaveClass(/brain-page-ref/);

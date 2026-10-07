@@ -29,6 +29,7 @@ import { Icon } from "../ui/icon";
 import { DUR, EASE_OUT } from "@/lib/motion";
 import { EDITOR_DOC_CHANGED_EVENT, notifyNestedTableBlocked } from "@/lib/editor-events";
 import { linkSelection } from "./insert-inline";
+import { linkedWordsHref } from "@/lib/internal-page-link";
 import { isInTable } from "./table-guard";
 import { selectionIsInQuote, selectionIsTask, toggleTaskCommand } from "./task-checkbox";
 
@@ -486,7 +487,7 @@ export function FloatingToolbar({
   const insertPageLink = (pg: PageRef) => {
     getEditor()?.action((ctx) => {
       const view = ctx.get(editorViewCtx);
-      const tr = linkSelection(view.state, `/p/${pg.id}`);
+      const tr = linkSelection(view.state, linkedWordsHref(pg.id));
       if (tr) view.dispatch(tr);
       view.focus();
     });

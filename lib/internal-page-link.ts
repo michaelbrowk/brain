@@ -1,18 +1,5 @@
 export const INTERNAL_PAGE_LINK_CLASS = "brain-internal-page-link";
 
-/** Words the reader linked to a page, which stay their words.
- *
- *  A page link draws the page's current title, and that is how every `/p/`
- *  link in a body reads, old notes and Notion imports included. "Link to
- *  page" over selected words writes its link with a title,
- *  `[the spec](/p/x "the spec")`, and the title is what tells the two apart:
- *  no ref was ever written with one. Other Markdown viewers show it as the
- *  link's tooltip and nothing else. The editor and the read-only renderer
- *  both ask this. */
-export function keepsLinkWords(title: unknown): boolean {
-  return typeof title === "string" && title.length > 0;
-}
-
 export interface InternalPageLink {
   id: string;
   href: `/p/${string}`;
@@ -98,4 +85,33 @@ export function internalPageLinkId(
   origin?: string | null,
 ): string | null {
   return classifyInternalPageLink(href, origin || RELATIVE_ONLY_ORIGIN)?.id ?? null;
+}
+
+/** The fragment "Link to page" puts on the address of words it links.
+ *
+ *  A page link draws the page's current title, and that is how every
+ *  `/p/<id>` link in a body reads, old notes, Notion imports and pasted chips
+ *  included. Words a reader linked must stay their words, so their address
+ *  carries a fragment no other writer uses: `[the spec](/p/<id>#words)`. A
+ *  fragment already makes a link ordinary for every reader of a body (see
+ *  `classifyInternalPageLink`), so the words are kept everywhere without a
+ *  new rule, a move never sweeps the line as a page row, and another
+ *  Markdown viewer sees an ordinary link whose fragment matches nothing. */
+export const LINKED_WORDS_FRAGMENT = "words";
+
+/** The page a link of linked words goes to, or null for any other link. The
+ *  address before the fragment is judged by the one rule for a page link. */
+export function linkedWordsPageId(
+  href: string | null | undefined,
+  origin?: string | null,
+): string | null {
+  if (!href) return null;
+  const hash = href.indexOf("#");
+  if (hash < 0 || href.slice(hash + 1) !== LINKED_WORDS_FRAGMENT) return null;
+  return internalPageLinkId(href.slice(0, hash), origin);
+}
+
+/** Where a link of linked words points, for the page `id`. */
+export function linkedWordsHref(id: string): string {
+  return `/p/${id}#${LINKED_WORDS_FRAGMENT}`;
 }

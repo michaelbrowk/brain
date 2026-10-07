@@ -38,10 +38,12 @@ async function main() {
     { name: "page link with emoji", markdown: "[🦊 People](/p/def456)", pageRefs: 1 },
     { name: "external link untouched", markdown: "Visit [Google](https://google.com) now", pageRefs: 0 },
     { name: "mixed", markdown: "[Home](/p/h1) and [Docs](https://x.com) and [Wiki](/p/w2)", pageRefs: 2 },
-    // Words linked by "Link to page" carry a title and stay words.
-    { name: "linked words", markdown: 'See [the spec](/p/abc123 "the spec") here', pageRefs: 0 },
-    { name: "linked words, whole line", markdown: '[the spec](/p/abc123 "the spec")', pageRefs: 0 },
-    { name: "linked words beside a ref", markdown: '[Home](/p/h1) or [the spec](/p/h1 "the spec")', pageRefs: 1 },
+    // A titled page link (a copied chip leaves one) is a ref, as it always was.
+    { name: "titled page link", markdown: 'See [📄 Page Title](/p/abc123 "📄 Page Title") here', pageRefs: 1, expected: "See [📄 Page Title](/p/abc123) here" },
+    // Words linked by "Link to page" carry the linked-words fragment and stay words.
+    { name: "linked words", markdown: "See [the spec](/p/abc123#words) here", pageRefs: 0 },
+    { name: "linked words, whole line", markdown: "[the spec](/p/abc123#words)", pageRefs: 0 },
+    { name: "linked words beside a ref", markdown: "[Home](/p/h1) or [the spec](/p/h1#words)", pageRefs: 1 },
   ];
 
   let failures = 0;
@@ -63,8 +65,9 @@ async function main() {
           );
         }
         const out = editor.action(getMarkdown());
-        if (normalize(out) === normalize(t.markdown)) console.log(`OK   ${t.name}`);
-        else { failures++; console.log(`DIFF ${t.name}\n  exp: ${normalize(t.markdown)}\n  got: ${normalize(out)}`); }
+        const expected = t.expected ?? t.markdown;
+        if (normalize(out) === normalize(expected)) console.log(`OK   ${t.name}`);
+        else { failures++; console.log(`DIFF ${t.name}\n  exp: ${normalize(expected)}\n  got: ${normalize(out)}`); }
       } catch (e) { failures++; console.log(`ERR  ${t.name}: ${e.message?.slice(0,160)}`); }
       finally { if (editor) await editor.destroy(); root.remove(); }
     }

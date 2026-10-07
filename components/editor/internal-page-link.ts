@@ -1,6 +1,7 @@
 import {
   classifyInternalPageLink,
   INTERNAL_PAGE_LINK_CLASS,
+  linkedWordsPageId,
 } from "@/lib/internal-page-link";
 import { hasPageRefHrefResolver } from "./page-ref";
 
@@ -22,6 +23,9 @@ export function classifyEditorLinkNavigation(
 ): EditorLinkNavigation | null {
   const internal = classifyInternalPageLink(rawHref, currentOrigin);
   if (internal) return { kind: "internal", id: internal.id };
+  // Words linked to a page go to the page, in the app, like a ref does.
+  const words = linkedWordsPageId(rawHref, currentOrigin);
+  if (words) return { kind: "internal", id: words };
   if (!rawHref || rawHref !== rawHref.trim()) return null;
 
   let base: URL;
@@ -129,7 +133,8 @@ export function followEditorAnchor(
   if (
     hasPageRefHrefResolver() &&
     addressesPageNamespace(href, currentOrigin) &&
-    !classifyInternalPageLink(href, currentOrigin)
+    !classifyInternalPageLink(href, currentOrigin) &&
+    !linkedWordsPageId(href, currentOrigin)
   ) {
     return true;
   }
@@ -137,9 +142,11 @@ export function followEditorAnchor(
 }
 
 function syncMarker(anchor: HTMLAnchorElement, currentOrigin: string) {
+  const href = anchor.getAttribute("href");
   const internal =
     !anchor.classList.contains("brain-page-ref") &&
-    classifyInternalPageLink(anchor.getAttribute("href"), currentOrigin) !== null;
+    (classifyInternalPageLink(href, currentOrigin) !== null ||
+      linkedWordsPageId(href, currentOrigin) !== null);
   anchor.classList.toggle(INTERNAL_PAGE_LINK_CLASS, internal);
 }
 

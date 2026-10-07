@@ -4,7 +4,7 @@ import {
   localAttachmentName,
   stripEditorDirectiveFences,
 } from "./attachments";
-import { keepsLinkWords } from "./internal-page-link";
+import { linkedWordsPageId } from "./internal-page-link";
 
 /** One read-only markdown → sanitized HTML renderer for every non-editor
  *  surface (shared pages, version-history preview). The editor's custom blocks
@@ -76,23 +76,30 @@ class ReadOnlyRenderer extends Renderer {
     super();
   }
 
+  /** A page of the share, as the share addresses it. */
+  private shareHref(pageId: string): string {
+    const rootId = this.shareNavigation?.rootId ?? "";
+    const rootHref = `/share/${encodeURIComponent(rootId)}`;
+    return pageId === rootId ? rootHref : `${rootHref}?page=${encodeURIComponent(pageId)}`;
+  }
+
   override link(token: Tokens.Link): string {
     if (token.href.startsWith("/p/")) {
+      // Words the reader linked keep their words, the way the editor draws
+      // them, and inside the share they go to the page; only a ref takes the
+      // page's current title.
+      const wordsTo = linkedWordsPageId(token.href);
+      if (wordsTo !== null) {
+        const words = this.parser.parseInline(token.tokens);
+        if (!this.shareNavigation?.isAllowedPage(wordsTo)) return words;
+        return `<a href="${this.shareHref(wordsTo)}">${words}</a>`;
+      }
       const pageRef = /^\/p\/([A-Za-z0-9_-]+)$/.exec(token.href);
       if (!pageRef) return this.parser.parseInline(token.tokens);
       if (
         this.shareNavigation?.isAllowedPage(pageRef[1])
       ) {
-        const rootHref = `/share/${encodeURIComponent(this.shareNavigation.rootId)}`;
-        const href =
-          pageRef[1] === this.shareNavigation.rootId
-            ? rootHref
-            : `${rootHref}?page=${encodeURIComponent(pageRef[1])}`;
-        // Words the reader linked keep their words, the way the editor draws
-        // them; only a ref takes the page's current title.
-        if (keepsLinkWords(token.title)) {
-          return `<a href="${href}">${this.parser.parseInline(token.tokens)}</a>`;
-        }
+        const href = this.shareHref(pageRef[1]);
         // The live title, the way the editor's page-ref node draws it for the
         // owner. A rename does not rewrite the label in this body — Markdown
         // is the source of truth — so the written one is only the fallback,

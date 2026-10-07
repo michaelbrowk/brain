@@ -9,7 +9,9 @@ import type { NodeView, NodeViewConstructor } from "@milkdown/kit/prose/view";
 import { Decoration, DecorationSet } from "@milkdown/kit/prose/view";
 import type { MarkdownNode, ParserState, Root, SerializerState } from "@milkdown/kit/transformer";
 import { $nodeSchema, $remark, $prose, $view } from "@milkdown/kit/utils";
-import { classifyInternalPageLink, keepsLinkWords } from "@/lib/internal-page-link";
+import { remarkStringifyOptionsCtx } from "@milkdown/kit/core";
+import type { MilkdownPlugin } from "@milkdown/kit/ctx";
+import { classifyInternalPageLink } from "@/lib/internal-page-link";
 
 export interface PageInfo {
   title: string;
@@ -175,14 +177,13 @@ function walk(node: MarkdownNode, fn: (node: MarkdownNode) => MarkdownNode | nul
 }
 
 /** Rewrite only exact relative or same-origin Brain page destinations into
- * pageRef nodes. Non-exact and external links stay ordinary links, and so do
- * linked words (`keepsLinkWords`). */
+ * pageRef nodes. Non-exact and external links stay ordinary links. */
 export const remarkPageRef = $remark("remarkPageRef", () => () => {
   return (tree: Root) => {
     walk(tree as unknown as MarkdownNode, (n) => {
       if (n?.type !== "link" || typeof n.url !== "string") return null;
       const internal = classifyInternalPageLink(n.url, pageRefOrigin);
-      if (!internal || keepsLinkWords(n.title)) return null;
+      if (!internal) return null;
       const label = (n.children ?? [])
         .map((child) => (typeof child.value === "string" ? child.value : ""))
         .join("");
@@ -190,6 +191,49 @@ export const remarkPageRef = $remark("remarkPageRef", () => () => {
     });
   };
 });
+
+/** Whether `node` is the space after a ref alone on its line: the last child
+ *  of a paragraph or a cell, only whitespace, right after a link to a page. */
+function isPageRefSpacer(node: MarkdownNode, parent: MarkdownNode | undefined) {
+  const children = parent?.children ?? [];
+  const [ref, spacer] = children;
+  return (
+    (parent?.type === "paragraph" || parent?.type === "tableCell") &&
+    children.length === 2 &&
+    spacer === node &&
+    typeof node.value === "string" &&
+    /^[ \t]+$/.test(node.value) &&
+    ref?.type === "link" &&
+    typeof ref.url === "string" &&
+    classifyInternalPageLink(ref.url, pageRefOrigin) !== null
+  );
+}
+
+type TextHandler = (
+  node: MarkdownNode,
+  parent: MarkdownNode | undefined,
+  state: { safe: (value: string, info: unknown) => string },
+  info: unknown,
+) => string;
+
+/** The space after a ref alone in a list item or a cell is the caret's, not
+ *  the writer's (`insertInline`): without it the browser takes the next key
+ *  to the line below. Markdown drops a trailing space on reading, so it is
+ *  not written either, first save included. Every other text goes to
+ *  Milkdown's own handler, which this wraps: a stringify option, because
+ *  options outrank every `toMarkdownExtensions` entry. */
+export const pageRefSpacer: MilkdownPlugin = (ctx) => {
+  ctx.update(remarkStringifyOptionsCtx, (options) => {
+    const handlers = (options.handlers ?? {}) as Record<string, TextHandler>;
+    const text = handlers.text;
+    const wrapped: TextHandler = (node, parent, state, info) => {
+      if (isPageRefSpacer(node, parent)) return "";
+      return text ? text(node, parent, state, info) : state.safe(String(node.value ?? ""), info);
+    };
+    return { ...options, handlers: { ...handlers, text: wrapped } } as typeof options;
+  });
+  return () => {};
+};
 
 export const pageRefSchema = $nodeSchema("page_ref", () => ({
   group: "inline",
@@ -222,8 +266,10 @@ export const pageRefSchema = $nodeSchema("page_ref", () => ({
       attrs["aria-label"] = `Page unavailable: ${label || id}`;
     }
 
-    // full title on hover — the column layout truncates long refs
-    attrs.title = pageRefVisibleText(node);
+    // No `title` here, though the view draws one for the hover: this is the
+    // clipboard's markup, and the link-mark rule that reads a copied chip
+    // back keeps a title, so every copy and paste of a chip wrote
+    // `[label](/p/<id> "label")` into the note.
 
     const parts = pageRefVisibleParts(node);
     // NO CHIP HERE. `toDOM` is the clipboard's markup and the schema's own
@@ -353,6 +399,7 @@ export const pageRefParagraphs = $prose(
 
 export const pageRef = [
   remarkPageRef,
+  pageRefSpacer,
   pageRefSchema,
   pageRefView,
   pageRefParagraphs,

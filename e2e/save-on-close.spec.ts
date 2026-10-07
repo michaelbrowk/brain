@@ -291,3 +291,39 @@ test("an older save that lands after the closing save is not read as a conflict"
   await expect(page.getByRole("button", { name: "Save a copy" })).toHaveCount(0);
   await page.unroute(`**/api/page/${id}`);
 });
+
+test("a save that keeps failing is retried with backoff and the owner is told", async ({
+  page,
+}) => {
+  test.setTimeout(90_000);
+  await login(page);
+  const id = await makePage(page, "Failing saves", "Base body.");
+  const content = await openPage(page, id);
+
+  // Two whole rounds of three attempts are refused; nothing is typed after.
+  let refusals = 6;
+  await page.route(`**/api/page/${id}`, async (route) => {
+    if (isOrdinarySave(route) && refusals > 0) {
+      refusals -= 1;
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "temporary failure" }),
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  await caretToEnd(content);
+  await page.keyboard.type(" Saved in the end.");
+  await expect(page.getByText("Couldn't save. Your draft is safe.")).toBeVisible({
+    timeout: 15_000,
+  });
+
+  await expect
+    .poll(() => serverBody(page, id), { timeout: 60_000 })
+    .toBe("Base body. Saved in the end.");
+  expect(refusals).toBe(0);
+  await page.unroute(`**/api/page/${id}`);
+});

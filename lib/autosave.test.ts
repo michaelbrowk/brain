@@ -7,9 +7,11 @@ import {
   encodeSaveRequest,
   encodeUnloadSaveRequest,
   isDraftOperation,
+  isRetryableSaveFailure,
   latchDraftConflict,
   persistDraft,
   SaveRequestError,
+  saveRetryDelay,
   SaveSupersededError,
   saveMarkdown,
 } from "./autosave";
@@ -517,6 +519,25 @@ describe("encodeUnloadSaveRequest", () => {
   it("returns null when no span fits or no body is known", () => {
     expect(encodeUnloadSaveRequest(long, "rev-a", [""], 1024)).toBeNull();
     expect(encodeUnloadSaveRequest("text", "rev-a", [], 1024)).toBeNull();
+  });
+});
+
+describe("retrying a failed save", () => {
+  it("retries what a later attempt can fix and nothing else", () => {
+    expect(isRetryableSaveFailure(new SaveRequestError("offline"))).toBe(true);
+    expect(isRetryableSaveFailure(new SaveRequestError("busy", 429))).toBe(true);
+    expect(isRetryableSaveFailure(new SaveRequestError("broken", 503))).toBe(true);
+    for (const status of [400, 401, 404, 409, 413, 422]) {
+      expect(isRetryableSaveFailure(new SaveRequestError("answer", status))).toBe(false);
+    }
+    expect(isRetryableSaveFailure(new SaveSupersededError())).toBe(false);
+    expect(isRetryableSaveFailure(new Error("unexpected"))).toBe(false);
+  });
+
+  it("backs off from five seconds to a minute", () => {
+    expect([1, 2, 3, 4, 5, 6, 12].map(saveRetryDelay)).toEqual([
+      5_000, 10_000, 20_000, 40_000, 60_000, 60_000, 60_000,
+    ]);
   });
 });
 

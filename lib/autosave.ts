@@ -570,6 +570,25 @@ export async function saveMarkdown({
   throw new SaveRequestError("Save attempts exhausted");
 }
 
+/** Whether a later attempt could succeed where this save failed: the network
+ *  was down, or the server was busy or broken. A conflict, a refusal (422), a
+ *  page that is gone and a superseded save are answers, and asking again gets
+ *  the same one. */
+export function isRetryableSaveFailure(error: unknown): boolean {
+  if (!(error instanceof SaveRequestError) || error instanceof SaveSupersededError) {
+    return false;
+  }
+  const { status } = error;
+  return status === undefined || status === 429 || status >= 500;
+}
+
+/** How long a failed save waits before its next round, after `failures`
+ *  failed rounds: 5 s, doubling, never more than a minute. A round is itself
+ *  `saveMarkdown`'s three quick attempts. */
+export function saveRetryDelay(failures: number): number {
+  return Math.min(60_000, 5_000 * 2 ** Math.max(0, failures - 1));
+}
+
 /** A tiny keyed promise queue. Failure in one task never poisons later work for
  * the same page, and different pages can save independently. */
 export function createKeyedQueue() {

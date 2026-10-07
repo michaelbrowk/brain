@@ -361,4 +361,45 @@ describe("the newest text leaves when the tab goes away", () => {
     expect(puts.length).toBe(before);
     expect(server.markdown).toBe("Written elsewhere");
   });
+
+  it("keeps retrying a failing save with backoff while the tab lives, and says so", async () => {
+    await open();
+    // Two whole rounds of three attempts fail; the third round gets through.
+    failingPuts = 6;
+    await type("Text the server refused for a while");
+    await advance(700);
+    await advance(1_500);
+    await advance(1_500);
+    await flushFrames();
+    expect(puts).toHaveLength(3);
+    expect(document.body.textContent).toContain("Couldn't save. Your draft is safe.");
+
+    // Backed off: nothing for a few seconds, then the next round by itself.
+    await advance(4_000);
+    expect(puts).toHaveLength(3);
+    for (let second = 0; second < 40 && server.markdown === "Base"; second += 1) {
+      await advance(1_000);
+    }
+    expect(puts.length).toBeGreaterThanOrEqual(7);
+    expect(server.markdown).toBe("Text the server refused for a while");
+    expect(drafts()).toEqual([]);
+  });
+
+  it("does not retry a refusal that a retry cannot change", async () => {
+    await open();
+    apiFetchMock.mockImplementation((input, init) => {
+      if (String(input) === "/api/page/note" && init?.method === "PUT") {
+        puts.push({ keepalive: false, body: {}, bytes: 0 });
+        return Promise.resolve(
+          response({ error: "refused", message: "That body is refused." }, 422),
+        );
+      }
+      return Promise.resolve(response({ tasks: [], notifications: [], unread: 0 }));
+    });
+    await type("A body the server refuses");
+    await advance(700);
+    expect(puts).toHaveLength(1);
+    for (let second = 0; second < 30; second += 1) await advance(1_000);
+    expect(puts).toHaveLength(1);
+  });
 });

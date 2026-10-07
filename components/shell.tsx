@@ -8,9 +8,11 @@ import {
   encodeSaveRequest,
   encodeUnloadSaveRequest,
   isDraftOperation,
+  isRetryableSaveFailure,
   latchDraftConflict,
   persistDraft,
   SaveRequestError,
+  saveRetryDelay,
   SaveSupersededError,
   saveMarkdown,
   type StoredDraft,
@@ -768,6 +770,16 @@ export function Shell({
       }[]
     >
   >(new Map());
+  // A save that failed for a reason time can fix is tried again while the tab
+  // lives, further apart each round (`saveRetryDelay`), until one lands. The
+  // failure toast has told the owner, and the save dot stays on error until
+  // then. One timer per page.
+  const saveRetriesRef = useRef(
+    new Map<string, { timer: ReturnType<typeof setTimeout> | null; failures: number }>(),
+  );
+  const retrySaveLaterRef = useRef<(id: string, operationId: string) => void>(
+    () => {},
+  );
   const conflictedPagesRef = useRef<Set<string>>(new Set());
   const localRecoveryUnavailableRef = useRef<Set<string>>(new Set());
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -2392,6 +2404,9 @@ export function Shell({
           );
           if (stillNewer.length) unloadSavesRef.current.set(id, stillNewer);
           else unloadSavesRef.current.delete(id);
+          const retry = saveRetriesRef.current.get(id);
+          if (retry?.timer) clearTimeout(retry.timer);
+          saveRetriesRef.current.delete(id);
           setPage((current) =>
             current?.id === id ? { ...current, rev: revision } : current,
           );
@@ -2489,6 +2504,9 @@ export function Shell({
             (!currentPending || currentPending.operationId === operationId)
           )
             setSave("error");
+          if (isRetryableSaveFailure(error)) {
+            retrySaveLaterRef.current(id, operationId);
+          }
           return false;
         }
       });
@@ -2523,6 +2541,46 @@ export function Shell({
       return doSave(pending.id, pending.md, pending.operationId);
     };
   }, [doSave]);
+
+  useEffect(() => {
+    const retries = saveRetriesRef.current;
+    retrySaveLaterRef.current = (id, operationId) => {
+      const retry = retries.get(id) ?? { timer: null, failures: 0 };
+      retry.failures += 1;
+      if (retry.timer) clearTimeout(retry.timer);
+      retry.timer = setTimeout(() => {
+        retry.timer = null;
+        // Only the page's newest edit is worth sending: a newer one carries
+        // everything the failed body had. That is the pending edit while the
+        // page is open, or the failed one itself while its draft is still
+        // the page's newest. A programmatic save that failed has no draft;
+        // its caller reported it and decides whether to try again.
+        const pending = pendingRef.current?.id === id ? pendingRef.current : null;
+        if (pending) {
+          void doSave(pending.id, pending.md, pending.operationId);
+          return;
+        }
+        try {
+          const raw = localStorage.getItem(draftStorageKey(id));
+          if (raw !== null && isDraftOperation(raw, operationId)) {
+            void doSave(id, decodeDraft(raw).markdown, operationId);
+          }
+        } catch {}
+      }, saveRetryDelay(retry.failures));
+      retries.set(id, retry);
+    };
+  }, [doSave]);
+
+  useEffect(() => {
+    const retries = saveRetriesRef.current;
+    return () => {
+      retrySaveLaterRef.current = () => {};
+      for (const retry of retries.values()) {
+        if (retry.timer) clearTimeout(retry.timer);
+      }
+      retries.clear();
+    };
+  }, []);
 
   // Every navigation path, including internal setSelectedId calls, flushes the
   // page being left before the next editor can start producing changes.

@@ -166,3 +166,88 @@ test("a paste into a cell fills cells from the caret or stays in the cell", asyn
   await expect.poll(() => stored(page, id)).toContain("a1one<br>two");
   expect(await stored(page, id)).toMatch(/\| b1\s*\| y1\s*\| y2\s*\|/);
 });
+
+/** A paste event carrying both flavours a real clipboard carries. */
+async function pasteBoth(page: Page, text: string, html: string) {
+  await page.evaluate(
+    ({ plain, markup }) => {
+      const data = new DataTransfer();
+      data.setData("text/plain", plain);
+      data.setData("text/html", markup);
+      document.activeElement?.dispatchEvent(
+        new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }),
+      );
+    },
+    { plain: text, markup: html },
+  );
+}
+
+test("a spreadsheet range and Brain's own cell copy paste into cells", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const { id, content } = await openPage(page, "Rich paste in cell", TABLE);
+  const sheets =
+    '<meta charset="utf-8"><google-sheets-html-origin><table data-sheets-root="1"><tbody>' +
+    "<tr><td>x</td><td>y</td></tr><tr><td>u</td><td><b>v</b></td></tr></tbody></table>";
+  await caretAtEnd(page, '.ProseMirror td:has-text("a1")');
+  await pasteBoth(page, "x\ty\nu\tv", sheets);
+  await expect(content.locator('td:has-text("u")')).toHaveCount(1);
+  await expect(content.locator(".milkdown-table-block")).toHaveCount(1);
+
+  // Copying two cells of a Brain table writes an HTML table and text with
+  // no tab in it.
+  const brain =
+    '<table data-pm-slice="1 1 -2 []"><tbody><tr><td style="text-align: left;"><p><strong>c1</strong></p></td>' +
+    '<td style="text-align: left;"><p>c2</p></td></tr></tbody></table>';
+  await caretAtEnd(page, '.ProseMirror th:has-text("h1")');
+  await pasteBoth(page, "c1\n\nc2", brain);
+  await expect(content.locator("th").first()).toHaveText("c1");
+  await expect.poll(() => stored(page, id)).toMatch(/\| c1\s*\| c2\s*\|/);
+  const saved = await stored(page, id);
+  expect(saved).toMatch(/\| x\s*\| y\s*\|/);
+  expect(saved).toMatch(/\| u\s*\| v\s*\|/);
+  expect(errors).toEqual([]);
+});
+
+test("Escape carries the focus out of the page text", async ({ page }) => {
+  await openPage(page, "Escape out", "prose");
+  await caretAtEnd(page, '.ProseMirror p:has-text("prose")');
+  await page.keyboard.press("Tab");
+  expect(await editorHasFocus(page)).toBe(true);
+  await page.keyboard.press("Escape");
+  expect(await editorHasFocus(page)).toBe(false);
+  expect(
+    await page.evaluate(() => document.activeElement?.getAttribute("aria-label")),
+  ).not.toBe("Page title");
+});
+
+test("a page whose load would drop content opens read-only and is never saved", async ({ page }) => {
+  // A toggle inside a column: a shape the editor cannot build yet.
+  const markdown = [
+    "- [ ] task line",
+    "",
+    "::::cols",
+    ":::col",
+    ':::toggle{summary="Sum"}',
+    "SECRET WORDS",
+    ":::",
+    ":::",
+    "",
+    ":::col",
+    "b",
+    ":::",
+    "::::",
+  ].join("\n");
+  const { id, content } = await openPage(page, "Lossy page", markdown);
+  await expect(content).toHaveAttribute("aria-readonly", "true");
+  await expect(page.getByText("Opened read-only")).toBeVisible();
+  const before = await stored(page, id);
+  expect(before).toContain("SECRET WORDS");
+
+  await content.getByRole("checkbox").first().click();
+  await page.waitForTimeout(1_500);
+  expect(await stored(page, id)).toBe(before);
+
+  await page.getByRole("button", { name: "Open history" }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+});

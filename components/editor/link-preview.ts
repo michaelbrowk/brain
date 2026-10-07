@@ -334,7 +334,12 @@ export const linkCardSchema = $nodeSchema(LINK_CARD_NODE, () => ({
       getAttrs: (dom) => {
         if (!(dom instanceof HTMLElement)) return false;
         const href = dom.getAttribute("href") ?? "";
-        return { href, text: dom.textContent || href, title: dom.getAttribute("title") };
+        // A copy carries the stored text. A drawn card dragged out of the
+        // editor carries the preview (site, title, description), which is
+        // not a link's text, and the address stands in for it.
+        const content = (dom.textContent ?? "").trim();
+        const text = sameUrlText(content, href) ? content : href;
+        return { href, text, title: dom.getAttribute("title") };
       },
     },
   ],

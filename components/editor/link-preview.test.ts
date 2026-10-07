@@ -5,7 +5,7 @@ import { clipboard } from "@milkdown/kit/plugin/clipboard";
 import { history } from "@milkdown/kit/plugin/history";
 import { commonmark, syncHeadingIdPlugin } from "@milkdown/kit/preset/commonmark";
 import { gfm } from "@milkdown/kit/preset/gfm";
-import { Slice } from "@milkdown/kit/prose/model";
+import { DOMParser as ProseDOMParser, Slice } from "@milkdown/kit/prose/model";
 import { NodeSelection, TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -408,5 +408,32 @@ describe("link card: Backspace and leaving, at the edges", () => {
     type(view, "/x");
     caretAt(view, view.state.doc.content.size - 1);
     expect(markdown()).toBe(`[${URL_TEXT}/x](${URL_TEXT}/x "Title")\n\nnext`);
+  });
+});
+
+describe("link card: read back from the DOM", () => {
+  function parse(view: EditorView, html: string) {
+    const host = document.createElement("div");
+    host.innerHTML = html;
+    return ProseDOMParser.fromSchema(view.state.schema).parse(host).firstChild;
+  }
+
+  it("a drawn card (preview text inside) keeps its URL as its text", async () => {
+    const { view } = await mount("");
+    const card = parse(
+      view,
+      `<a data-brain-link-card="true" href="${URL_TEXT}"><span>example.com</span><span>Example post</span></a>`,
+    );
+    expect(card?.type.name).toBe("link_card");
+    expect(card?.attrs.text).toBe(URL_TEXT);
+  });
+
+  it("a copied card keeps its stored spelling", async () => {
+    const { view } = await mount("");
+    const card = parse(
+      view,
+      '<a data-brain-link-card="true" href="https://example.com/a">https://example.com/a/</a>',
+    );
+    expect(card?.attrs.text).toBe("https://example.com/a/");
   });
 });

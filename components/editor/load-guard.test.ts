@@ -81,8 +81,10 @@ describe("loadGuard", () => {
   });
 });
 
-/** A shape that loses content today, found in real notes: a toggle inside a
- *  column. The parser drops the column and the toggle's words with it. */
+/** A page whose load drops content. Real shapes keep being fixed (a toggle
+ *  inside a column loaded whole once nested fences were repaired), so the
+ *  loss comes from the old block-image pass above: the heading holding an
+ *  image cannot be built and is dropped with its words. */
 const LOSSY = [
   "* [ ] task line",
   "",
@@ -90,17 +92,7 @@ const LOSSY = [
   "aside",
   ":::",
   "",
-  "::::cols",
-  ":::col",
-  ':::toggle{summary="Sum"}',
-  "SECRET WORDS",
-  ":::",
-  ":::",
-  "",
-  ":::col",
-  "b",
-  ":::",
-  "::::",
+  "# SECRET WORDS ![i](/a.png) end",
 ].join("\n");
 
 describe("a page whose load dropped content", () => {
@@ -130,6 +122,8 @@ describe("a page whose load dropped content", () => {
       .use(columns)
       .use(callout)
       .use(toggle)
+      .use(images)
+      .use(blockEveryImage)
       .use(loadGuard(onLoss))
       .use(listener)
       .create();

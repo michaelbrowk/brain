@@ -360,7 +360,12 @@ describe("the line added for the caret", () => {
       view.dispatch(closeHistory(view.state.tr));
       const before = view.state.doc;
       view.dispatch(insertInline(view.state, createPageRef(view.state.schema, PAGE))!);
-      caret(view, after(view.state.doc, "Outro"));
+      // The caret leaves in a new history group, so a removal that went into
+      // the history would be an undo step of its own.
+      const leave = view.state.tr.setSelection(
+        TextSelection.create(view.state.doc, after(view.state.doc, "Outro")),
+      );
+      view.dispatch(closeHistory(leave));
       expect(markdownNow()).toBe(`Intro\n\n${REF}\n\nOutro`);
       undo(view.state, view.dispatch);
       expect(view.state.doc.eq(before)).toBe(true);

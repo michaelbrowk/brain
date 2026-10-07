@@ -10,6 +10,7 @@ import { NodeSelection, TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { callout } from "./callout";
+import { columns } from "./columns";
 import { editingCore } from "./editing-core";
 import { linkPreviewPlugin } from "./link-preview";
 import { pageRef, setPageRefOrigin } from "./page-ref";
@@ -36,6 +37,7 @@ async function mount(markdown: string, unfurl = true): Promise<Mounted> {
     .use(gfm)
     .use(editingCore)
     .use(callout)
+    .use(columns)
     .use(pageRef)
     .use(linkPreviewPlugin(unfurl))
     .use(history)
@@ -464,5 +466,119 @@ describe("a click below the last block, beside the subpages", () => {
     );
     expect(view.state.selection).toBeInstanceOf(TextSelection);
     expect(view.state.selection.from).toBe(startOf(view, 1));
+  });
+});
+
+describe("link card: where it is read, and what it is not", () => {
+  function cardParents(view: EditorView) {
+    const parents: string[] = [];
+    view.state.doc.descendants((node, _pos, parent) => {
+      if (node.type.name === "link_card") parents.push(parent?.type.name ?? "");
+    });
+    return parents;
+  }
+
+  it("stands in a footnote and in a column, and round-trips there", async () => {
+    const source = [
+      "Note[^1].",
+      "",
+      `[^1]: <${URL_TEXT}>`,
+      "",
+      "::::cols",
+      ":::col",
+      `<${URL_TEXT}>`,
+      ":::",
+      "",
+      ":::col",
+      "text",
+      ":::",
+      "::::",
+    ].join("\n");
+    const { view, markdown } = await mount(source);
+    expect(cardParents(view).sort()).toEqual(["col", "footnote_definition"]);
+    const again = await mount(markdown());
+    expect(again.markdown()).toBe(markdown());
+  });
+
+  it("is not read from a link that is not http(s)", async () => {
+    const { view } = await mount("<mailto:someone@example.com>\n\n[ftp://example.com/a](ftp://example.com/a)");
+    expect(cardParents(view)).toEqual([]);
+  });
+
+  it("is not read from a link whose text carries formatting", async () => {
+    const { view, markdown } = await mount(`[**${URL_TEXT}**](${URL_TEXT})`);
+    expect(cardParents(view)).toEqual([]);
+    // Spelled the serializer's own way, with the link and the bold intact.
+    expect(markdown()).toContain(`**<${URL_TEXT}>**`);
+  });
+
+  it("is not drawn again for an opened line that gained another mark", async () => {
+    const { view } = await mount(`<${URL_TEXT}>\n\nnext`);
+    caretAt(view, startOf(view, 1));
+    key(view, "Backspace");
+    const strong = view.state.schema.marks.strong;
+    view.dispatch(view.state.tr.addMark(1, 1 + URL_TEXT.length, strong.create()));
+    caretAt(view, view.state.doc.content.size - 1);
+    expect(blockNames(view)).toEqual(["paragraph", "paragraph"]);
+  });
+
+  it("pasted on a list item's empty first line is an inline link, not a card", async () => {
+    const { view, markdown } = await mount("- a");
+    view.dispatch(view.state.tr.delete(3, 4));
+    caretAt(view, 3);
+    paste(view, URL_TEXT);
+    expect(cardParents(view)).toEqual([]);
+    expect(markdown()).toBe(`* <${URL_TEXT}>`);
+  });
+
+  it("Backspace during a composition is the IME's, not a way into the card", async () => {
+    const { view } = await mount(`<${URL_TEXT}>\n\nafter`);
+    caretAt(view, startOf(view, 1));
+    const event = new KeyboardEvent("keydown", { key: "Backspace" });
+    // jsdom drops `isComposing` from the init dictionary.
+    Object.defineProperty(event, "isComposing", { value: true });
+    view.someProp("handleKeyDown", (handle) => handle(view, event));
+    expect(blockNames(view)).toEqual(["link_card", "paragraph"]);
+  });
+});
+
+describe("a click below the last block, when it is not the reader's to take", () => {
+  async function cardPage() {
+    const mounted = await mount(`<${URL_TEXT}>`);
+    const { view } = mounted;
+    view.dispatch(view.state.tr.setSelection(NodeSelection.create(view.state.doc, 0)));
+    const below = view.dom.getBoundingClientRect().bottom + 40;
+    const click = (init: MouseEventInit = {}) =>
+      document.body.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, button: 0, clientY: below, ...init }),
+      );
+    return { view, click };
+  }
+
+  it("leaves a selection the reader drew", async () => {
+    const { view, click } = await cardPage();
+    const text = document.createElement("p");
+    text.textContent = "selected words";
+    document.body.append(text);
+    document.getSelection()?.selectAllChildren(text);
+    click();
+    expect(view.state.selection).toBeInstanceOf(NodeSelection);
+    document.getSelection()?.removeAllRanges();
+    text.remove();
+  });
+
+  it("does nothing in an editor that is not editable", async () => {
+    const { view, click } = await cardPage();
+    view.setProps({ editable: () => false });
+    click();
+    expect(view.state.selection).toBeInstanceOf(NodeSelection);
+  });
+
+  it("leaves a click with a modifier to the gesture that names it", async () => {
+    const { view, click } = await cardPage();
+    for (const modifier of ["metaKey", "ctrlKey", "shiftKey", "altKey"] as const) {
+      click({ [modifier]: true });
+      expect(view.state.selection, modifier).toBeInstanceOf(NodeSelection);
+    }
   });
 });

@@ -89,23 +89,36 @@ function attrsFromMarkdownImage(node: MarkdownNode) {
   };
 }
 
+/** The Markdown containers whose children are blocks, so a block image may
+ *  stand among them. Everything else holds inline content (a heading, a table
+ *  cell, a link), and an image there stays the inline image it was written as.
+ *  Turning one of those into the block image is what used to cost the reader
+ *  the whole heading or cell: the parser cannot put a block inside inline
+ *  content, so it dropped the parent, and the next save wrote the loss. */
+const FLOW_CONTAINERS = new Set([
+  "root",
+  "blockquote",
+  "list",
+  "listItem",
+  "footnoteDefinition",
+  "containerDirective",
+]);
+
+function standaloneImage(node: MarkdownNode): MarkdownNode | null {
+  if (node.type !== "paragraph" || node.children?.length !== 1) return null;
+  const only = node.children[0];
+  return only?.type === "image" ? only : null;
+}
+
 function walkStandaloneImages(node: MarkdownNode) {
-  if (!Array.isArray(node.children)) return;
+  if (!Array.isArray(node.children) || !FLOW_CONTAINERS.has(node.type)) return;
 
-  node.children = node.children.map((child) => {
-    if (child?.type === "image") return { ...child, type: "brainImage" };
-
-    if (child?.type === "paragraph") {
-      if (
-        Array.isArray(child.children) &&
-        child.children.length === 1 &&
-        child.children[0]?.type === "image"
-      ) {
-        return { ...child.children[0], type: "brainImage" };
-      }
-      return child;
-    }
-
+  node.children = node.children.map((child, index) => {
+    // A list item opens with its paragraph. A block image in that place made
+    // the parser invent an empty line above it, which saved as `<br />`.
+    const opensListItem = node.type === "listItem" && index === 0;
+    const image = opensListItem ? null : standaloneImage(child);
+    if (image) return { ...image, type: "brainImage" };
     walkStandaloneImages(child);
     return child;
   });

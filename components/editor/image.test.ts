@@ -172,3 +172,65 @@ describe("bareAttachmentSrc", () => {
     expect(bareAttachmentSrc("/api/media/../etc")).toBe("/api/media/../etc");
   });
 });
+
+describe("an image inside a block that holds only inline content", () => {
+  const IMG = "![i](/_attachments/a.png)";
+
+  async function roundTrip(markdown: string) {
+    const { attachmentRefs } = await import("./attachment-refs");
+    const { gfm } = await import("@milkdown/kit/preset/gfm");
+    const root = document.createElement("div");
+    document.body.append(root);
+    const editor = await Editor.make()
+      .config((ctx) => {
+        ctx.set(rootCtx, root);
+        ctx.set(defaultValueCtx, markdown);
+      })
+      .use(commonmark)
+      .use(gfm)
+      .use(attachmentRefs)
+      .use(images)
+      .create();
+    try {
+      const view = editor.action((ctx) => ctx.get(editorViewCtx));
+      return { text: view.state.doc.textContent, markdown: editor.action(getMarkdown()).trim() };
+    } finally {
+      await editor.destroy();
+      root.remove();
+    }
+  }
+
+  // The remark pass used to turn every image child of a heading or a cell into
+  // the block image, which neither can hold. The parser then dropped the whole
+  // heading or cell, and the next save wrote the loss to disk.
+  it("keeps a heading with an image in it, text and image both", async () => {
+    const md = `# Title ${IMG} end`;
+    const result = await roundTrip(md);
+    expect(result.text).toBe("Title  end");
+    expect(result.markdown).toBe(md);
+  });
+
+  it("keeps a table cell that holds an image, alone or beside text", async () => {
+    const md = [
+      "| a | b |",
+      "| - | - |",
+      `| x ${IMG} | ${IMG} |`,
+    ].join("\n");
+    const result = await roundTrip(md);
+    expect(result.text).toContain("x ");
+    expect(result.markdown).toContain(`x ${IMG}`);
+    expect(result.markdown.match(/!\[i\]/g)).toHaveLength(2);
+  });
+
+  it("leaves an image that opens a list item inline instead of pushing an empty line above it", async () => {
+    const md = `- ${IMG}`;
+    const result = await roundTrip(md);
+    expect(result.markdown).not.toContain("<br />");
+    expect(result.markdown).toContain(IMG);
+  });
+
+  it("still makes a block image of an image alone on its line, at the top level and in a quote", async () => {
+    const result = await roundTrip(`${IMG}\n\n> ${IMG}`);
+    expect(result.markdown).toBe(`${IMG}\n\n> ${IMG}`);
+  });
+});

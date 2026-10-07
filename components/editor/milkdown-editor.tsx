@@ -478,14 +478,6 @@ function Inner({
   // Set before the view exists when the page's load would drop content; the
   // page then opens read-only and the file stays as it is on disk.
   const lossyLoad = useRef(false);
-  const guardLoad = useMemo(
-    () =>
-      loadGuard(() => {
-        lossyLoad.current = true;
-        notifyLossyLoad();
-      }),
-    [],
-  );
   const wrap = useRef<HTMLDivElement | null>(null);
   const calloutEmojiTrigger = useRef<HTMLButtonElement | null>(null);
   const calloutEmojiId = useRef(0);
@@ -585,7 +577,12 @@ function Inner({
       .use(columnDrop)
       .use(searchHighlightPlugin)
       .use(immediateDirty)
-      .use(guardLoad)
+      .use(
+        loadGuard(() => {
+          lossyLoad.current = true;
+          notifyLossyLoad();
+        }),
+      )
       .use(listener),
   );
 

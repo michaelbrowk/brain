@@ -298,7 +298,7 @@ const cellPaste = $prose(
       props: {
         handleDOMEvents: {
           paste: (view, event) => {
-            if (!view.editable || !isInTable(view.state.selection.$from)) return false;
+            if (!view.editable || !selectionInTable(view.state)) return false;
             if (!pasteIntoCell(view, event)) return false;
             event.preventDefault();
             return true;
@@ -308,9 +308,15 @@ const cellPaste = $prose(
     }),
 );
 
+/** Both ends of the selection in a table. A range that starts in a cell and
+ *  ends past the table is no cell's: reading it as one threw. */
+function selectionInTable(state: EditorState) {
+  return isInTable(state.selection.$from) && isInTable(state.selection.$to);
+}
+
 const newLineInCell: Command = (state, dispatch) => {
   const { selection } = state;
-  if (selection instanceof CellSelection || !isInTable(selection.$from)) {
+  if (selection instanceof CellSelection || !selectionInTable(state)) {
     return false;
   }
   dispatch?.(
@@ -323,7 +329,7 @@ const newLineInCell: Command = (state, dispatch) => {
 
 /** The next cell, or from the last one a new row to write in. */
 const nextCellOrNewRow: Command = (state, dispatch) => {
-  if (!isInTable(state.selection.$from)) return false;
+  if (!selectionInTable(state)) return false;
   if (goToNextCell(1)(state, dispatch)) return true;
   if (dispatch) {
     const rect = selectedRect(state);
@@ -342,7 +348,7 @@ const nextCellOrNewRow: Command = (state, dispatch) => {
 /** The previous cell. The first one keeps the caret rather than letting the
  *  browser carry the focus to the control before the editor. */
 const previousCell: Command = (state, dispatch) => {
-  if (!isInTable(state.selection.$from)) return false;
+  if (!selectionInTable(state)) return false;
   goToNextCell(-1)(state, dispatch);
   return true;
 };

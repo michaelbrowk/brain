@@ -253,6 +253,28 @@ describe("paste into a table cell", () => {
     await editor.destroy();
   });
 
+  it("leaves a selection that runs out of the table to the clipboard", async () => {
+    const { editor, view } = await mount(`${TABLE}\n\nafter`);
+    const errors: string[] = [];
+    const onError = (event: ErrorEvent) => errors.push(event.message);
+    window.addEventListener("error", onError);
+    view.dispatch(
+      view.state.tr.setSelection(
+        TextSelection.create(
+          view.state.doc,
+          after(view.state.doc, "a1"),
+          after(view.state.doc, "after"),
+        ),
+      ),
+    );
+    paste(view, "x\ty\nz\tw");
+    key(view, "Enter");
+    key(view, "Tab");
+    window.removeEventListener("error", onError);
+    expect(errors).toEqual([]);
+    await editor.destroy();
+  });
+
   it("leaves a paste outside a table to the clipboard", async () => {
     const { editor, view } = await mount("para");
     caret(view, after(view.state.doc, "para"));

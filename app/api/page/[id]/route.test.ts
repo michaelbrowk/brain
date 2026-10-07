@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   getStore: vi.fn(),
   writePage: vi.fn(),
+  writePageBodyPatch: vi.fn(),
   historicalMarkdownForRev: vi.fn(),
   updateMeta: vi.fn(),
 }));
@@ -134,6 +135,68 @@ describe("page PUT conflict recovery", () => {
       currentRev: CURRENT_REV,
     });
     expect(mocks.historicalMarkdownForRev).not.toHaveBeenCalled();
+  });
+});
+
+describe("page PUT body patch", () => {
+  const base = "a".repeat(64);
+
+  beforeEach(() => {
+    mocks.writePage.mockReset();
+    mocks.writePageBodyPatch.mockReset().mockResolvedValue({
+      meta: { id: PAGE_ID },
+      markdown: "written",
+      rev: CURRENT_REV,
+    });
+    mocks.historicalMarkdownForRev.mockReset().mockResolvedValue("server base");
+    mocks.getStore.mockReset().mockResolvedValue({
+      writePage: mocks.writePage,
+      writePageBodyPatch: mocks.writePageBodyPatch,
+      historicalMarkdownForRev: mocks.historicalMarkdownForRev,
+    });
+  });
+
+  it("hands validated spans to the patch leaf, never to writePage", async () => {
+    const response = await put({
+      rev: STALE_REV,
+      patches: [{ base, at: 4, del: 0, ins: " more" }],
+    });
+
+    expect(response.status).toBe(200);
+    expect(mocks.writePageBodyPatch).toHaveBeenCalledWith(
+      PAGE_ID,
+      [{ base, at: 4, del: 0, ins: " more" }],
+      STALE_REV,
+      "me",
+      undefined,
+    );
+    expect(mocks.writePage).not.toHaveBeenCalled();
+  });
+
+  it("answers a conflict without consulting history", async () => {
+    mocks.writePageBodyPatch.mockRejectedValueOnce(conflict());
+
+    const response = await put({
+      rev: STALE_REV,
+      patches: [{ base, at: 0, del: 0, ins: "x" }],
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "conflict",
+      currentRev: CURRENT_REV,
+    });
+    expect(mocks.historicalMarkdownForRev).not.toHaveBeenCalled();
+  });
+
+  it("refuses a malformed patch before it reaches the store", async () => {
+    const response = await put({
+      rev: STALE_REV,
+      patches: [{ base: "short", at: 0, del: 0, ins: "x" }],
+    });
+
+    expect(response.status).toBe(400);
+    expect(mocks.writePageBodyPatch).not.toHaveBeenCalled();
   });
 });
 

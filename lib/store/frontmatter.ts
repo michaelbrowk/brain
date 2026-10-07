@@ -216,7 +216,11 @@ export function serializePage(meta: PageMeta, markdown: string): string {
     ordered[key] = value;
   }
   const body = canonicalPageMarkdown(markdown);
-  return matter.stringify(body ? body + "\n" : "", ordered);
+  // A file object, not a string: handed a string, gray-matter parses it
+  // first, so a body that opened with its own `---` block lost that block
+  // into the page's frontmatter (a `title:` in it renamed the page) and a
+  // leading byte-order mark was dropped. The object is appended untouched.
+  return matter.stringify({ content: body ? body + "\n" : "" }, ordered);
 }
 
 /** serializePage for a caller that is about to write the file and holds the

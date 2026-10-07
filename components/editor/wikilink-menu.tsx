@@ -2,13 +2,14 @@
 
 import { useInstance } from "@milkdown/react";
 import { editorViewCtx } from "@milkdown/kit/core";
-import { insert } from "@milkdown/kit/utils";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { DEFAULT_PAGE_ICON } from "@/lib/constants";
 import { DUR, EASE_OUT } from "@/lib/motion";
 import { caretMenuTakesKey } from "./caret-menu-keys";
 import type { PageRef } from "./floating-toolbar";
+import { insertInline } from "./insert-inline";
+import { createPageRef } from "./page-ref";
 import { clampMenuLeft, shouldFlipAbove } from "./menu-position";
 
 interface State {
@@ -22,7 +23,8 @@ const MENU_W = 260;
 const MENU_H = 280;
 
 /** Type `[[` to link a page inline — a Notion/Obsidian wiki-link. Picks from
- *  the page list, inserts a real `[Title](/p/id)` markdown link. */
+ *  the page list and puts a page ref in place of `[[query`, in the same line,
+ *  which the file keeps as a `[Title](/p/id)` link. */
 export function WikiLinkMenu({
   container,
   pages,
@@ -48,7 +50,7 @@ export function WikiLinkMenu({
       const node = sel.anchorNode;
       const block = (
         node?.nodeType === 1 ? (node as HTMLElement) : node?.parentElement
-      )?.closest("p, h1, h2, h3, li");
+      )?.closest("p, h1, h2, h3, h4, h5, h6, li");
       if (!block || !root.contains(block)) {
         setState(null);
         return;
@@ -104,16 +106,23 @@ export function WikiLinkMenu({
     (pg: PageRef) => {
       const ed = getEditor();
       if (!ed || !state) return;
-      const drop = state.query.length + 2; // "[[" + query
       ed.action((ctx) => {
         const view = ctx.get(editorViewCtx);
         const { state: s } = view;
-        const to = s.selection.$from.pos;
-        const from = Math.max(s.selection.$from.start(), to - drop);
-        if (to > from) view.dispatch(s.tr.delete(from, to));
+        // The trigger is read from the line as it is now, not from the query
+        // the menu last drew: an Enter typed before the menu caught up with
+        // the last letters left them in front of the link.
+        const { $from } = s.selection;
+        const before = $from.parent.textBetween(0, $from.parentOffset, undefined, "\ufffc");
+        const at = before.lastIndexOf("[[");
+        if (at < 0) return;
+        // The trigger and the link in one transaction: one undo takes the
+        // link back out and leaves `[[query` as it was typed.
+        const range = { from: $from.start() + at, to: $from.pos };
+        const tr = insertInline(s, createPageRef(s.schema, pg), range);
+        if (tr) view.dispatch(tr);
         view.focus();
       });
-      ed.action(insert(`[${pg.title}](/p/${pg.id})`));
       setState(null);
     },
     [getEditor, state],
@@ -149,6 +158,7 @@ export function WikiLinkMenu({
     <AnimatePresence>
       {state && results.length > 0 && (
         <motion.div
+          data-testid="wikilink-menu"
           initial={reduce ? { opacity: 0 } : { opacity: 0, y: 4 }}
           animate={reduce ? { opacity: 1 } : { opacity: 1, y: 0 }}
           exit={{ opacity: 0, transition: { duration: 0.08 } }}

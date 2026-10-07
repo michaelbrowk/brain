@@ -19,16 +19,18 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { Icon } from "../ui/icon";
 import { DUR, EASE_OUT } from "@/lib/motion";
 import { insertCalloutCommand } from "./callout";
+import { insertColumnsCommand } from "./columns";
 import { notifyNestedTableBlocked } from "@/lib/editor-events";
 import { insertToggleCommand } from "./toggle";
 import { insertMathBlockCommand } from "./math";
 import { ensureTaskCommand, isInQuote } from "./task-checkbox";
 import { caretMenuTakesKey } from "./caret-menu-keys";
 import {
-  attachmentMarkdown,
+  attachmentLink,
   uploadAttachment,
   type AttachmentUploadTarget,
 } from "./attachments";
+import { insertImage, insertInlineNear } from "./insert-inline";
 import type { PageRef } from "./floating-toolbar";
 import { clampMenuLeft, shouldFlipAbove } from "./menu-position";
 
@@ -44,7 +46,6 @@ interface Item {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   command?: any;
   payload?: unknown;
-  markdown?: string;
   aiMode?: "continue";
   fileAttachment?: boolean;
   /** file picker limited to images; inserts an inline image, not a file chip.
@@ -56,18 +57,6 @@ interface Item {
    *  is absent while the Tasks module is off. */
   task?: boolean;
 }
-
-const COLUMNS_MARKDOWN = [
-  "::::cols",
-  ":::col",
-  "",
-  ":::",
-  "",
-  ":::col",
-  "",
-  ":::",
-  "::::",
-].join("\n");
 
 const ITEMS: Item[] = [
   {
@@ -96,7 +85,7 @@ const ITEMS: Item[] = [
   { label: "Code", icon: "code-square-linear", keywords: "code block", command: createCodeBlockCommand },
   { label: "Image", icon: "gallery-add-linear", keywords: "image photo picture upload фото картинка", imageUpload: true },
   { label: "File", icon: "document-text-linear", keywords: "file attachment upload pdf doc zip", fileAttachment: true },
-  { label: "Columns", icon: "widget-2-linear", keywords: "columns column two layout grid", markdown: COLUMNS_MARKDOWN },
+  { label: "Columns", icon: "widget-2-linear", keywords: "columns column two layout grid", command: insertColumnsCommand },
   { label: "Table", icon: "widget-4-linear", keywords: "table grid", command: insertTableCommand, payload: { row: 3, col: 3 } },
   { label: "Divider", icon: "text-cross-linear", keywords: "divider hr line rule", command: insertHrCommand },
 ];
@@ -145,15 +134,24 @@ export function visibleSlashItems(
   const query = context.query.toLowerCase();
   return items.filter(
     (item) =>
-      // A cell holds one line, and a table, a callout or a toggle put in
-      // one split the table around it.
+      // A cell holds one line, and a table, a callout, a toggle or columns
+      // put in one split the table around it.
       (!context.inTable ||
         (item.command !== insertTableCommand &&
           item.command !== insertCalloutCommand &&
-          item.command !== insertToggleCommand)) &&
+          item.command !== insertToggleCommand &&
+          item.command !== insertColumnsCommand)) &&
       (!context.inQuote || item.command !== ensureTaskCommand) &&
       (query ? item.keywords.includes(query) || item.label.toLowerCase().includes(query) : true),
   );
+}
+
+/** What follows the slash when a line is nothing but "/word", or null when
+ *  it is anything else. A word in any script: `\w` is ASCII, and the menu
+ *  closed on the first Cyrillic letter, so a search for "фото" never got as
+ *  far as the keyword that names it. */
+export function slashQuery(line: string): string | null {
+  return /^\/([\p{L}\p{M}\p{N}_]*)$/u.exec(line)?.[1] ?? null;
 }
 
 async function askAi(mode: "continue", text: string): Promise<string> {
@@ -225,9 +223,8 @@ export function SlashMenu({
         ? (node.nodeType === 1 ? node : node.parentElement)?.closest("p")
         : null;
       // only a paragraph whose whole text is "/word" triggers the menu
-      const text = block?.textContent ?? "";
-      const m = /^\/(\w*)$/.exec(text);
-      if (!block || !root.contains(block) || !m) {
+      const query = slashQuery(block?.textContent ?? "");
+      if (!block || !root.contains(block) || query === null) {
         setState(null);
         return;
       }
@@ -254,7 +251,7 @@ export function SlashMenu({
       const flip = shouldFlipAbove(rect, vh, MENU_H);
       setState({
         left: clampMenuLeft(rect.left - r.left, r.width, MENU_W),
-        query: m[1],
+        query,
         from,
         inTable,
         inQuote,
@@ -305,7 +302,7 @@ export function SlashMenu({
           };
         });
         const { view, from, to, valid, triggerText } = capture;
-        if (from < 0 || to <= from || !valid || !/^\/\w*$/.test(triggerText)) {
+        if (from < 0 || to <= from || !valid || slashQuery(triggerText) === null) {
           return;
         }
 
@@ -420,19 +417,6 @@ export function SlashMenu({
         })();
         return;
       }
-      if (item.markdown) {
-        ed.action((ctx) => {
-          const view = ctx.get(editorViewCtx);
-          const { state: s } = view;
-          const from = s.selection.$from.start();
-          const to = s.selection.$from.pos;
-          if (to > from) view.dispatch(s.tr.delete(from, to));
-          view.focus();
-        });
-        ed.action(insert(item.markdown));
-        setState(null);
-        return;
-      }
       if (!item.command) return;
       // The menu is filtered while open, and the live-state guard below keeps
       // a stale menu from creating an unsupported nested table after a move.
@@ -494,11 +478,18 @@ export function SlashMenu({
       const asImage = imagePick.current && file.type.startsWith("image/");
       void uploadAttachment(file, upload).then((uploaded) => {
         if (!uploaded) return;
-        const ed = getEditor();
-        ed?.action((ctx) => {
-          ctx.get(editorViewCtx).focus();
+        getEditor()?.action((ctx) => {
+          const view = ctx.get(editorViewCtx);
+          const { state: s } = view;
+          // The caret goes after what was put in: the image or the label.
+          // Left on the image, the next key replaced it; left in the label,
+          // the next words became part of the file's name.
+          const tr = asImage
+            ? insertImage(s, { src: uploaded.url })
+            : insertInlineNear(s, attachmentLink(s.schema, uploaded));
+          if (tr) view.dispatch(tr);
+          view.focus();
         });
-        ed?.action(insert(asImage ? `![](${uploaded.url})` : attachmentMarkdown(uploaded)));
       });
     },
     [getEditor, upload],

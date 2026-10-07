@@ -222,16 +222,15 @@ test("Escape carries the focus out of the page text", async ({ page }) => {
 });
 
 test("a page whose load would drop content opens read-only and is never saved", async ({ page }) => {
-  // A toggle inside a column: a shape the editor cannot build yet.
+  // Words straight inside a columns row, outside any column: a row holds
+  // only columns, so the parser drops the row and the words with it. (A
+  // toggle inside a column was the shape here until nested fences were
+  // repaired and it loaded whole.)
   const markdown = [
     "- [ ] task line",
     "",
     "::::cols",
-    ":::col",
-    ':::toggle{summary="Sum"}',
     "SECRET WORDS",
-    ":::",
-    ":::",
     "",
     ":::col",
     "b",

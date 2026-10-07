@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { getStore, NOTES_ROOT } from "./store";
 import { MANAGED_PAGE_META_KEYS } from "./store/frontmatter";
+import { LINKED_WORDS_FRAGMENT } from "./internal-page-link";
 import {
   projectMarkdownSearchText,
   type SearchTextTarget,
@@ -268,7 +269,18 @@ export async function backlinksFor(id: string): Promise<Backlink[]> {
   };
   walk(store.getTree());
 
-  const lines = await rgLines(`/p/${id})`, 1);
+  // One line per file, read raw: the address followed by what can end a
+  // link's destination (a `)`, a space before a title, a quote), or by the
+  // linked-words fragment first. A ref with a title (a copied chip carries
+  // one), linked words and the absolute form all match, an id that only
+  // starts this one does not, and a line the Markdown would take apart (deep
+  // in a list, a label over two lines) is still the line the address is on.
+  const lines = await runRipgrep([
+    "--max-count",
+    "1",
+    "-e",
+    backlinkPattern(id),
+  ]);
   const seen = new Set<string>();
   const out: Backlink[] = [];
   for (const line of lines) {
@@ -292,6 +304,12 @@ export async function backlinksFor(id: string): Promise<Backlink[]> {
     out.push({ ...page, snippet: text });
   }
   return out;
+}
+
+/** The ripgrep pattern for a link to `id`. Ids are `[\w-]` only
+ *  (`backlinksFor` checks), so nothing in one needs escaping. */
+export function backlinkPattern(id: string): string {
+  return `/p/${id}(#${LINKED_WORDS_FRAGMENT})?[)\\s"']`;
 }
 
 /** Strip markdown syntax so snippets read as prose, not source. */
@@ -647,10 +665,6 @@ async function rgJson(query: string): Promise<{ phrase: string[]; words: string[
 }
 
 /** Case-sensitive fixed-string match (ids are case-sensitive). */
-function rgLines(pattern: string, maxCount: number): Promise<string[]> {
-  return runRipgrep(["--fixed-strings", "--max-count", String(maxCount), "-e", pattern]);
-}
-
 /** How many `match` lines one run answers before ripgrep is stopped.
  *
  *  A BROAD TERM DEGRADES, IT DOES NOT FAIL. The old guard counted bytes over

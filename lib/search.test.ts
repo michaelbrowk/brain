@@ -669,6 +669,77 @@ describe("searchNotes over a real notes root", () => {
  *  few lines asked for and a page whose frontmatter holds the word loses its
  *  body, too many kept and one long note takes the whole answer. So the page
  *  here holds the word on every managed key and on five lines of its body. */
+describe("backlinks over a real notes root", () => {
+  it.skipIf(!HAS_RIPGREP)(
+    "finds a page that links words to the page, and none that only names a longer id",
+    async () => {
+      await withRealNotes(async (store) => {
+        const { backlinksFor } = await import("./search");
+        const target = await store.createPage(null, "Target", { markdown: "" });
+        const words = await store.createPage(null, "Words", {
+          markdown: `read [the spec](/p/${target.id}#words) today`,
+        });
+        const chip = await store.createPage(null, "Chip", {
+          markdown: `see [📄 Target](/p/${target.id}) here`,
+        });
+        // A copied chip carries a title; it is still a link to the page.
+        const titled = await store.createPage(null, "Titled", {
+          markdown: `see [📄 Target](/p/${target.id} "📄 Target") here`,
+        });
+        // The first line naming the id is not a link to it; the second is.
+        await store.createPage(null, "Longer", {
+          markdown: `[x](/p/${target.id}xyz)\n\nand [y](/p/${target.id}#section)`,
+        });
+
+        const found = (await backlinksFor(target.id)).map((hit) => hit.id).sort();
+        expect(found).toEqual([words.id, chip.id, titled.id].sort());
+      });
+    },
+    30_000,
+  );
+});
+
+describe("backlinks a raw line still shows", () => {
+  it.skipIf(!HAS_RIPGREP)(
+    "finds deep-indented, continued and wrapped links, and many-mention pages never crowd out the rest",
+    async () => {
+      await withRealNotes(async (store) => {
+        const { backlinksFor } = await import("./search");
+        const target = await store.createPage(null, "Target", { markdown: "" });
+        const indented = await store.createPage(null, "Indented", {
+          markdown: `- a\n  - b\n    - c\n      - d\n\n        [deep](/p/${target.id})\n`,
+        });
+        const continued = await store.createPage(null, "Continued", {
+          markdown: `1. one\n\n    continued [link](/p/${target.id}) here\n`,
+        });
+        const wrapped = await store.createPage(null, "Wrapped", {
+          markdown: `see [the\nspec](/p/${target.id}#words) here\n`,
+        });
+        const heavy: string[] = [];
+        for (let index = 0; index < 10; index += 1) {
+          const lines = Array.from(
+            { length: 50 },
+            (_, day) => `- day ${day} [📄 Target](/p/${target.id})`,
+          ).join("\n");
+          heavy.push((await store.createPage(null, `Heavy ${index}`, { markdown: lines })).id);
+        }
+        const light: string[] = [];
+        for (let index = 0; index < 5; index += 1) {
+          light.push(
+            (await store.createPage(null, `Light ${index}`, { markdown: `one [x](/p/${target.id}) link` })).id,
+          );
+        }
+
+        const found = new Set((await backlinksFor(target.id)).map((hit) => hit.id));
+        expect([indented.id, continued.id, wrapped.id].filter((id) => found.has(id))).toHaveLength(3);
+        expect(heavy.filter((id) => found.has(id))).toHaveLength(10);
+        expect(light.filter((id) => found.has(id))).toHaveLength(5);
+      });
+    },
+    60_000,
+  );
+});
+
 describe("one search run over a page", () => {
   const WORD = "a1b2";
 

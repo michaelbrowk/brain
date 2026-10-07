@@ -42,18 +42,19 @@ export function freshNotes(): void {
     expect(baseURL, "the project has no baseURL to reset against").toBeTruthy();
     const page = await browser.newPage({ baseURL });
     try {
+      // Signed in through the route the form posts to, from the page: the
+      // form is not what this hook is for, and WebKit could take the click
+      // before the form had hydrated, which timed the whole file out here.
       await page.goto("/login");
-      await page.getByPlaceholder("Password").fill("e2e-password");
-      const [signedIn] = await Promise.all([
-        page.waitForResponse(
-          (candidate) =>
-            candidate.url().endsWith("/api/auth") &&
-            candidate.request().method() === "POST",
-        ),
-        page.getByRole("button", { name: "Sign in" }).click(),
-      ]);
-      expect(signedIn.status(), "the reset could not sign in").toBe(200);
-      await expect(page).toHaveURL("/", { timeout: 30_000 });
+      const signedIn = await page.evaluate(async () => {
+        const response = await fetch("/api/auth", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password: "e2e-password" }),
+        });
+        return response.status;
+      });
+      expect(signedIn, "the reset could not sign in").toBe(200);
       const reset = await page.evaluate(async () => {
         const response = await fetch("/api/dev/reset", { method: "POST" });
         return { status: response.status, body: await response.text() };

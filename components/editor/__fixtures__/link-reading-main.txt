@@ -1,0 +1,64 @@
+IN  "See [Old label](/p/abc123) mid-sentence."
+  doc "See " REF(abc123) " mid-sentence."
+  ser "See [🦊 Renamed](/p/abc123) mid-sentence."
+  shr <p>See <a class="brain-page-ref" href="/share/root?page=abc123"><span class="brain-page-ref-icon">🦊</span> Renamed</a> mid-sentence.</p> 
+IN  "[Old label](/p/abc123)"
+  doc REF(abc123)
+  ser "[🦊 Renamed](/p/abc123)"
+  shr <p><a class="brain-page-ref" href="/share/root?page=abc123"><span class="brain-page-ref-icon">🦊</span> Renamed</a></p> 
+IN  "- [🦊 Old](/p/abc123)"
+  doc REF(abc123)
+  ser "* [🦊 Renamed](/p/abc123)"
+  shr <ul> <li><a class="brain-page-ref" href="/share/root?page=abc123"><span class="brain-page-ref-icon">🦊</span> Renamed</a></li> </ul> 
+IN  "[🧪 Emoji label](/p/abc123) and text"
+  doc REF(abc123) " and text"
+  ser "[🦊 Renamed](/p/abc123) and text"
+  shr <p><a class="brain-page-ref" href="/share/root?page=abc123"><span class="brain-page-ref-icon">🦊</span> Renamed</a> and text</p> 
+IN  "See [Notion title](/p/abc123 \"Notion title\") here."
+  doc "See " REF(abc123) " here."
+  ser "See [🦊 Renamed](/p/abc123) here."
+  shr <p>See <a class="brain-page-ref" href="/share/root?page=abc123"><span class="brain-page-ref-icon">🦊</span> Renamed</a> here.</p> 
+IN  "[Notion title](/p/abc123 \"Notion title\")"
+  doc REF(abc123)
+  ser "[🦊 Renamed](/p/abc123)"
+  shr <p><a class="brain-page-ref" href="/share/root?page=abc123"><span class="brain-page-ref-icon">🦊</span> Renamed</a></p> 
+IN  "See [x](/p/abc123 \"a different tooltip\") here."
+  doc "See " REF(abc123) " here."
+  ser "See [🦊 Renamed](/p/abc123) here."
+  shr <p>See <a class="brain-page-ref" href="/share/root?page=abc123"><span class="brain-page-ref-icon">🦊</span> Renamed</a> here.</p> 
+IN  "See [x](/p/abc123 '') here."
+  doc "See " REF(abc123) " here."
+  ser "See [🦊 Renamed](/p/abc123) here."
+  shr <p>See <a class="brain-page-ref" href="/share/root?page=abc123"><span class="brain-page-ref-icon">🦊</span> Renamed</a> here.</p> 
+IN  "See [x](https://brain.example/p/abc123) here."
+  doc "See " REF(abc123) " here."
+  ser "See [🦊 Renamed](/p/abc123) here."
+  shr <p>See <a href="https://brain.example/p/abc123">x</a> here.</p> 
+IN  "See [x](https://brain.example/p/abc123 \"x\") here."
+  doc "See " REF(abc123) " here."
+  ser "See [🦊 Renamed](/p/abc123) here."
+  shr <p>See <a href="https://brain.example/p/abc123" title="x">x</a> here.</p> 
+IN  "See [x](/p/abc123#heading) here."
+  doc "See " LINK[x→/p/abc123#heading] " here."
+  ser "See [x](/p/abc123#heading) here."
+  shr <p>See x here.</p> 
+IN  "See [x](/p/abc123?x=1) here."
+  doc "See " LINK[x→/p/abc123?x=1] " here."
+  ser "See [x](/p/abc123?x=1) here."
+  shr <p>See x here.</p> 
+IN  "| a | b |\n| - | - |\n| [Old](/p/abc123) | c |"
+  doc "a" "b" REF(abc123) "c"
+  ser "| a                       | b |\n| ----------------------- | - |\n| [🦊 Renamed](/p/abc123) | c |"
+  shr <table> <thead> <tr> <th>a</th> <th>b</th> </tr> </thead> <tbody><tr> <td><a class="brain-page-ref" href="/share/root?page=abc123"><span class="brain-page-ref-icon">🦊</span> Renamed</a></td> <td>c</td> </tr> </tbody></table> 
+IN  "| a | b |\n| - | - |\n| [w](/p/abc123 \"w\") | c |"
+  doc "a" "b" REF(abc123) "c"
+  ser "| a                       | b |\n| ----------------------- | - |\n| [🦊 Renamed](/p/abc123) | c |"
+  shr <table> <thead> <tr> <th>a</th> <th>b</th> </tr> </thead> <tbody><tr> <td><a class="brain-page-ref" href="/share/root?page=abc123"><span class="brain-page-ref-icon">🦊</span> Renamed</a></td> <td>c</td> </tr> </tbody></table> 
+IN  "See [x][r] here.\n\n[r]: /p/abc123 \"t\""
+  doc "See " REF(abc123) " here."
+  ser "See [🦊 Renamed](/p/abc123) here."
+  shr <p>See <a class="brain-page-ref" href="/share/root?page=abc123"><span class="brain-page-ref-icon">🦊</span> Renamed</a> here.</p> 
+IN  "<https://brain.example/p/abc123>"
+  doc REF(abc123)
+  ser "[🦊 Renamed](/p/abc123)"
+  shr <p><a href="https://brain.example/p/abc123">https://brain.example/p/abc123</a></p> 

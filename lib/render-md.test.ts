@@ -122,6 +122,31 @@ describe("read-only attachment rendering", () => {
     expect(html).toContain("<p>Stale</p>");
   });
 
+  it("keeps the words of linked words and links them inside the share; a titled link stays a ref", () => {
+    const html = renderReadOnly(
+      [
+        "read [the *spec*](/p/child#words) today",
+        "and [the plan](/p/outside#words) too",
+        "and [📄 Untitled](/p/child)",
+        'and [🦊 Copied](/p/child "🦊 Copied")',
+      ].join("\n\n"),
+      {
+        shareNavigation: {
+          rootId: "root",
+          isAllowedPage: (id) => id !== "outside",
+          pageLabel: (id) => (id === "child" ? { title: "Pantry", icon: "🥫" } : null),
+        },
+      },
+    );
+
+    expect(html).toContain('read <a href="/share/root?page=child">the <em>spec</em></a> today');
+    // Outside the share it is the words and nothing else, like a ref there.
+    expect(html).toContain("<p>and the plan too</p>");
+    // A ref, with a title or without, still draws the page's current title.
+    expect(html.match(/<span class="brain-page-ref-icon">🥫<\/span> Pantry/g)).toHaveLength(2);
+    expect(html).not.toContain("Copied");
+  });
+
   it("draws a live title carrying markup as text, not as markup", () => {
     // The title is not always the owner's: on an editable share a visitor
     // names the subpage they create, and every later visitor is served that

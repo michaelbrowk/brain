@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { getStore, NOTES_ROOT } from "./store";
 import { MANAGED_PAGE_META_KEYS } from "./store/frontmatter";
+import { fromMarkdown } from "mdast-util-from-markdown";
+import { internalPageLinkId, linkedWordsPageId } from "./internal-page-link";
 import {
   projectMarkdownSearchText,
   type SearchTextTarget,
@@ -268,7 +270,26 @@ export async function backlinksFor(id: string): Promise<Backlink[]> {
   };
   walk(store.getTree());
 
-  const lines = await rgLines(`/p/${id})`, 1);
+  // Every line naming the address, each then read for a link to this page:
+  // a ref (titled or not, a copied chip carries a title), words linked to
+  // it, its absolute form. `/p/<id>)` alone missed the last three, and named
+  // `/p/<id>` inside a longer id's address as well.
+  const lines = (
+    await runRipgrep([
+      "--fixed-strings",
+      "--max-count",
+      String(BACKLINK_LINES_PER_FILE),
+      "-e",
+      `/p/${id}`,
+    ])
+  ).filter((line) => {
+    try {
+      const text = (JSON.parse(line) as { data?: { lines?: { text?: string } } }).data?.lines?.text;
+      return typeof text === "string" && lineLinksTo(text, id);
+    } catch {
+      return false;
+    }
+  });
   const seen = new Set<string>();
   const out: Backlink[] = [];
   for (const line of lines) {
@@ -292,6 +313,36 @@ export async function backlinksFor(id: string): Promise<Backlink[]> {
     out.push({ ...page, snippet: text });
   }
   return out;
+}
+
+/** How many lines naming a page's address one file is read for. */
+const BACKLINK_LINES_PER_FILE = 50;
+
+/** Whether one line of a body holds a link to the page `id`. An absolute
+ *  address is judged against its own origin, as the old fixed-string match
+ *  did, so a note written on another host still counts. */
+function lineLinksTo(line: string, id: string): boolean {
+  let found = false;
+  const visit = (node: { type: string; url?: unknown; children?: unknown[] }) => {
+    if (found) return;
+    if (node.type === "link" && typeof node.url === "string") {
+      let origin: string | null = null;
+      if (/^https?:\/\//.test(node.url)) {
+        try {
+          origin = new URL(node.url).origin;
+        } catch {
+          origin = null;
+        }
+      }
+      if (internalPageLinkId(node.url, origin) === id || linkedWordsPageId(node.url, origin) === id) {
+        found = true;
+        return;
+      }
+    }
+    (node.children as (typeof node)[] | undefined)?.forEach(visit);
+  };
+  visit(fromMarkdown(line) as unknown as { type: string; children?: unknown[] });
+  return found;
 }
 
 /** Strip markdown syntax so snippets read as prose, not source. */
@@ -647,10 +698,6 @@ async function rgJson(query: string): Promise<{ phrase: string[]; words: string[
 }
 
 /** Case-sensitive fixed-string match (ids are case-sensitive). */
-function rgLines(pattern: string, maxCount: number): Promise<string[]> {
-  return runRipgrep(["--fixed-strings", "--max-count", String(maxCount), "-e", pattern]);
-}
-
 /** How many `match` lines one run answers before ripgrep is stopped.
  *
  *  A BROAD TERM DEGRADES, IT DOES NOT FAIL. The old guard counted bytes over

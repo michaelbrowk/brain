@@ -101,27 +101,58 @@ async function main() {
       name: "bare URL becomes canonical autolink",
       markdown: "https://example.com/path?x=1",
       expected: "<https://example.com/path?x=1>",
+      cards: 1,
     },
     {
       name: "existing autolink unchanged",
       markdown: "<https://example.com/path?x=1>",
       expected: "<https://example.com/path?x=1>",
+      cards: 1,
     },
     {
       name: "url-labeled markdown link keeps canonical clean link",
       markdown: "[https://example.com/path?x=1](https://example.com/path?x=1)",
       expected: "<https://example.com/path?x=1>",
+      cards: 1,
+    },
+    {
+      name: "trailing-slash label keeps its own spelling",
+      markdown: "[https://example.com/a/](https://example.com/a)",
+      expected: "[https://example.com/a/](https://example.com/a)",
+      cards: 1,
+    },
+    {
+      name: "titled bare link keeps its title",
+      markdown: '[https://example.com/a](https://example.com/a "Title")',
+      expected: '[https://example.com/a](https://example.com/a "Title")',
+      cards: 1,
+    },
+    {
+      name: "card between prose, in a quote, after a list item's first line",
+      markdown:
+        "before\n\n<https://example.com/a>\n\n> <https://example.com/b>\n\n* item\n\n  <https://example.com/c>\n\nafter",
+      expected:
+        "before\n\n<https://example.com/a>\n\n> <https://example.com/b>\n\n* item\n\n  <https://example.com/c>\n\nafter",
+      cards: 3,
+    },
+    {
+      name: "a list item's first line stays a link",
+      markdown: "* <https://example.com/a>",
+      expected: "* <https://example.com/a>",
+      cards: 0,
     },
     {
       name: "titled external link is not an embed candidate",
       markdown: "[Example](https://example.com)",
       expected: "[Example](https://example.com)",
+      cards: 0,
     },
     {
       name: "internal page ref remains page ref markdown",
       markdown: "[Page](/p/abc123)",
       expected: "[Page](/p/abc123)",
       pageRefs: 1,
+      cards: 0,
     },
   ];
 
@@ -142,6 +173,19 @@ async function main() {
           .use(loaded.pageRefModule.pageRef)
           .use(loaded.linkPreview)
           .create();
+        {
+          const view = editor.action((ctx) => ctx.get(editorViewCtx));
+          let cardNodes = 0;
+          view.state.doc.descendants((node) => {
+            if (node.type.name === "link_card") cardNodes += 1;
+          });
+          const cardDom = root.querySelectorAll("a.brain-embed").length;
+          if (cardNodes !== testCase.cards || cardDom !== testCase.cards) {
+            throw new Error(
+              `expected ${testCase.cards} link_card nodes/DOM, got ${cardNodes}/${cardDom}`,
+            );
+          }
+        }
         if (testCase.pageRefs !== undefined) {
           const view = editor.action((ctx) => ctx.get(editorViewCtx));
           let pageRefNodes = 0;

@@ -703,20 +703,9 @@ html:has(a[data-page-ref-nest-target="true"]) .brain-drop-cursor {
   text-decoration: none;
 }
 
-/* link previews: render-time cards over ordinary markdown autolinks. The
-   source paragraph stays in the doc for serialization, but is visually
-   collapsed while the widget carries the reading UI. */
-.milkdown .ProseMirror > p.brain-embed-source {
-  height: 0;
-  min-height: 0;
-  margin: 0 !important;
-  overflow: hidden;
-  opacity: 0;
-  pointer-events: none;
-}
-.milkdown .ProseMirror > p.brain-embed-source > * {
-  display: none;
-}
+/* link previews: the `link_card` node's own view (link-preview.ts), stored as
+   an ordinary markdown autolink. The card is the block itself, so there is
+   no hidden source line beside it. */
 .milkdown .ProseMirror .brain-embed {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 112px;
@@ -740,6 +729,12 @@ html:has(a[data-page-ref-nest-target="true"]) .brain-drop-cursor {
   border-color: var(--ink-3);
   box-shadow: var(--shadow-lift);
   text-decoration: none;
+}
+/* A card the reader arrowed onto or will delete with the next Backspace: the
+   app's focus ring, since there is no caret to show where they are. */
+.milkdown .ProseMirror .brain-embed[data-selected="true"] {
+  outline: 3px solid var(--blue-ring);
+  outline-offset: 2px;
 }
 .milkdown .ProseMirror .brain-embed-body {
   display: flex;

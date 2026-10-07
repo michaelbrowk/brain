@@ -449,6 +449,93 @@ export function focusDocumentEnd(view: {
   return true;
 }
 
+/** Whether a click landed on the blank paper below the document.
+ *
+ *  Blank paper is an element that encloses the editor (the article, the
+ *  canvas, the page) rather than anything inside it or beside it: a row of
+ *  subpages, a sticker, a menu is its own target and keeps its own click. And
+ *  below means lower than the editor's last line, so the margin beside a
+ *  paragraph is not taken for the end of the page. */
+export function clickedBelowDocument(
+  target: unknown,
+  editor: Node,
+  clientY: number,
+  editorBottom: number,
+): boolean {
+  const element = target as { contains?: (other: Node) => boolean } | null;
+  if (typeof element?.contains !== "function" || element === editor) return false;
+  if (!element.contains(editor) || clientY <= editorBottom) return false;
+  return !contentBetween(editor, target as Node, clientY);
+}
+
+/** Whether something drawn after the editor, inside the clicked element,
+ *  starts at or above the click. The page body holds the editor and then the
+ *  subpages list in one wrapper, so a click in a gap between subpage rows
+ *  lands on that wrapper, which encloses the editor too. It is a click on the
+ *  list, not under the document: only the paper directly under the last
+ *  line, before anything else begins, is the end of the page. */
+function contentBetween(editor: Node, target: Node, clientY: number): boolean {
+  let node: Node | null = editor;
+  while (node && node !== target) {
+    let sibling = (node as Partial<Element>).nextElementSibling ?? null;
+    while (sibling) {
+      // Only what flows below the document. The block handle, the drop
+      // cursor and the menus are positioned over it, not after it.
+      const position = sibling.ownerDocument.defaultView?.getComputedStyle(sibling).position;
+      const inFlow = position !== "absolute" && position !== "fixed";
+      const rect = sibling.getBoundingClientRect();
+      if (inFlow && rect.height > 0 && rect.top <= clientY) return true;
+      sibling = sibling.nextElementSibling;
+    }
+    node = node.parentNode ?? null;
+  }
+  return false;
+}
+
+/** A click or tap below the last line writes at the end.
+ *
+ *  The page goes on below the document, and that paper belongs to no element
+ *  ProseMirror listens to, so a click there did nothing at all: on a phone the
+ *  keyboard never came up, and a page ending in a card or an image had no line
+ *  a tap could reach. Answer it with the caret at the end of the document,
+ *  which the trailing paragraph keeps writable.
+ *
+ *  The left button with no modifier, nothing already handled, and not the end
+ *  of a drag that selected text: a selection the reader drew is theirs. */
+export function createClickBelowPlugin(): Plugin {
+  return new Plugin({
+    key: new PluginKey("brainClickBelow"),
+    view: (view) => {
+      const doc = view.dom.ownerDocument;
+      const onClick = (event: MouseEvent) => {
+        if (
+          event.defaultPrevented ||
+          event.button !== 0 ||
+          event.metaKey ||
+          event.ctrlKey ||
+          event.shiftKey ||
+          event.altKey ||
+          view.isDestroyed ||
+          !view.editable
+        ) {
+          return;
+        }
+        const selection = doc.getSelection();
+        if (selection && !selection.isCollapsed) return;
+        const bottom = view.dom.getBoundingClientRect().bottom;
+        if (!clickedBelowDocument(event.target, view.dom, event.clientY, bottom)) return;
+        focusDocumentEnd(view);
+      };
+      doc.addEventListener("click", onClick);
+      return {
+        destroy: () => doc.removeEventListener("click", onClick),
+      };
+    },
+  });
+}
+
+export const clickBelow = $prose(() => createClickBelowPlugin());
+
 /** Two spaces: the indent Brain's own Markdown uses for a nested list, and
  *  what a code block's Tab inserts. */
 const CODE_INDENT = "  ";
@@ -588,6 +675,7 @@ export const editingCore = [
   trailingParagraph,
   focusCaret,
   slashHint,
+  clickBelow,
   codeTabKeymap,
   keepTabKeymap,
   escapeKeymap,

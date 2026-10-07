@@ -8,6 +8,7 @@ import { DecorationSet } from "@milkdown/kit/prose/view";
 import { describe, expect, it, vi } from "vitest";
 import {
   acceptsTypedText,
+  clickedBelowDocument,
   clickLandedOnUneditable,
   createFocusCaretPlugin,
   createSlashHintPlugin,
@@ -722,5 +723,31 @@ describe("what one focus does", () => {
     expect(settleFocusCaret(view)).toBe(false);
     expect(dispatch).not.toHaveBeenCalled();
     expect(focus).not.toHaveBeenCalled();
+  });
+});
+
+describe("a click on the blank paper below the document", () => {
+  // Stand-ins for DOM nodes: `contains` is all the rule reads.
+  const editor = { name: "editor" } as unknown as Node;
+  const enclosing = { contains: (other: Node) => other === editor };
+  const beside = { contains: () => false };
+
+  it("counts on an element that encloses the editor, below its last line", () => {
+    expect(clickedBelowDocument(enclosing, editor, 500, 400)).toBe(true);
+  });
+
+  it("does not count beside a line, above the editor's bottom", () => {
+    expect(clickedBelowDocument(enclosing, editor, 380, 400)).toBe(false);
+  });
+
+  it("does not count on anything that is not around the editor", () => {
+    // A row of subpages, a sticker, a menu: their own click.
+    expect(clickedBelowDocument(beside, editor, 500, 400)).toBe(false);
+    expect(clickedBelowDocument(null, editor, 500, 400)).toBe(false);
+  });
+
+  it("does not count on the editor itself, whose clicks ProseMirror answers", () => {
+    const self = { contains: () => true } as unknown as Node;
+    expect(clickedBelowDocument(self, self, 500, 400)).toBe(false);
   });
 });

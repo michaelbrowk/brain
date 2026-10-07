@@ -10,11 +10,14 @@ import {
   isDraftOperation,
   isRetryableSaveFailure,
   latchDraftConflict,
+  ownSavesAround,
   persistDraft,
   SaveRequestError,
+  saveOperationSeq,
   saveRetryDelay,
   SaveSupersededError,
   saveMarkdown,
+  type SentUnloadSave,
   type StoredDraft,
 } from "@/lib/autosave";
 import { canonicalPageMarkdown } from "@/lib/page-markdown";
@@ -756,20 +759,12 @@ export function Shell({
   // page and operation. Any of them may be what the server holds by the time
   // a closing-tab save lands, so that save cuts a span against each.
   const sentBodiesRef = useRef<Map<string, Map<string, string>>>(new Map());
-  // Closing-tab saves sent per page, oldest first. `supersedes` holds the
-  // operations that were queued when it left: they are older, and must never
-  // write over it. `landed` is set only when the tab lived to read a 2xx.
-  const unloadSavesRef = useRef<
-    Map<
-      string,
-      {
-        operationId: string;
-        markdown: string;
-        supersedes: Set<string>;
-        landed: boolean;
-      }[]
-    >
-  >(new Map());
+  // Closing-tab saves sent per page, oldest first. An edit made before one
+  // (by `saveOperationSeq`) is stale behind it and must never write over it;
+  // an edit made after it, a typed one or a rewrite, is newer.
+  const unloadSavesRef = useRef<Map<string, SentUnloadSave[]>>(new Map());
+  // Numbers this document's edits in the order they are made.
+  const saveSeqRef = useRef(0);
   // A save that failed for a reason time can fix is tried again while the tab
   // lives, further apart each round (`saveRetryDelay`), until one lands. The
   // failure toast has told the owner, and the save dot stays on error until
@@ -1160,15 +1155,17 @@ export function Shell({
       );
   }, [showToast]);
 
-  const nextSaveOperation = useCallback(
-    () =>
-      `${CLIENT_ID}:${
-        typeof crypto !== "undefined" && "randomUUID" in crypto
-          ? crypto.randomUUID()
-          : `${Date.now()}-${Math.random().toString(36).slice(2)}`
-      }`,
-    [],
-  );
+  // `<client>:<seq>.<random>`: the sequence orders this tab's edits against
+  // its closing-tab saves (`saveOperationSeq`), the random part keeps the id
+  // unique across reloads of the same draft.
+  const nextSaveOperation = useCallback(() => {
+    saveSeqRef.current += 1;
+    return `${CLIENT_ID}:${saveSeqRef.current}.${
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    }`;
+  }, []);
 
   const clearDraftOperation = useCallback(
     (id: string, operationId: string) => {
@@ -2363,14 +2360,11 @@ export function Shell({
         // edit visible when the action was invoked. If that edit fails, the
         // rewrite is skipped; edits typed later are already queued after it.
         if (prerequisite && !(await prerequisite)) return false;
-        // A closing-tab save that left after this one was queued, and that
-        // this tab saw land, already holds newer text than this body.
+        // A closing-tab save of a later edit, seen to land, already holds
+        // newer text than this body.
+        const seq = saveOperationSeq(operationId, CLIENT_ID);
         const unloadSaves = unloadSavesRef.current.get(id) ?? [];
-        if (
-          unloadSaves.some(
-            (sent) => sent.landed && sent.supersedes.has(operationId),
-          )
-        ) {
+        if (unloadSaves.some((sent) => sent.landed && sent.seq > seq)) {
           return false;
         }
         // What the store held for this note before this save, for the task
@@ -2387,20 +2381,13 @@ export function Shell({
             setRevision: (next) => revisionsRef.current.set(id, next),
             getBaseMarkdown: () => baseMarkdownRef.current.get(id),
             setBaseMarkdown: (next) => baseMarkdownRef.current.set(id, next),
-            ownBody: (server) => {
-              const sent = (unloadSavesRef.current.get(id) ?? []).find(
-                (candidate) =>
-                  candidate.operationId !== operationId &&
-                  candidate.markdown === server,
-              );
-              if (!sent) return undefined;
-              return sent.supersedes.has(operationId) ? "newer" : "older";
-            },
+            ownSaves: () =>
+              ownSavesAround(unloadSavesRef.current.get(id) ?? [], seq),
           });
           // A closing-tab save this one has now written over, or that left
-          // before it, is history: keep only those newer than this body.
+          // before it, is history: keep only those of later edits.
           const stillNewer = (unloadSavesRef.current.get(id) ?? []).filter(
-            (sent) => sent.supersedes.has(operationId),
+            (sent) => sent.seq > seq,
           );
           if (stillNewer.length) unloadSavesRef.current.set(id, stillNewer);
           else unloadSavesRef.current.delete(id);
@@ -2473,7 +2460,14 @@ export function Shell({
             pendingRef.current?.id === id ? pendingRef.current : null;
           if (error instanceof SaveSupersededError) {
             // Not a failure and not a conflict: the newer body is this tab's
-            // own. The newest edit saves next, against that body.
+            // own. The newest edit saves next, against that body. When the
+            // server was seen holding it (it became the base), it has landed,
+            // and every other stale save of this page stays unsent: under
+            // the rev just adopted one would otherwise be accepted.
+            const base = baseMarkdownRef.current.get(id);
+            for (const sent of unloadSavesRef.current.get(id) ?? []) {
+              if (sent.seq > seq && sent.markdown === base) sent.landed = true;
+            }
             if (currentPending && currentPending.operationId !== operationId) {
               queueMicrotask(() => flushPendingRef.current());
             }
@@ -2691,7 +2685,12 @@ export function Shell({
       if (sent.some((entry) => entry.operationId === p.operationId)) return;
       const revision = revisionsRef.current.get(p.id) ?? "";
       const base = baseMarkdownRef.current.get(p.id);
-      const queued = sentBodiesRef.current.get(p.id) ?? new Map<string, string>();
+      const seq = saveOperationSeq(p.operationId, CLIENT_ID);
+      // Only bodies of this edit or earlier ones: a rewrite queued after it
+      // (Smart Sort, undo) is newer, and this save must not land over it.
+      const queued = [
+        ...(sentBodiesRef.current.get(p.id) ?? new Map<string, string>()),
+      ].filter(([operationId]) => saveOperationSeq(operationId, CLIENT_ID) <= seq);
       // Browsers refuse keepalive bodies over 64 KiB in flight per page.
       const budget = 60 * 1024;
       const body =
@@ -2699,7 +2698,7 @@ export function Shell({
           p.md,
           revision,
           [
-            ...queued.values(),
+            ...queued.map(([, markdown]) => markdown),
             ...sent.map((entry) => entry.markdown),
             ...(base === undefined ? [] : [base]),
           ],
@@ -2707,29 +2706,62 @@ export function Shell({
         ) ??
         // A legacy draft with no trusted base and nothing on the wire can
         // only go whole, under its exact rev, when it fits.
-        (base === undefined && queued.size === 0 && sent.length === 0
+        (base === undefined && queued.length === 0 && sent.length === 0
           ? encodeSaveRequest(p.md, revision)
           : null);
       if (body === null || new TextEncoder().encode(body).byteLength > budget) {
         return;
       }
-      const entry = {
+      const entry: SentUnloadSave = {
         operationId: p.operationId,
+        seq,
         markdown: canonicalPageMarkdown(p.md),
-        supersedes: new Set(
-          [...queued.keys()].filter((op) => op !== p.operationId),
-        ),
         landed: false,
       };
-      unloadSavesRef.current.set(p.id, [...sent, entry].slice(-4));
-      void apiFetch(`/api/page/${p.id}`, {
+      const pageId = p.id;
+      unloadSavesRef.current.set(pageId, [...sent, entry].slice(-4));
+      void apiFetch(`/api/page/${pageId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body,
         keepalive: true, // survives the unload
       })
-        .then((response) => {
-          if (response.ok) entry.landed = true;
+        .then(async (response) => {
+          if (!response.ok) return;
+          entry.landed = true;
+          const page = (await response.json()) as { markdown?: unknown; rev?: unknown };
+          // Adopt the landed body as the tab's base, unless a save of this
+          // edit or a later one already confirmed something newer (it drops
+          // the entry when it does).
+          if (
+            typeof page.markdown !== "string" ||
+            typeof page.rev !== "string" ||
+            !page.rev ||
+            !(unloadSavesRef.current.get(pageId) ?? []).includes(entry)
+          ) {
+            return;
+          }
+          revisionsRef.current.set(pageId, page.rev);
+          baseMarkdownRef.current.set(pageId, page.markdown);
+          setPage((current) =>
+            current?.id === pageId ? { ...current, rev: page.rev as string } : current,
+          );
+          // And in the draft, so a reload starts from it too.
+          const pending = pendingRef.current?.id === pageId ? pendingRef.current : null;
+          if (!pending) return;
+          const persisted = persistDraft(
+            localStorage,
+            draftStorageKey(pageId),
+            pending.md,
+            page.rev,
+            pending.operationId,
+            Date.now(),
+            page.markdown,
+            false,
+            draftSourcesForOperation(pageId, pending.operationId),
+          );
+          if (persisted) clearLocalRecoveryUnavailable(pageId);
+          else markLocalRecoveryUnavailable(pageId);
         })
         .catch(() => {});
     };
@@ -2751,7 +2783,7 @@ export function Shell({
       window.removeEventListener("online", onOnline);
       window.removeEventListener("pagehide", sendUnloadSave);
     };
-  }, []);
+  }, [clearLocalRecoveryUnavailable, markLocalRecoveryUnavailable]);
 
   // ── mutations ───────────────────────────────────────
   const requestCreatePage = useCallback(

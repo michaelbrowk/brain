@@ -14,6 +14,10 @@ import {
   saveRetryDelay,
   SaveSupersededError,
   saveMarkdown,
+  saveOperationSeq,
+  ownSavesAround,
+  type FetchLike,
+  type OwnSaves,
 } from "./autosave";
 import { applyBodyPatch, bodyHash } from "./body-patch";
 import { canonicalPageMarkdown } from "./page-markdown";
@@ -541,88 +545,189 @@ describe("retrying a failed save", () => {
   });
 });
 
+describe("edit order and closing-tab saves", () => {
+  it("reads the order of an edit minted here, and 0 for anything else", () => {
+    expect(saveOperationSeq("tab-a:12.f00", "tab-a")).toBe(12);
+    expect(saveOperationSeq("tab-a:3.x", "tab-a")).toBe(3);
+    expect(saveOperationSeq("tab-b:12.f00", "tab-a")).toBe(0);
+    expect(saveOperationSeq("legacy-v2:real-conflict", "tab-a")).toBe(0);
+    expect(saveOperationSeq("tab-a:not-a-number", "tab-a")).toBe(0);
+  });
+
+  it("calls stale only an edit older than the closing save, however it was queued", () => {
+    const sent = [
+      { operationId: "t:4.a", seq: 4, markdown: "four", landed: false },
+      { operationId: "t:9.a", seq: 9, markdown: "nine", landed: true },
+    ];
+    expect(ownSavesAround(sent, 2)).toEqual({
+      newer: "nine",
+      older: undefined,
+      bodies: ["four", "nine"],
+    });
+    // The closing save's own edit is not stale behind itself.
+    expect(ownSavesAround(sent, 9)).toMatchObject({ newer: undefined, older: "nine" });
+    // A rewrite made after the closing save (Smart Sort, undo) is newer than
+    // it even when it sat in the queue behind it.
+    expect(ownSavesAround(sent, 10)).toMatchObject({ newer: undefined, older: "nine" });
+    expect(ownSavesAround(sent, 5)).toMatchObject({ newer: "nine", older: "four" });
+  });
+});
+
 describe("saveMarkdown and a body this tab sent itself", () => {
-  function conflictThenServer(markdown: string) {
-    return vi
-      .fn()
-      .mockResolvedValueOnce(response({ error: "conflict" }, 409))
-      .mockResolvedValueOnce(response({ markdown, rev: "rev-own" }))
-      .mockResolvedValue(response({ rev: "rev-after" }));
+  /** A fetcher scripted call by call; the last answer repeats. */
+  function scripted(...answers: Response[]) {
+    const fetcher = vi.fn();
+    answers.forEach((answer, index) =>
+      index === answers.length - 1
+        ? fetcher.mockResolvedValue(answer)
+        : fetcher.mockResolvedValueOnce(answer),
+    );
+    return fetcher;
   }
+  const conflict = () => response({ error: "conflict" }, 409);
+  const server = (markdown: string, rev = "rev-server") => response({ markdown, rev });
+  const sent = (fetcher: ReturnType<typeof vi.fn>, call: number) =>
+    JSON.parse(String(fetcher.mock.calls[call][1]?.body)) as Record<string, unknown>;
 
-  it("stops an older save, without a conflict, behind a newer body of its own", async () => {
-    let revision = "rev-0";
-    let base = "Base";
-    const fetcher = conflictThenServer("Base one two");
-
-    const save = saveMarkdown({
-      fetcher,
+  function save(
+    fetcher: ReturnType<typeof vi.fn>,
+    markdown: string,
+    own: () => OwnSaves,
+    start: { revision?: string; base?: string } = {},
+  ) {
+    const state = { revision: start.revision ?? "rev-0", base: start.base ?? "Base" };
+    const promise = saveMarkdown({
+      fetcher: fetcher as unknown as FetchLike,
       id: "page-a",
-      markdown: "Base one",
-      getRevision: () => revision,
+      markdown,
+      getRevision: () => state.revision,
       setRevision: (next) => {
-        revision = next;
+        state.revision = next;
       },
-      getBaseMarkdown: () => base,
+      getBaseMarkdown: () => state.base,
       setBaseMarkdown: (next) => {
-        base = next;
+        state.base = next;
       },
-      ownBody: (server) => (server === "Base one two" ? "newer" : undefined),
+      ownSaves: own,
       wait: async () => {},
     });
+    return { promise, state };
+  }
+  const none: OwnSaves = { newer: undefined, older: undefined, bodies: [] };
 
-    await expect(save).rejects.toBeInstanceOf(SaveSupersededError);
-    // Two requests: the refused PUT and the read. The older body is never
-    // sent again over the newer one.
+  it("stops an older save, without a conflict, behind a newer body of its own", async () => {
+    const fetcher = scripted(conflict(), server("Base one two", "rev-own"));
+    const own = { newer: "Base one two", older: undefined, bodies: ["Base one two"] };
+    const { promise, state } = save(fetcher, "Base one", () => own);
+
+    await expect(promise).rejects.toBeInstanceOf(SaveSupersededError);
+    // The refused PUT and the read, and no second PUT of the older body.
     expect(fetcher).toHaveBeenCalledTimes(2);
-    expect(revision).toBe("rev-own");
-    expect(base).toBe("Base one two");
+    expect(state).toEqual({ revision: "rev-own", base: "Base one two" });
+  });
+
+  it("stops behind a newer own save the server holds under a tick, adopting nothing", async () => {
+    const fetcher = scripted(conflict(), server("- [x] Base one two"));
+    const own = { newer: "- [ ] Base one two", older: undefined, bodies: ["- [ ] Base one two"] };
+    const { promise, state } = save(fetcher, "- [ ] Base one", () => own, {
+      base: "- [ ] Base",
+    });
+
+    await expect(promise).rejects.toBeInstanceOf(SaveSupersededError);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(state).toEqual({ revision: "rev-0", base: "- [ ] Base" });
+  });
+
+  it("sends a save that is already stale without a base, so the server cannot merge it", async () => {
+    const fetcher = scripted(conflict(), server("- [ ] a\n- [x] b"));
+    const own = { newer: "- [ ] a\n- [x] b", older: undefined, bodies: ["- [ ] a\n- [x] b"] };
+    const { promise } = save(fetcher, "- [x] a\n- [ ] b", () => own, {
+      base: "- [ ] a\n- [ ] b",
+    });
+
+    await expect(promise).rejects.toBeInstanceOf(SaveSupersededError);
+    expect(sent(fetcher, 0)).toEqual({ markdown: "- [x] a\n- [ ] b", rev: "rev-0" });
   });
 
   it("writes a newer body over an older body of its own", async () => {
-    let revision = "rev-0";
-    let base = "Base";
-    const fetcher = conflictThenServer("Base one");
+    const fetcher = scripted(conflict(), server("Base one", "rev-own"), response({ rev: "rev-after" }));
+    const own = { newer: undefined, older: "Base one", bodies: ["Base one"] };
+    const { promise } = save(fetcher, "Base one two", () => own);
 
-    await expect(
-      saveMarkdown({
-        fetcher,
-        id: "page-a",
-        markdown: "Base one two",
-        getRevision: () => revision,
-        setRevision: (next) => {
-          revision = next;
-        },
-        getBaseMarkdown: () => base,
-        setBaseMarkdown: (next) => {
-          base = next;
-        },
-        ownBody: (server) => (server === "Base one" ? "older" : undefined),
-        wait: async () => {},
-      }),
-    ).resolves.toBe("rev-after");
-    expect(JSON.parse(String(fetcher.mock.calls[2][1]?.body))).toEqual({
+    await expect(promise).resolves.toBe("rev-after");
+    expect(sent(fetcher, 2)).toEqual({
       markdown: "Base one two",
       rev: "rev-own",
       baseMarkdown: "Base one",
     });
   });
 
+  it("over its own save under somebody's tick, asks once with that body as base and the original rev", async () => {
+    const fetcher = scripted(
+      conflict(),
+      server("- [x] task\n\ntext more", "rev-ticked"),
+      response({ rev: "rev-merged" }),
+    );
+    const own = { newer: undefined, older: "- [ ] task\n\ntext more", bodies: ["- [ ] task\n\ntext more"] };
+    const { promise, state } = save(fetcher, "- [ ] task\n\ntext more and more", () => own, {
+      base: "- [ ] task\n\ntext",
+    });
+
+    await expect(promise).resolves.toBe("rev-merged");
+    expect(sent(fetcher, 2)).toEqual({
+      markdown: "- [ ] task\n\ntext more and more",
+      rev: "rev-0",
+      baseMarkdown: "- [ ] task\n\ntext more",
+    });
+    expect(state.base).toBe("- [ ] task\n\ntext more and more");
+  });
+
+  it("is a real conflict when that one retry is refused too", async () => {
+    const fetcher = scripted(conflict(), server("Written in another tab"), conflict(), server("Written in another tab"));
+    const own = { newer: undefined, older: "Base one", bodies: ["Base one"] };
+    const { promise } = save(fetcher, "Base one two", () => own);
+
+    await expect(promise).rejects.toMatchObject({ status: 409 });
+    expect(fetcher).toHaveBeenCalledTimes(4);
+  });
+
+  it("does not read a base moved to its own landed save as a change elsewhere", async () => {
+    const own = { newer: undefined, older: "Base one two", bodies: ["Base one two"] };
+    const holder: { state?: { revision: string; base: string } } = {};
+    const fetcher = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        // The closing-tab save's answer arrives while this PUT is out, and
+        // the tab adopts it. The PUT left before `save` returned, so the
+        // move happens on the next turn.
+        await Promise.resolve();
+        if (holder.state) holder.state.base = "Base one two";
+        return conflict();
+      })
+      .mockResolvedValueOnce(server("Base one two", "rev-own"))
+      .mockResolvedValue(response({ rev: "rev-after" }));
+    const run = save(fetcher, "Base one two", () => own);
+    holder.state = run.state;
+
+    await expect(run.promise).resolves.toBe("rev-after");
+    expect(sent(fetcher, 2)).toMatchObject({ rev: "rev-own", baseMarkdown: "Base one two" });
+  });
+
+  it("after the server merged a tick in, keeps the old rev so the next save merges too", async () => {
+    const fetcher = scripted(response({ rev: "rev-merged", markdown: "- [x] a\n\nmore" }));
+    const { promise, state } = save(fetcher, "- [ ] a\n\nmore", () => none, {
+      base: "- [ ] a",
+    });
+
+    await expect(promise).resolves.toBe("rev-merged");
+    expect(state).toEqual({ revision: "rev-0", base: "- [ ] a\n\nmore" });
+  });
+
   it("still conflicts on a body nobody in this tab wrote", async () => {
-    const fetcher = conflictThenServer("Written in another tab");
-    await expect(
-      saveMarkdown({
-        fetcher,
-        id: "page-a",
-        markdown: "Local",
-        getRevision: () => "rev-0",
-        setRevision: () => {},
-        getBaseMarkdown: () => "Base",
-        setBaseMarkdown: () => {},
-        ownBody: () => undefined,
-        wait: async () => {},
-      }),
-    ).rejects.toMatchObject({ status: 409 });
+    const fetcher = scripted(conflict(), server("Written in another tab"));
+    await expect(save(fetcher, "Local", () => none).promise).rejects.toMatchObject({
+      status: 409,
+    });
   });
 });
 

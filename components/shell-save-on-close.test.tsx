@@ -15,6 +15,7 @@ import type { TreeNode } from "@/lib/store/types";
 import { apiFetch } from "@/lib/client";
 import { applyBodyPatch, bodyHash, type BodyPatch } from "@/lib/body-patch";
 import { canonicalPageMarkdown } from "@/lib/page-markdown";
+import { mergeCheckboxStates } from "@/lib/tasks/merge-checkboxes";
 import { resetTasksStore } from "./tasks-client";
 import { Shell } from "./shell";
 
@@ -89,24 +90,41 @@ describe("the newest text leaves when the tab goes away", () => {
   let puts: SentPut[];
   /** An ordinary request the test holds. Resolving it lets the fake server
    *  process it at that moment, as a request that was slow on the wire. */
-  let held: Array<() => void>;
+  let held: Array<{ resolve: () => void; fail: () => void }>;
   let holdOrdinary: boolean;
   /** A frozen tab: ordinary requests are made but never leave. */
   let frozen: boolean;
   /** Ordinary PUTs answered 503 before the server takes them again. */
   let failingPuts: number;
+  /** The closing-tab save reaches the server, and its answer never reaches
+   *  the tab: frozen, or closed and restored from the back-forward cache. */
+  let keepaliveAnswerLost: boolean;
+  /** Every body the server held, in order. */
+  let history: string[];
   const apiFetchMock = vi.mocked(apiFetch);
 
+  function commit(markdown: string) {
+    if (markdown === server.markdown) return;
+    server = { markdown, rev: server.rev + 1 };
+    history.push(markdown);
+  }
+
+  function conflictResponse() {
+    return response({ error: "conflict", currentRev: `rev-${server.rev}` }, 409);
+  }
+
+  /** The store's rule: the rev, or the base body, or a tick-only merge. */
   function writeFull(body: SentPut["body"]): Response {
     const markdown = canonicalPageMarkdown(body.markdown ?? "");
-    const baseMatches =
-      body.baseMarkdown !== undefined &&
-      canonicalPageMarkdown(body.baseMarkdown) === server.markdown;
-    if (body.rev !== `rev-${server.rev}` && !baseMatches) {
-      return response({ error: "conflict", currentRev: `rev-${server.rev}` }, 409);
-    }
-    if (markdown !== server.markdown) {
-      server = { markdown, rev: server.rev + 1 };
+    const base =
+      body.baseMarkdown === undefined ? undefined : canonicalPageMarkdown(body.baseMarkdown);
+    if (body.rev === `rev-${server.rev}` || base === server.markdown) {
+      commit(markdown);
+    } else {
+      const merged =
+        base === undefined ? null : mergeCheckboxStates(base, markdown, server.markdown);
+      if (!merged?.ok) return conflictResponse();
+      commit(canonicalPageMarkdown(merged.merged));
     }
     return response({ markdown: server.markdown, rev: `rev-${server.rev}` });
   }
@@ -115,11 +133,14 @@ describe("the newest text leaves when the tab goes away", () => {
     const current = bodyHash(server.markdown);
     const patch = body.patches?.find((candidate) => candidate.base === current);
     const next = patch ? applyBodyPatch(server.markdown, patch) : null;
-    if (next === null) {
-      return response({ error: "conflict", currentRev: `rev-${server.rev}` }, 409);
-    }
-    if (next !== server.markdown) server = { markdown: next, rev: server.rev + 1 };
+    if (next === null) return conflictResponse();
+    commit(next);
     return response({ markdown: server.markdown, rev: `rev-${server.rev}` });
+  }
+
+  /** Somebody else ticks a box: Tasks, a phone, the assistant. */
+  function tickElsewhere(from: string, to: string) {
+    commit(server.markdown.replace(from, to));
   }
 
   beforeEach(() => {
@@ -169,6 +190,8 @@ describe("the newest text leaves when the tab goes away", () => {
     holdOrdinary = false;
     frozen = false;
     failingPuts = 0;
+    keepaliveAnswerLost = false;
+    history = [];
     apiFetchMock.mockImplementation((input, init) => {
       const url = String(input);
       if (url === "/api/page/note") {
@@ -193,12 +216,17 @@ describe("the newest text leaves when the tab goes away", () => {
               return Promise.resolve(response({ error: "unavailable" }, 503));
             }
             if (holdOrdinary) {
-              return new Promise<Response>((resolve) =>
-                held.push(() => resolve(process())),
+              return new Promise<Response>((resolve, reject) =>
+                held.push({
+                  resolve: () => resolve(process()),
+                  fail: () => reject(new TypeError("Failed to fetch")),
+                }),
               );
             }
           }
-          return Promise.resolve(process());
+          const answer = process();
+          if (sent.keepalive && keepaliveAnswerLost) return new Promise<Response>(() => {});
+          return Promise.resolve(answer);
         }
         return Promise.resolve(
           response({
@@ -305,7 +333,7 @@ describe("the newest text leaves when the tab goes away", () => {
     // The tab lived on (bfcache, or only hidden). The older request reaches
     // the server now, behind the newer body this tab sent itself.
     holdOrdinary = false;
-    await act(async () => held.shift()?.());
+    await act(async () => held.shift()?.resolve());
     await settle();
     await advance(2_000);
     await advance(2_000);
@@ -318,6 +346,89 @@ describe("the newest text leaves when the tab goes away", () => {
     await type("Base one two three");
     await advance(700);
     expect(server.markdown).toBe("Base one two three");
+    // The older body never went back over the newer one, not even for a
+    // moment before the next save healed it.
+    expect(history).toEqual(["Base one two", "Base one two three"]);
+  });
+
+  it("a landed closing save becomes the tab's base, in memory and in the draft", async () => {
+    await open();
+    holdOrdinary = true;
+    await type("Base one");
+    await advance(700);
+    await type("Base one two");
+    await act(async () => window.dispatchEvent(new Event("pagehide")));
+    await settle();
+    expect(server.markdown).toBe("Base one two");
+
+    const [key] = drafts();
+    const draft = JSON.parse(localStorage.getItem(key) ?? "{}") as {
+      revision?: string;
+      baseMarkdown?: string;
+    };
+    expect(draft).toMatchObject({
+      revision: `rev-${server.rev}`,
+      baseMarkdown: "Base one two",
+    });
+    holdOrdinary = false;
+    await act(async () => held.shift()?.resolve());
+    await advance(2_000);
+  });
+
+  // The reviewer's shape: the closing save lands, somebody ticks a box, and
+  // the tab comes back and keeps typing. Nobody else edited text, so nothing
+  // here may come out as a conflict.
+  for (const answer of ["seen", "lost"] as const) {
+    it(`a tick after a landed closing save is merged, not a conflict (answer ${answer})`, async () => {
+      await open("- [ ] task\n\ntext");
+      keepaliveAnswerLost = answer === "lost";
+      holdOrdinary = true;
+      await type("- [ ] task\n\ntext more");
+      await act(async () => hide());
+      await settle();
+      expect(server.markdown).toBe("- [ ] task\n\ntext more");
+
+      tickElsewhere("- [ ] task", "- [x] task");
+      await act(async () => {
+        Reflect.deleteProperty(document, "visibilityState");
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      holdOrdinary = false;
+      while (held.length) await act(async () => held.shift()?.resolve());
+      await advance(2_000);
+      await type("- [ ] task\n\ntext more and more");
+      await advance(700);
+      await advance(2_000);
+
+      expect(document.body.textContent).not.toContain("Save a copy");
+      expect(server.markdown).toBe("- [x] task\n\ntext more and more");
+    });
+  }
+
+  it("an older save queued behind a closing save cannot tick-merge over it", async () => {
+    await open("- [ ] a\n- [ ] b");
+    keepaliveAnswerLost = true;
+    holdOrdinary = true;
+    // Tick a, tick b, then think better of a and untick it.
+    await type("- [x] a\n- [ ] b");
+    await advance(700);
+    expect(held).toHaveLength(1);
+    await type("- [x] a\n- [x] b");
+    await advance(700);
+    await type("- [ ] a\n- [x] b");
+    await act(async () => hide());
+    await settle();
+    expect(server.markdown).toBe("- [ ] a\n- [x] b");
+
+    // The first request dies on the wire and is retried; the queue moves on.
+    holdOrdinary = false;
+    await act(async () => held.shift()?.fail());
+    for (let second = 0; second < 10; second += 1) await advance(1_000);
+
+    // The owner's untick of a was never undone by a merge of an older body.
+    expect(history).not.toContain("- [x] a\n- [x] b");
+    expect(server.markdown).toBe("- [ ] a\n- [x] b");
+    expect(document.body.textContent).not.toContain("Save a copy");
   });
 
   it("a page over 64 KiB still leaves, as a span small enough for keepalive", async () => {
@@ -383,6 +494,28 @@ describe("the newest text leaves when the tab goes away", () => {
     expect(puts.length).toBeGreaterThanOrEqual(7);
     expect(server.markdown).toBe("Text the server refused for a while");
     expect(drafts()).toEqual([]);
+  });
+
+  it("a save that lands cancels the retry a failure scheduled", async () => {
+    await open();
+    failingPuts = 3;
+    await type("First");
+    await advance(700);
+    await advance(1_500);
+    await advance(1_500);
+    expect(puts).toHaveLength(3);
+    // A retry is now due 5 s after the failure. The next edit saves first.
+    await type("First and second");
+    await advance(700);
+    expect(server.markdown).toBe("First and second");
+    const afterSuccess = puts.length;
+    // Typed so its own debounce ends just after the retry would have fired.
+    await advance(3_900);
+    await type("First and second and third");
+    await advance(500);
+    expect(puts).toHaveLength(afterSuccess);
+    await advance(300);
+    expect(server.markdown).toBe("First and second and third");
   });
 
   it("does not retry a refusal that a retry cannot change", async () => {

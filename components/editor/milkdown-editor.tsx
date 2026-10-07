@@ -41,10 +41,12 @@ import {
 } from "./editing-core";
 import { normalizeLegacy } from "./normalize";
 import {
+  createPageRef,
   pageRef,
   setPageRefOrigin,
   syncLivePageInfo,
 } from "./page-ref";
+import { insertInline } from "./insert-inline";
 import {
   createPageRefNesting,
   standalonePageRefAnchors,
@@ -91,7 +93,7 @@ import { FloatingToolbar, type PageRef } from "./floating-toolbar";
 import { SlashMenu } from "./slash-menu";
 import { WikiLinkMenu } from "./wikilink-menu";
 import {
-  attachmentMarkdown,
+  attachmentLink,
   isSpreadsheetFile,
   uploadAttachment,
   type UploadedAttachment,
@@ -835,6 +837,15 @@ function Inner({
     syncLivePageInfo(refDirectory);
   }, [refDirectory]);
 
+  /** An uploaded file's link where the caret is, with the caret after it. */
+  const insertUploadedAttachment = (file: UploadedAttachment) => {
+    get()?.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      const tr = insertInline(view.state, attachmentLink(view.state.schema, file));
+      if (tr) view.dispatch(tr);
+    });
+  };
+
   const pickCalloutEmoji = (emoji: string) => {
     const anchor = calloutEmoji;
     setCalloutEmoji(null);
@@ -896,7 +907,7 @@ function Inner({
           const upload = capabilities.upload;
           if (!upload) return;
           uploadAttachment(f, upload).then((file) => {
-            if (file) get()?.action(insert(attachmentMarkdown(file)));
+            if (file) insertUploadedAttachment(file);
           });
           return;
         }
@@ -933,7 +944,7 @@ function Inner({
           const upload = capabilities.upload;
           if (!upload) return;
           uploadAttachment(file, upload).then((uploaded) => {
-            if (uploaded) get()?.action(insert(attachmentMarkdown(uploaded)));
+            if (uploaded) insertUploadedAttachment(uploaded);
           });
           return;
         }
@@ -956,8 +967,11 @@ function Inner({
         const pg = pages?.find((x) => x.id === internal.id);
         if (pg) {
           e.preventDefault();
-          const label = `${pg.icon ? pg.icon + " " : ""}${pg.title}`;
-          get()?.action(insert(`[${label}](${internal.href})`));
+          get()?.action((ctx) => {
+            const view = ctx.get(editorViewCtx);
+            const tr = insertInline(view.state, createPageRef(view.state.schema, pg));
+            if (tr) view.dispatch(tr);
+          });
         }
       }}
       onClickCapture={(e) => {

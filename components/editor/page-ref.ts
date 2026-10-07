@@ -1,4 +1,9 @@
-import type { DOMOutputSpec, Node as ProseNode, NodeType } from "@milkdown/kit/prose/model";
+import type {
+  DOMOutputSpec,
+  Node as ProseNode,
+  NodeType,
+  Schema,
+} from "@milkdown/kit/prose/model";
 import { Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import type { NodeView, NodeViewConstructor } from "@milkdown/kit/prose/view";
 import { Decoration, DecorationSet } from "@milkdown/kit/prose/view";
@@ -117,6 +122,17 @@ function livePageRefLabel(info: PageInfo) {
   return `${info.icon || "📄"} ${info.title}`;
 }
 
+/** A ref to `page`, with the label the serializer would write for it, so a
+ *  ref placed in the middle of a sentence reads back as one
+ *  (`keepsLinkWords`). The title is an attribute here, never Markdown: a
+ *  `]` or a `*` in it is the serializer's to escape. */
+export function createPageRef(
+  schema: Schema,
+  page: { id: string; title: string; icon?: string },
+): ProseNode {
+  return schema.nodes.page_ref.create({ id: page.id, label: livePageRefLabel(page) });
+}
+
 /** Text rendered by the atomic page-ref NodeView. Search indexing uses this
  * same helper so its visible-text projection cannot drift from the editor. */
 export function pageRefVisibleText(node: ProseNode) {
@@ -147,11 +163,14 @@ export function pageRefVisibleParts(
     : { icon: null, rest: text };
 }
 
-function walk(node: MarkdownNode, fn: (node: MarkdownNode) => MarkdownNode | null | undefined | void) {
+function walk(
+  node: MarkdownNode,
+  fn: (node: MarkdownNode, parent: MarkdownNode) => MarkdownNode | null | undefined | void,
+) {
   if (!node || typeof node !== "object") return;
   if (Array.isArray(node.children)) {
     node.children = node.children.map((child) => {
-      const replaced = fn(child);
+      const replaced = fn(child, node);
       const next = replaced ?? child;
       walk(next, fn);
       return next;
@@ -159,14 +178,38 @@ function walk(node: MarkdownNode, fn: (node: MarkdownNode) => MarkdownNode | nul
   }
 }
 
+function plainText(node: MarkdownNode): string {
+  if (typeof node.value === "string") return node.value;
+  return (node.children ?? []).map(plainText).join("");
+}
+
+/** WHICH PAGE LINKS ARE REFS, AND WHICH ARE THE READER'S WORDS.
+ *
+ *  A ref draws the page's current title, and the file follows a rename. That
+ *  is right for a ref and wrong for words the reader linked: "Link to page"
+ *  over "the spec" saved `[the spec](/p/x)`, and the next open drew the title
+ *  in their place. The Markdown is the same link either way, so the reading
+ *  decides. A link is a ref when it is the whole line (a page row, the shape
+ *  the subpage list and a centre drop are made of), when its label is the
+ *  shape the serializer writes for a ref (the page's icon, a space, then the
+ *  title), or when it is the page's title as it is now. Anything else in a
+ *  line of prose stays a link with the reader's words. */
+function keepsLinkWords(label: string, id: string, alone: boolean): boolean {
+  if (alone || !label.trim() || LEADING_ICON.test(label)) return false;
+  return livePageInfo.get(id)?.title !== label;
+}
+
 /** Rewrite only exact relative or same-origin Brain page destinations into
- * pageRef nodes. Non-exact and external links stay ordinary links. */
+ * pageRef nodes. Non-exact and external links stay ordinary links, and so
+ * does a link whose words are the reader's (`keepsLinkWords`). */
 export const remarkPageRef = $remark("remarkPageRef", () => () => {
   return (tree: Root) => {
-    walk(tree as unknown as MarkdownNode, (n) => {
+    walk(tree as unknown as MarkdownNode, (n, parent) => {
       if (n?.type !== "link" || typeof n.url !== "string") return null;
       const internal = classifyInternalPageLink(n.url, pageRefOrigin);
       if (!internal) return null;
+      const alone = (parent.children ?? []).length === 1;
+      if (keepsLinkWords(plainText(n), internal.id, alone)) return null;
       const label = (n.children ?? [])
         .map((child) => (typeof child.value === "string" ? child.value : ""))
         .join("");

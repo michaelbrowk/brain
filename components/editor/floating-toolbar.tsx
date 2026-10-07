@@ -8,7 +8,7 @@ import {
   TextSelection,
   type EditorState,
 } from "@milkdown/kit/prose/state";
-import { callCommand, insert, markdownToSlice } from "@milkdown/kit/utils";
+import { callCommand, markdownToSlice } from "@milkdown/kit/utils";
 import {
   toggleStrongCommand,
   toggleEmphasisCommand,
@@ -28,6 +28,7 @@ import { createPortal } from "react-dom";
 import { Icon } from "../ui/icon";
 import { DUR, EASE_OUT } from "@/lib/motion";
 import { EDITOR_DOC_CHANGED_EVENT, notifyNestedTableBlocked } from "@/lib/editor-events";
+import { linkSelection } from "./insert-inline";
 import { isInTable } from "./table-guard";
 import { selectionIsInQuote, selectionIsTask, toggleTaskCommand } from "./task-checkbox";
 
@@ -483,8 +484,12 @@ export function FloatingToolbar({
   );
 
   const insertPageLink = (pg: PageRef) => {
-    const label = `${pg.icon ? pg.icon + " " : ""}${pg.title}`;
-    getEditor()?.action(insert(`[${label}](/p/${pg.id})`));
+    getEditor()?.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      const tr = linkSelection(view.state, `/p/${pg.id}`);
+      if (tr) view.dispatch(tr);
+      view.focus();
+    });
     setLinkOpen(false);
     setLinkQuery("");
     setPos(null);
@@ -585,7 +590,13 @@ export function FloatingToolbar({
                     e.preventDefault();
                     closeLinkAndRestoreSelection();
                   }
-                  if (e.key === "Enter" && linkResults[0]) insertPageLink(linkResults[0]);
+                  if (e.key === "Enter" && linkResults[0]) {
+                    // Taken here: the editor has the focus back by the time
+                    // the key's default runs, and it would split the line
+                    // where the linked words are.
+                    e.preventDefault();
+                    insertPageLink(linkResults[0]);
+                  }
                 }}
                 placeholder="Link to page…"
                 className="h-8 w-full rounded-sm border border-line bg-surface px-2.5 text-[13px] text-ink outline-none placeholder:text-ink-3 max-md:text-[16px]"

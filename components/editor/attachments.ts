@@ -1,5 +1,6 @@
 "use client";
 
+import type { Node as ProseNode, Schema } from "@milkdown/kit/prose/model";
 import { apiFetch, CLIENT_ID } from "@/lib/client";
 
 export interface UploadedAttachment {
@@ -138,16 +139,13 @@ export function isSpreadsheetFile(file: File): boolean {
   return /\.(xlsx|xls|csv)$/i.test(file.name);
 }
 
-function escapeLinkLabel(value: string): string {
-  return value
-    .replace(/\\/g, "\\\\")
-    .replace(/\[/g, "\\[")
-    .replace(/\]/g, "\\]")
-    .replace(/[\r\n]+/g, " ")
-    .trim();
-}
-
-export function attachmentMarkdown(file: Pick<UploadedAttachment, "url" | "name">): string {
-  const name = escapeLinkLabel(file.name) || "attachment";
-  return `[📎 ${name}](${file.url})`;
+/** An uploaded file as the line shows it: `📎 name`, linked to the file. A
+ *  node, not Markdown: a name with `]` or `*` in it is the serializer's to
+ *  escape, and the link goes where the caret is (`insert-inline.ts`). */
+export function attachmentLink(
+  schema: Schema,
+  file: Pick<UploadedAttachment, "url" | "name">,
+): ProseNode {
+  const name = file.name.replace(/[\r\n]+/g, " ").trim() || "attachment";
+  return schema.text(`📎 ${name}`, [schema.marks.link.create({ href: file.url })]);
 }

@@ -392,7 +392,9 @@ const IOS_ENTER_FALLBACK_MS = 300;
  *  split is refused at `beforeinput` and the title's own Enter runs instead.
  *  ProseMirror still replays the Enter it held back about 200ms later (its
  *  fallback for a keyboard that changed nothing), so that one replay is
- *  swallowed: the caret is in the body by then, and it would open a line. */
+ *  swallowed: the caret is in the body by then, and it would open a line.
+ *  The replay calls `handleKeyDown` without a DOM event, so any real keydown
+ *  ends the wait: a second Enter the writer presses at once is theirs. */
 export const toggleTitleInput = $prose(() => {
   const handledAt = new WeakMap<EditorView, number>();
   return new Plugin({
@@ -407,6 +409,10 @@ export const toggleTitleInput = $prose(() => {
           enterFromTitle(view.state, view.dispatch, view);
           handledAt.set(view, Date.now());
           return true;
+        },
+        keydown: (view) => {
+          handledAt.delete(view);
+          return false;
         },
       },
       handleKeyDown: (view, event) => {

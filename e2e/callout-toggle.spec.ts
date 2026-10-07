@@ -135,3 +135,27 @@ test("an existing toggle's title edits in place without folding it", async ({ pa
     .poll(() => savedMarkdown(page, id), { timeout: 15_000 })
     .toBe(':::toggle{summary="Details and more"}\nHidden\n:::');
 });
+
+test("two quick Enters in a toggle title open two body lines", async ({ page }) => {
+  await login(page);
+  const id = await createPage(page, "Toggle double Enter", ':::toggle{summary="Title"}\nbody\n:::');
+  await page.goto(`/p/${id}`);
+  const toggle = page
+    .getByRole("textbox", { name: "Page content" })
+    .locator("details.brain-toggle");
+  const title = toggle.locator(".brain-toggle-summary");
+  await expect(title).toHaveText("Title");
+
+  await title.click();
+  await page.keyboard.press("End");
+  // back to back, well inside the window ProseMirror's iOS replay waits for
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("x");
+
+  await expect(title).toHaveText("Title");
+  await expect(toggle.locator(":scope > p")).toHaveText(["", "x", "body"]);
+  await expect
+    .poll(() => savedMarkdown(page, id), { timeout: 15_000 })
+    .toBe(':::toggle{summary="Title"}\n<br />\n\nx\n\nbody\n:::');
+});

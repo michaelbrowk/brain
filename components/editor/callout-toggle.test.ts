@@ -147,6 +147,39 @@ describe("inserting a toggle", () => {
     expect(serialize()).toBe('Before\n\n:::toggle{summary="Summary"}\nbody\n:::');
   });
 
+  it("lets a real Enter pressed right after the title's iOS Enter through", async () => {
+    const realEnter = (view: EditorView) =>
+      view.dom.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", keyCode: 13, bubbles: true, cancelable: true }),
+      );
+    const iosSplit = (view: EditorView) =>
+      view.dom.dispatchEvent(
+        new InputEvent("beforeinput", { inputType: "insertParagraph", bubbles: true, cancelable: true }),
+      );
+
+    // a second Enter at once, in the body the first one opened
+    const twice = await mount(':::toggle{summary="Title"}\nbody\n:::');
+    twice.view.dispatch(twice.view.state.tr.setSelection(TextSelection.create(twice.view.state.doc, 7)));
+    iosSplit(twice.view);
+    realEnter(twice.view);
+    type(twice.view, "x");
+    expect(twice.serialize()).toBe(':::toggle{summary="Title"}\n<br />\n\nx\n\nbody\n:::');
+
+    // an Enter at once somewhere else on the page
+    const elsewhere = await mount(':::toggle{summary="Title"}\nbody\n:::\n\nafter');
+    const { view } = elsewhere;
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 7)));
+    iosSplit(view);
+    view.dispatch(
+      view.state.tr.setSelection(TextSelection.create(view.state.doc, view.state.doc.content.size - 1)),
+    );
+    realEnter(view);
+    type(view, "next");
+    expect(elsewhere.serialize()).toBe(
+      ':::toggle{summary="Title"}\n<br />\n\nbody\n:::\n\nafter\n\nnext',
+    );
+  });
+
   it("draws the title placeholder without putting it in the file", async () => {
     const { editor, root, serialize } = await mountAtEmptyLine();
     editor.ctx.get(commandsCtx).call(insertToggleCommand.key);

@@ -59,7 +59,7 @@ import {
   showSearchHighlight,
 } from "./search-highlight";
 import { taskCheckbox, taskCheckboxMarkdown } from "./task-checkbox";
-import { toggle } from "./toggle";
+import { toggle, toggleMemoryCtx } from "./toggle";
 import { images } from "./image";
 import { handleWrapperImageDrop, imageUploadPlugin } from "./image-upload";
 import { math } from "./math";
@@ -171,6 +171,10 @@ interface EditorProps {
    *  the checkbox bundle goes in: a `- [ ]` line still draws and still ticks,
    *  and nothing offers to make a record out of it. */
   tasksEnabled?: boolean;
+  /** The page this editor's toggles are remembered under on this device, so
+   *  a folded section stays folded when the page is opened again. Absent, a
+   *  toggle opens unfolded on every mount. */
+  toggleMemoryKey?: string;
 }
 
 type CalloutEmojiAnchor = CalloutEmojiEventDetail & { id: number };
@@ -388,6 +392,7 @@ function Inner({
   caretOnMount,
   capabilities = {},
   tasksEnabled = true,
+  toggleMemoryKey = "",
 }: EditorProps) {
   // One directory for the page-ref blocks and the serializer, whichever half
   // the surface has.
@@ -482,6 +487,7 @@ function Inner({
       .config((ctx) => {
         ctx.set(rootCtx, root);
         ctx.set(defaultValueCtx, value);
+        ctx.set(toggleMemoryCtx.key, toggleMemoryKey);
         setPageRefOrigin(window.location.origin);
         ctx.set(editorViewOptionsCtx, {
           editable: () => !pageRefNestingPending && !mutationsFrozen,

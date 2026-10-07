@@ -11,9 +11,9 @@ import type {
 } from "@milkdown/kit/transformer";
 import { $command, $nodeSchema, $remark, $view } from "@milkdown/kit/utils";
 import remarkDirectivePlugin from "remark-directive";
+import { insertContainerBlock } from "./insert-block";
 
 const DEFAULT_ICON = "💡";
-const DEFAULT_TEXT = "Callout";
 export const CALLOUT_EMOJI_EVENT = "brain-callout-emoji";
 
 export interface CalloutEmojiEventDetail {
@@ -172,15 +172,19 @@ export const calloutView = $view(calloutSchema.node, () => ((
   };
 }) satisfies NodeViewConstructor);
 
+/** A new callout holds one empty line with the caret in it. It used to hold
+ *  the word "Callout" with the caret after it, so the first thing typed was
+ *  saved as "Calloutnote body". The empty line wears the editor's empty-block
+ *  hint, which is the placeholder: drawn, never written. */
 export const insertCalloutCommand = $command<unknown, "InsertCallout">(
   "InsertCallout",
   (ctx) => (payload) => (state, dispatch) => {
     const icon = typeof payload === "string" ? payload : DEFAULT_ICON;
-    const paragraph = state.schema.nodes.paragraph.create(null, state.schema.text(DEFAULT_TEXT));
+    const paragraph = state.schema.nodes.paragraph.create();
     const node = calloutSchema.type(ctx).create({ icon: readIcon(icon) }, paragraph);
 
     if (!dispatch) return true;
-    dispatch(state.tr.replaceSelectionWith(node).scrollIntoView());
+    dispatch(insertContainerBlock(state.tr, node).scrollIntoView());
     return true;
   },
 );

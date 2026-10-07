@@ -186,6 +186,7 @@ export function PageBody({
           onCreatePageAtCursor={onCreatePageAtCursor}
           capabilities={OWNER_CAPABILITIES}
           tasksEnabled={tasksEnabled}
+          toggleMemoryKey={page.id}
         />
         <Subpages
           pages={subpages}

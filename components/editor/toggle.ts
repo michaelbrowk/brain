@@ -85,6 +85,8 @@ function createToggleArrow() {
   arrow.type = "button";
   arrow.className = "brain-toggle-arrow";
   arrow.setAttribute("contenteditable", "false");
+  // Safari leaves a button out of the Tab order unless it is asked in.
+  arrow.setAttribute("tabindex", "0");
 
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", "0 0 24 24");
@@ -105,10 +107,13 @@ function createToggleArrow() {
   return arrow;
 }
 
-function labelArrow(arrow: Element | null, open: boolean) {
+/** Each arrow is named after its own toggle, so a list of controls read
+ *  out by a screen reader says which section each one folds. */
+function labelArrow(arrow: Element | null, open: boolean, title: string) {
   if (!arrow) return;
+  const name = title.trim() || "toggle";
   arrow.setAttribute("aria-expanded", String(open));
-  arrow.setAttribute("aria-label", open ? "Collapse toggle" : "Expand toggle");
+  arrow.setAttribute("aria-label", `${open ? "Collapse" : "Expand"} ${name}`);
 }
 
 export const remarkToggleDirective = $remark(
@@ -191,6 +196,9 @@ export const toggleSummaryView = $view(toggleSummarySchema.node, () => ((
 ): NodeView => {
   const dom = document.createElement("summary");
   dom.className = "brain-toggle-head";
+  // A `<summary>` is a tab stop of its own, which here leads nowhere: the
+  // title is text in the editor and the arrow is the control.
+  dom.setAttribute("tabindex", "-1");
 
   const arrow = createToggleArrow();
   const contentDOM = document.createElement("span");
@@ -286,7 +294,7 @@ export const toggleView = $view(toggleSchema.node, (ctx) => ((
   };
 
   const onToggle = () => {
-    labelArrow(arrow(), details.open);
+    labelArrow(arrow(), details.open, node.firstChild?.textContent ?? "");
     if (!details.open) keepCaretVisible();
     if (!memoryKey) return;
     identity = identityAt(node);
@@ -300,7 +308,7 @@ export const toggleView = $view(toggleSchema.node, (ctx) => ((
   details.addEventListener("toggle", onToggle);
   // The title's view is built after this one, so its arrow is labelled once
   // both are in place.
-  queueMicrotask(() => labelArrow(arrow(), details.open));
+  queueMicrotask(() => labelArrow(arrow(), details.open, node.firstChild?.textContent ?? ""));
 
   return {
     dom: details,
@@ -308,7 +316,7 @@ export const toggleView = $view(toggleSchema.node, (ctx) => ((
     update: (updated: ProseNode) => {
       if (updated.type.name !== "toggle") return false;
       node = updated;
-      labelArrow(arrow(), details.open);
+      labelArrow(arrow(), details.open, node.firstChild?.textContent ?? "");
       if (!memoryKey || details.open) return true;
       // A folded toggle whose title changed is remembered under its new name.
       const next = identityAt(updated);
@@ -381,8 +389,29 @@ const unwrapFromTitle: Command = (state, dispatch) => {
 /** Offered the key before the preset's own Enter and Backspace; see
  *  `taskSplitKeymap` for the ordering. */
 export const toggleKeymap = $prose(() =>
-  keymap({ Enter: enterFromTitle, Backspace: unwrapFromTitle }),
+  keymap({ Enter: enterFromTitle, "Shift-Enter": enterFromTitle, Backspace: unwrapFromTitle }),
 );
+
+/** Folded toggles a page no longer has are forgotten when it opens, so the
+ *  device does not keep a list for sections deleted long ago, and a new
+ *  toggle that happens to take an old one's name does not open folded. */
+export const toggleMemoryPrune = $prose((ctx) => new Plugin({
+  key: new PluginKey("brainToggleMemoryPrune"),
+  view: (view) => {
+    const memoryKey = ctx.get(toggleMemoryCtx.key);
+    if (memoryKey) {
+      const present = new Set<string>();
+      view.state.doc.descendants((node, pos) => {
+        if (node.type.name === "toggle") present.add(toggleIdentity(view.state.doc, pos, node));
+        return true;
+      });
+      const closed = readClosed(memoryKey);
+      const kept = new Set([...closed].filter((identity) => present.has(identity)));
+      if (kept.size !== closed.size) writeClosed(memoryKey, kept);
+    }
+    return {};
+  },
+}));
 
 const IOS_ENTER_FALLBACK_MS = 300;
 
@@ -457,5 +486,6 @@ export const toggle = [
   toggleView,
   toggleTitleInput,
   toggleKeymap,
+  toggleMemoryPrune,
   insertToggleCommand,
 ].flat();

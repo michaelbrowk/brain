@@ -94,10 +94,10 @@ test("/toggle takes a title, Enter goes to the body, and a fold survives a reloa
     .poll(() => savedMarkdown(page, id), { timeout: 15_000 })
     .toBe(`Intro\n\n${saved}`);
 
-  const arrow = toggle.getByRole("button", { name: "Collapse toggle" });
+  const arrow = toggle.getByRole("button", { name: "Collapse Two words" });
   await arrow.click();
   await expect(toggle).not.toHaveAttribute("open", "");
-  await expect(toggle.getByRole("button", { name: "Expand toggle" })).toHaveAttribute(
+  await expect(toggle.getByRole("button", { name: "Expand Two words" })).toHaveAttribute(
     "aria-expanded",
     "false",
   );
@@ -111,7 +111,7 @@ test("/toggle takes a title, Enter goes to the body, and a fold survives a reloa
   // folding is reading, not writing: the file is what it was
   expect(await savedMarkdown(page, id)).toBe(`Intro\n\n${saved}`);
 
-  await reopened.getByRole("button", { name: "Expand toggle" }).click();
+  await reopened.getByRole("button", { name: "Expand Two words" }).click();
   await expect(reopened).toHaveAttribute("open", "");
 });
 

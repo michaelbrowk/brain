@@ -20,6 +20,7 @@ import { callout, insertCalloutCommand } from "./callout";
 import { columns } from "./columns";
 import { editingCore } from "./editing-core";
 import { emptyBlocks } from "./empty-block";
+import { searchHighlight, showSearchHighlight } from "./search-highlight";
 import { insertToggleCommand, toggle, toggleMemoryCtx } from "./toggle";
 
 const editors: Editor[] = [];
@@ -48,6 +49,7 @@ async function mount(markdown: string, memoryKey = "") {
     .use(emptyBlocks)
     .use(callout)
     .use(toggle)
+    .use(searchHighlight)
     .use(history)
     .use(listener)
     .create();
@@ -362,6 +364,52 @@ describe("inserting a block anywhere the caret can be", () => {
       });
     }
   }
+});
+
+describe("the toggle's smaller edges", () => {
+  it("takes Shift+Enter in the title the way it takes Enter", async () => {
+    const { view, serialize } = await mount(':::toggle{summary="Title"}\nbody\n:::');
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 4)));
+    const event = new KeyboardEvent("keydown", { key: "Enter", shiftKey: true, bubbles: true, cancelable: true });
+    expect(view.someProp("handleKeyDown", (f) => f(view, event))).toBe(true);
+    expect(caretParent(view)).toBe("paragraph");
+    expect(serialize()).toBe(':::toggle{summary="Title"}\n<br />\n\nbody\n:::');
+  });
+
+  it("names each arrow after its toggle, and the arrow, not the title row, is the tab stop", async () => {
+    const { root, view } = await mount(':::toggle{summary="Plans"}\nx\n:::\n\n:::toggle{summary=""}\ny\n:::');
+    await settle();
+    const [plans, untitled] = [...root.querySelectorAll<HTMLElement>("details.brain-toggle")];
+    const arrow = plans.querySelector<HTMLButtonElement>(".brain-toggle-arrow")!;
+    expect(arrow.getAttribute("aria-label")).toBe("Collapse Plans");
+    expect(arrow.getAttribute("tabindex")).toBe("0");
+    expect(plans.querySelector("summary")!.getAttribute("tabindex")).toBe("-1");
+    expect(untitled.querySelector(".brain-toggle-arrow")!.getAttribute("aria-label")).toBe("Collapse toggle");
+
+    arrow.click();
+    await settle();
+    expect(arrow.getAttribute("aria-label")).toBe("Expand Plans");
+    // the name follows a rename
+    view.dispatch(view.state.tr.insertText("!", 7));
+    expect(arrow.getAttribute("aria-label")).toBe("Expand Plans!");
+  });
+
+  it("opens a folded toggle when a search lands in its body", async () => {
+    const { root, view } = await mount(':::toggle{summary="T"}\nhidden words\n:::');
+    const details = root.querySelector<HTMLDetailsElement>("details.brain-toggle")!;
+    details.open = false;
+    await settle();
+    const found = showSearchHighlight(view, 1, { exact: "hidden words", occurrence: 0, before: "", after: "" });
+    expect(found.status).toBe("exact");
+    expect(details.open).toBe(true);
+  });
+
+  it("forgets folded toggles the page no longer has", async () => {
+    localStorage.setItem("brain:toggles-closed:page-1", JSON.stringify(["A#0", "Gone#0"]));
+    const { root } = await mount(':::toggle{summary="A"}\nx\n:::', "page-1");
+    expect(root.querySelector<HTMLDetailsElement>("details.brain-toggle")!.open).toBe(false);
+    expect(JSON.parse(localStorage.getItem("brain:toggles-closed:page-1")!)).toEqual(["A#0"]);
+  });
 });
 
 describe("a callout and a toggle nested in each other", () => {

@@ -12,7 +12,8 @@ import { commonmark, syncHeadingIdPlugin } from "@milkdown/kit/preset/commonmark
 import { gfm } from "@milkdown/kit/preset/gfm";
 import { history } from "@milkdown/kit/plugin/history";
 import { listener } from "@milkdown/kit/plugin/listener";
-import { TextSelection } from "@milkdown/kit/prose/state";
+import { undo } from "@milkdown/kit/prose/history";
+import { NodeSelection, TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import { afterEach, describe, expect, it } from "vitest";
 import { callout, insertCalloutCommand } from "./callout";
@@ -280,6 +281,87 @@ describe("the toggle's open state", () => {
     const second = await mount(renamed, "page-1");
     expect(second.root.querySelector<HTMLDetailsElement>("details.brain-toggle")!.open).toBe(false);
   });
+});
+
+describe("inserting a block anywhere the caret can be", () => {
+  /** Where the caret is when the command runs: the empty line the slash menu
+   *  leaves (`/x` deleted), a place in a line with words, or a selection. */
+  type Place = (view: EditorView) => void;
+  const atMarker: Place = (view) => {
+    let pos = -1;
+    view.state.doc.descendants((node, nodePos) => {
+      if (pos < 0 && node.isText && node.text?.includes("/x")) pos = nodePos + node.text.indexOf("/x");
+    });
+    // the deletion stays out of the history, so one undo is the insert alone
+    const tr = view.state.tr.setSelection(TextSelection.create(view.state.doc, pos + 2));
+    view.dispatch(tr.delete(pos, pos + 2).setMeta("addToHistory", false));
+  };
+  const at = (offset: (doc: EditorView["state"]["doc"]) => number): Place => (view) =>
+    view.dispatch(
+      view.state.tr.setSelection(TextSelection.create(view.state.doc, offset(view.state.doc))),
+    );
+
+  const places: Array<[string, string, Place]> = [
+    ["the first line", "/x\n\nafter", atMarker],
+    ["the last line", "before\n\n/x", atMarker],
+    ["a list item's first line", "- one\n- /x\n- three", atMarker],
+    ["a list item's second paragraph", "- one\n\n  /x", atMarker],
+    ["a column", "::::cols\n:::col\nleft\n\n/x\n:::\n:::col\nright\n:::\n::::", atMarker],
+    ["a callout", '::::callout{icon="💡"}\ntext\n\n/x\n::::', atMarker],
+    ["a toggle's body", ':::toggle{summary="T"}\ntext\n\n/x\n:::', atMarker],
+    ["a quote", "> quote\n>\n> /x", atMarker],
+    ["a task line", "- [ ] /x", atMarker],
+    ["the start of a line with words", "hello", at(() => 1)],
+    ["the middle of a line with words", "hello", at(() => 3)],
+    ["the end of a line with words", "hello", at(() => 6)],
+    ["a selection", "hello world", (view) =>
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 2, 8)))],
+    ["a selected image", "![a](x.png) caption", (view) =>
+      view.dispatch(view.state.tr.setSelection(NodeSelection.create(view.state.doc, 1)))],
+  ];
+
+  for (const [label, command, blockName] of [
+    ["callout", insertCalloutCommand, "callout"],
+    ["toggle", insertToggleCommand, "toggle"],
+  ] as const) {
+    for (const [where, markdown, place] of places) {
+      it(`puts a ${label} in ${where} with the caret in it, and keeps every word`, async () => {
+        const { editor, view } = await mount(markdown);
+        place(view);
+        const { from, to } = view.state.selection;
+        const kept = view.state.doc.textBetween(0, from, "\n") + view.state.doc.textBetween(to, view.state.doc.content.size, "\n");
+        const count = () => {
+          let n = 0;
+          view.state.doc.descendants((node) => {
+            if (node.type.name === blockName) n += 1;
+          });
+          return n;
+        };
+        const blocksBefore = count();
+        const textBefore = view.state.doc.textContent;
+        editor.ctx.get(commandsCtx).call(command.key);
+        expect(count()).toBe(blocksBefore + 1);
+
+        // the caret is on the block's first line, which is empty
+        const $caret = view.state.selection.$from;
+        const depths = Array.from({ length: $caret.depth + 1 }, (_, d) => $caret.node(d).type.name);
+        expect(depths).toContain(blockName);
+        expect($caret.parent.content.size).toBe(0);
+        expect(caretParent(view)).toBe(blockName === "toggle" ? "toggle_summary" : "paragraph");
+
+        // nothing the writer had is gone (a selection is replaced, as typing
+        // would), and the block adds no words of its own
+        const all = view.state.doc.textBetween(0, view.state.doc.content.size, "\n");
+        expect(all.replace(/\s/g, "")).toBe(kept.replace(/\s/g, ""));
+
+        // and one undo takes the block back out (the trailing-line plugin
+        // may leave its writable last line behind, which is not history)
+        undo(view.state, view.dispatch);
+        expect(count()).toBe(blocksBefore);
+        expect(view.state.doc.textContent).toBe(textBefore);
+      });
+    }
+  }
 });
 
 describe("a callout and a toggle nested in each other", () => {

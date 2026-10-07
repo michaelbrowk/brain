@@ -26,17 +26,29 @@ export function insertContainerBlock(tr: Transaction, node: ProseNode): Transact
     return tr.setSelection(Selection.near(tr.doc.resolve(start + 1), 1));
   }
 
-  const before = tr.selection.from;
+  // Where the block went is read from the insert's own steps: each step's
+  // map names the range it wrote, carried through the steps after it. The
+  // caret's old position is no guide, because the fit can split the line or
+  // the list item around it and put the block on either side.
+  const firstStep = tr.steps.length;
   tr.replaceSelectionWith(node);
-  // The inserted content lies between the two sides of where the caret was.
-  const from = tr.mapping.map(before, -1);
-  const to = tr.mapping.map(before, 1);
+  let from = Infinity;
+  let to = -Infinity;
+  for (let index = firstStep; index < tr.steps.length; index += 1) {
+    const later = tr.mapping.slice(index + 1);
+    tr.steps[index].getMap().forEach((_oldStart, _oldEnd, newStart, newEnd) => {
+      from = Math.min(from, later.map(newStart, -1));
+      to = Math.max(to, later.map(newEnd, 1));
+    });
+  }
   let start = -1;
-  tr.doc.nodesBetween(from, to, (child, pos) => {
-    if (start >= 0) return false;
-    if (child.type === node.type && pos >= from) start = pos;
-    return start < 0;
-  });
+  if (from <= to) {
+    tr.doc.nodesBetween(from, to, (child, pos) => {
+      if (start >= 0) return false;
+      if (child.type === node.type && pos >= from && pos + child.nodeSize <= to) start = pos;
+      return start < 0;
+    });
+  }
   if (start < 0) return tr;
   return tr.setSelection(Selection.near(tr.doc.resolve(start + 1), 1));
 }

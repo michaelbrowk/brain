@@ -64,7 +64,8 @@ import { images } from "./image";
 import { handleWrapperImageDrop, imageUploadPlugin } from "./image-upload";
 import { math } from "./math";
 import { linkPreviewPlugin } from "./link-preview";
-import { noNestedTables } from "./table-guard";
+import { isInTable, noNestedTables } from "./table-guard";
+import { tableCells } from "./table-cell";
 import { loadGuard } from "./load-guard";
 import { EditorBoundary } from "./editor-boundary";
 import { EmojiPicker } from "../emoji-picker";
@@ -550,6 +551,7 @@ function Inner({
       // after the preset: the extended image and link schemas replace it
       .use(attachmentRefs)
       .use(noNestedTables)
+      .use(tableCells)
       .use(normalizeLegacy)
       .use(editingCore)
       .use(colorMarks)
@@ -922,8 +924,13 @@ function Inner({
           return;
         }
         const t = e.clipboardData?.getData("text/plain")?.trim();
-        // pasting a range from Excel/Sheets becomes a table
-        const tsv = t ? parseTsv(t) : null;
+        // pasting a range from Excel/Sheets becomes a table, except inside a
+        // table, where the range fills cells from the caret instead
+        // (`table-cell.ts`): a table inserted there split the one it was in
+        const inTable = get()?.action((ctx) =>
+          isInTable(ctx.get(editorViewCtx).state.selection.$from),
+        );
+        const tsv = t && !inTable ? parseTsv(t) : null;
         if (tsv) {
           e.preventDefault();
           get()?.action(insert(toGfmTable(tsv)));

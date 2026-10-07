@@ -515,13 +515,13 @@ export const outdentCode: Command = (state, dispatch) => {
 /** The browser's Tab carries the focus to the next control, and from inside
  *  a page that throws away the keys typed after it. Whatever nothing else
  *  answered (a list item with nothing to nest under, a paragraph, a heading)
- *  ends here and keeps the focus where it is. A page that cannot be edited
- *  lets the browser have it: there, moving on is what Tab is for. So does a
- *  control inside the page that holds the focus itself (an image's alignment
- *  buttons, a callout's icon), which Tab leaves the way it leaves any
- *  button. */
+ *  ends here and keeps the focus where it is. A control inside the page that
+ *  holds the focus itself (an image's alignment buttons, a callout's icon)
+ *  lets Tab leave the way it leaves any button. A page that cannot be edited
+ *  never gets here: ProseMirror runs no keymap on it, and the browser has
+ *  Tab there, where moving on is what it is for. */
 export const keepTabInEditor: Command = (_state, _dispatch, view) =>
-  !!view?.editable && view.dom.ownerDocument.activeElement === view.dom;
+  !!view && view.dom.ownerDocument.activeElement === view.dom;
 
 /** The code block first, above every other Tab; the catch-all last, below
  *  the list keymap's nest and lift (50) and the table's cells (110). Two

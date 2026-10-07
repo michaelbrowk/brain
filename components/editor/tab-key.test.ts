@@ -13,7 +13,7 @@ import { gfm } from "@milkdown/kit/preset/gfm";
 import { TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { editingCore } from "./editing-core";
+import { editingCore, outdentCode } from "./editing-core";
 import { tableCells } from "./table-cell";
 
 async function mount(markdown: string, editable = true) {
@@ -190,5 +190,56 @@ describe("Escape", () => {
       document.removeEventListener("keydown", menu, true);
       await editor.destroy();
     }
+  });
+});
+
+describe("the edges of Tab", () => {
+  it("leaves alone a line the selection only touches at its very start", async () => {
+    const { editor, view, markdownNow } = await mount("```\naa\nbb\n```");
+    // From inside the first line to the first position of the second.
+    const start = view.state.doc.firstChild ? 1 : 0;
+    view.dispatch(
+      view.state.tr.setSelection(TextSelection.create(view.state.doc, start + 1, start + 3)),
+    );
+    expect(key(view)).toBe(true);
+    expect(markdownNow()).toContain("```\n  aa\nbb\n```");
+    await editor.destroy();
+  });
+
+  it("outdents a one-space and a tab indent as well as two spaces", async () => {
+    const { editor, view, markdownNow } = await mount("```\n a\n\tb\n```");
+    select(view, "a", "b");
+    expect(key(view, true)).toBe(true);
+    expect(markdownNow()).toContain("```\na\nb\n```");
+    await editor.destroy();
+  });
+
+  it("keeps Shift-Tab in a code block even with nothing to outdent", async () => {
+    const { editor, view } = await mount("```\na\n```");
+    select(view, "a");
+    expect(outdentCode(view.state, view.dispatch, view)).toBe(true);
+    await editor.destroy();
+  });
+
+  it("indents a code block inside a list item instead of nesting the item", async () => {
+    const { editor, view, markdownNow } = await mount("- one\n- two\n\n  ```\n  code\n  ```");
+    select(view, "code");
+    expect(key(view)).toBe(true);
+    expect(markdownNow()).toContain("code  ");
+    let lists = 0;
+    view.state.doc.descendants((node) => {
+      if (node.type.name === "bullet_list") lists += 1;
+    });
+    expect(lists).toBe(1);
+    await editor.destroy();
+  });
+
+  it("lets Tab go once the page stops being editable, focus or not", async () => {
+    const { editor, view } = await mount("prose");
+    select(view, "pro");
+    expect(document.activeElement).toBe(view.dom);
+    view.setProps({ editable: () => false });
+    expect(key(view)).toBe(false);
+    await editor.destroy();
   });
 });

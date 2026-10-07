@@ -1,6 +1,7 @@
 import { gapCursor } from "@milkdown/kit/prose/gapcursor";
 import type { Node as ProseNode, NodeType } from "@milkdown/kit/prose/model";
 import {
+  type Command,
   type EditorState,
   Plugin,
   PluginKey,
@@ -8,7 +9,7 @@ import {
   type Transaction,
 } from "@milkdown/kit/prose/state";
 import { Decoration, DecorationSet } from "@milkdown/kit/prose/view";
-import { $prose } from "@milkdown/kit/utils";
+import { $prose, $useKeymap } from "@milkdown/kit/utils";
 
 /** Core caret behaviors every block editor needs.
  *
@@ -448,9 +449,105 @@ export function focusDocumentEnd(view: {
   return true;
 }
 
+/** Two spaces: the indent Brain's own Markdown uses for a nested list, and
+ *  what a code block's Tab inserts. */
+const CODE_INDENT = "  ";
+
+/** The offsets, inside a code block's text, of every line the selection
+ *  touches. A selection that ends at the very start of a line leaves that
+ *  line alone, as a code editor does. */
+function codeLineStarts(text: string, from: number, to: number): number[] {
+  const starts = [text.lastIndexOf("\n", from - 1) + 1];
+  for (
+    let at = text.indexOf("\n", from);
+    at !== -1 && at + 1 < to;
+    at = text.indexOf("\n", at + 1)
+  ) {
+    starts.push(at + 1);
+  }
+  return starts;
+}
+
+function codeBlockSelection(state: EditorState) {
+  const { $from, $to } = state.selection;
+  if (!$from.parent.type.spec.code || !$from.sameParent($to)) return null;
+  return {
+    start: $from.start(),
+    text: $from.parent.textContent,
+    from: $from.parentOffset,
+    to: $to.parentOffset,
+  };
+}
+
+/** Tab in a code block indents: at the caret, or every line of a selection
+ *  that spans more than one. */
+export const indentCode: Command = (state, dispatch) => {
+  const code = codeBlockSelection(state);
+  if (!code) return false;
+  if (!dispatch) return true;
+  const tr = state.tr;
+  if (!code.text.slice(code.from, code.to).includes("\n")) {
+    tr.insertText(CODE_INDENT);
+  } else {
+    for (const line of codeLineStarts(code.text, code.from, code.to).reverse()) {
+      tr.insertText(CODE_INDENT, code.start + line);
+    }
+  }
+  dispatch(tr.scrollIntoView());
+  return true;
+};
+
+/** Shift-Tab in a code block takes one indent (two spaces, or a tab) off
+ *  every line it touches, and is still the editor's key when there is none. */
+export const outdentCode: Command = (state, dispatch) => {
+  const code = codeBlockSelection(state);
+  if (!code) return false;
+  if (!dispatch) return true;
+  const tr = state.tr;
+  for (const line of codeLineStarts(code.text, code.from, code.to).reverse()) {
+    const lead = /^(?: {1,2}|\t)/.exec(code.text.slice(line))?.[0].length ?? 0;
+    if (lead) tr.delete(code.start + line, code.start + line + lead);
+  }
+  if (tr.docChanged) dispatch(tr.scrollIntoView());
+  return true;
+};
+
+/** The browser's Tab carries the focus to the next control, and from inside
+ *  a page that throws away the keys typed after it. Whatever nothing else
+ *  answered (a list item with nothing to nest under, a paragraph, a heading)
+ *  ends here and keeps the focus where it is. A page that cannot be edited
+ *  lets the browser have it: there, moving on is what Tab is for. So does a
+ *  control inside the page that holds the focus itself (an image's alignment
+ *  buttons, a callout's icon), which Tab leaves the way it leaves any
+ *  button. */
+export const keepTabInEditor: Command = (_state, _dispatch, view) =>
+  !!view?.editable && view.dom.ownerDocument.activeElement === view.dom;
+
+/** The code block first, above every other Tab; the catch-all last, below
+ *  the list keymap's nest and lift (50) and the table's cells (110). Two
+ *  keymaps, because one keeps a single command per key. */
+const codeTabKeymap = $useKeymap("brainCodeTabKeymap", {
+  IndentCode: { shortcuts: "Tab", priority: 200, command: () => indentCode },
+  OutdentCode: {
+    shortcuts: "Shift-Tab",
+    priority: 200,
+    command: () => outdentCode,
+  },
+});
+
+const keepTabKeymap = $useKeymap("brainKeepTabKeymap", {
+  KeepTab: {
+    shortcuts: ["Tab", "Shift-Tab"],
+    priority: 0,
+    command: () => keepTabInEditor,
+  },
+});
+
 export const editingCore = [
   gapCursorPlugin,
   trailingParagraph,
   focusCaret,
   slashHint,
+  codeTabKeymap,
+  keepTabKeymap,
 ].flat();

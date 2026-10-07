@@ -3,11 +3,17 @@ import { freshNotes } from "./fresh-notes";
 
 freshNotes();
 
+/** WebKit under `next dev` can take the press on Sign in before the form is
+ *  hydrated: the browser submits the form itself, the page reloads empty,
+ *  and no sign-in goes out. The password is typed and pressed again until
+ *  one does. A press that did send navigates, so no attempt is spent twice. */
 async function login(page: Page) {
-  await page.goto("/login");
-  await page.getByPlaceholder("Password").fill("e2e-password");
-  await page.getByRole("button", { name: "Sign in" }).click();
-  await expect(page).toHaveURL("/", { timeout: 20_000 });
+  await page.goto("/login", { waitUntil: "networkidle" });
+  await expect(async () => {
+    await page.getByPlaceholder("Password").fill("e2e-password");
+    await page.getByRole("button", { name: "Sign in" }).click();
+    await expect(page).toHaveURL("/", { timeout: 3_000 });
+  }).toPass({ timeout: 20_000 });
 }
 
 async function createPage(page: Page, title: string, markdown: string) {
@@ -54,6 +60,12 @@ async function runSlash(page: Page, query: string, label: string) {
   const item = page
     .getByTestId("slash-menu")
     .getByRole("button", { name: label, exact: true });
+  // Enter runs the row the menu has active, and on a slow engine the menu
+  // can still be filtering an earlier prefix of the query (`/t` puts Task
+  // first), so Enter waits until the query's own row leads the list.
+  await expect(
+    page.getByTestId("slash-menu").getByRole("button").first(),
+  ).toHaveAccessibleName(label);
   await expect(item).toBeVisible();
   await page.keyboard.press("Enter");
   await expect(page.getByTestId("slash-menu")).toBeHidden();

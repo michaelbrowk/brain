@@ -165,6 +165,32 @@ test("@inline [[ on an empty list item keeps the next words in that item", async
     .toMatch(new RegExp(`^\\* first\\n\\n\\* ${refPattern(targetId)} tail\\n\\n\\* last$`));
 });
 
+test("@inline text composed on the line after a picked page stays when the caret leaves", async ({
+  page,
+}, testInfo) => {
+  const { id, content, targetId } = await openPage(page, "Wiki compose", () => "Intro\n\nX\n\nOutro");
+  await caretAt(content, "X", "after");
+  await page.keyboard.press("Backspace");
+  await pickWikiLink(page, "Target Wiki compose", /Target Wiki compose/);
+  // An input method's text: a composition the editor reads when it ends,
+  // not keys. The line it lands on is the one the editor added for the caret.
+  await content.evaluate((editor) =>
+    editor.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "" })),
+  );
+  await page.keyboard.insertText("日本語");
+  await content.evaluate((editor) =>
+    editor.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "日本語" })),
+  );
+  await page.waitForTimeout(300);
+  const intro = content.locator("p", { hasText: "Intro" });
+  if (testInfo.project.use.hasTouch) await intro.tap();
+  else await intro.click();
+
+  await expect
+    .poll(() => savedMarkdown(page, id))
+    .toMatch(new RegExp(`^Intro\\n\\n${refPattern(targetId)}\\n\\n日本語\\n\\nOutro$`));
+});
+
 test("a page URL pasted into a code block stays the address, not nothing", async ({ page }) => {
   const { id, content, targetId } = await openPage(page, "Paste code", () => "```\ncode\n```");
   await caretAt(content, "code", "after");

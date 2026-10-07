@@ -20,6 +20,7 @@ import {
   CellSelection,
   TableMap,
   addRow,
+  cellAround,
   goToNextCell,
   handlePaste as pasteTableCells,
   selectedRect,
@@ -291,7 +292,16 @@ function pasteIntoCell(view: EditorView, event: ClipboardEvent): boolean {
   if (state.selection instanceof CellSelection) {
     return pasteTableCells(view, event, slice);
   }
-  if (!state.selection.$from.sameParent(state.selection.$to)) return false;
+  const { $from, $to } = state.selection;
+  if (!$from.sameParent($to)) {
+    // A text range across cells is those cells, as a cell selection would
+    // be; replacing it as text would fit the lines out across the row.
+    const $anchor = cellAround($from);
+    const $head = cellAround($to);
+    if (!$anchor || !$head) return false;
+    view.dispatch(state.tr.setSelection(new CellSelection($anchor, $head)));
+    return pasteTableCells(view, event, slice);
+  }
   view.dispatch(state.tr.replaceSelection(slice).scrollIntoView());
   return true;
 }
@@ -354,7 +364,7 @@ const nextCellOrNewRow: Command = (state, dispatch) => {
     const pos =
       rect.tableStart + TableMap.get(table).positionAt(rect.bottom, 0, table);
     dispatch(
-      tr.setSelection(TextSelection.near(tr.doc.resolve(pos + 1))).scrollIntoView(),
+      tr.setSelection(TextSelection.near(tr.doc.resolve(pos))).scrollIntoView(),
     );
   }
   return true;

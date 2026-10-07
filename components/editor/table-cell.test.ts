@@ -4,6 +4,7 @@ import {
   Editor,
   defaultValueCtx,
   editorViewCtx,
+  editorViewOptionsCtx,
   rootCtx,
   serializerCtx,
 } from "@milkdown/kit/core";
@@ -15,6 +16,7 @@ import { commonmark, syncHeadingIdPlugin } from "@milkdown/kit/preset/commonmark
 import { gfm } from "@milkdown/kit/preset/gfm";
 import type { Node as ProseNode } from "@milkdown/kit/prose/model";
 import { TextSelection } from "@milkdown/kit/prose/state";
+import { CellSelection } from "@milkdown/kit/prose/tables";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { attachmentRefs } from "./attachment-refs";
@@ -26,13 +28,14 @@ import { tableCells } from "./table-cell";
 /** The editor's own plugin order for everything a table cell meets: the
  *  presets, the table guard, the editing core, the table cells, Milkdown's
  *  table block and its clipboard. */
-async function mount(markdown: string) {
+async function mount(markdown: string, editable = true) {
   const root = document.createElement("div");
   document.body.append(root);
   const editor = await Editor.make()
     .config((ctx) => {
       ctx.set(rootCtx, root);
       ctx.set(defaultValueCtx, markdown);
+      ctx.update(editorViewOptionsCtx, (prev) => ({ ...prev, editable: () => editable }));
     })
     .use(commonmark.filter((plugin) => plugin !== syncHeadingIdPlugin))
     .use(gfm)
@@ -374,6 +377,9 @@ describe("Tab in a table", () => {
     expect(cellOf(view)).toBe("");
     const table = view.state.doc.firstChild!;
     expect(table.childCount).toBe(4);
+    // In the new row's first cell: row 3 of the table, column 0.
+    const { $from } = view.state.selection;
+    expect([$from.index(1), $from.index(2)]).toEqual([3, 0]);
     await editor.destroy();
   });
 
@@ -382,6 +388,87 @@ describe("Tab in a table", () => {
     caret(view, after(view.state.doc, "h1"));
     expect(key(view, "Tab", { shiftKey: true })).toBe(true);
     expect(cellOf(view)).toBe("h1");
+    await editor.destroy();
+  });
+});
+
+describe("the edges of a cell", () => {
+  it("reads a <br> inside a mark as a line break too", async () => {
+    const { editor, view, markdownNow } = await mount("| a |\n| - |\n| **x<br>y** |");
+    expect(count(view.state.doc, "hardbreak")).toBe(1);
+    expect(markdownNow()).toContain("**x<br>y**");
+    await editor.destroy();
+  });
+
+  it("writes a break the preset spells as a newline as <br> as well", async () => {
+    const { editor, view, markdownNow } = await mount(TABLE);
+    const at = after(view.state.doc, "a1");
+    // The inline flavour of a hard break, which pasted HTML can produce,
+    // serializes as a newline in a text node.
+    view.dispatch(
+      view.state.tr.insert(at, view.state.schema.nodes.hardbreak.create({ isInline: true })),
+    );
+    view.dispatch(view.state.tr.insertText("z", at + 1));
+    expect(markdownNow()).toContain("| a1<br>z | a2 |");
+    await editor.destroy();
+  });
+
+  it("does not turn Enter over selected cells into a line break that empties them", async () => {
+    const { editor, view } = await mount(TABLE);
+    const $a = view.state.doc.resolve(after(view.state.doc, "a1"));
+    const $b = view.state.doc.resolve(after(view.state.doc, "a2"));
+    view.dispatch(
+      view.state.tr.setSelection(
+        CellSelection.create(view.state.doc, $a.before($a.depth - 1), $b.before($b.depth - 1)),
+      ),
+    );
+    key(view, "Enter");
+    expect(count(view.state.doc, "hardbreak")).toBe(0);
+    expect(view.state.doc.textContent).toContain("a1a2");
+    await editor.destroy();
+  });
+
+  it("takes no paste on a page that cannot be edited", async () => {
+    const { editor, view } = await mount(TABLE, false);
+    const before = view.state.doc;
+    caret(view, after(view.state.doc, "a1"));
+    paste(view, "one\ntwo");
+    paste(view, "x\ty\nz\tw");
+    expect(view.state.doc.eq(before)).toBe(true);
+    await editor.destroy();
+  });
+
+  it("fills the selected cells with a multi-line paste over a text range across cells", async () => {
+    const { editor, view, markdownNow } = await mount(TABLE);
+    view.dispatch(
+      view.state.tr.setSelection(
+        TextSelection.create(view.state.doc, after(view.state.doc, "a1"), after(view.state.doc, "a2")),
+      ),
+    );
+    paste(view, "one\ntwo");
+    expect(count(view.state.doc, "table")).toBe(1);
+    expect(rows(markdownNow())).toEqual([
+      ["h1", "h2"],
+      ["one<br>two", "one<br>two"],
+      ["b1", "b2"],
+    ]);
+    await editor.destroy();
+  });
+
+  it("fills every cell of a selected block of cells with a multi-line paste", async () => {
+    const { editor, view, markdownNow } = await mount(TABLE);
+    const $a = view.state.doc.resolve(after(view.state.doc, "b2"));
+    const $b = view.state.doc.resolve(after(view.state.doc, "a1"));
+    view.dispatch(
+      view.state.tr.setSelection(
+        CellSelection.create(view.state.doc, $a.before($a.depth - 1), $b.before($b.depth - 1)),
+      ),
+    );
+    paste(view, "one\ntwo");
+    expect(rows(markdownNow()).slice(1)).toEqual([
+      ["one<br>two", "one<br>two"],
+      ["one<br>two", "one<br>two"],
+    ]);
     await editor.destroy();
   });
 });

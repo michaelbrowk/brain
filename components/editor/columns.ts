@@ -4,9 +4,10 @@ import type {
   ResolvedPos,
 } from "@milkdown/kit/prose/model";
 import type { MarkdownNode, ParserState, SerializerState } from "@milkdown/kit/transformer";
-import { $nodeSchema, $remark } from "@milkdown/kit/utils";
+import { $command, $nodeSchema, $remark } from "@milkdown/kit/utils";
 import remarkDirectivePlugin from "remark-directive";
 import { stripStrayDirectiveNodes } from "@/lib/stray-directives";
+import { insertContainerBlock } from "./insert-block";
 
 /** Notion-style column layout.
  *
@@ -137,4 +138,27 @@ export function isBlockLaneElement(
   );
 }
 
-export const columns = [remarkDirective, stripStrayDirectives, colsSchema, colSchema].flat();
+/** Two empty columns in place of the empty line, with the caret in the left
+ *  one. Inserted as Markdown, the caret ended in whichever column the parse
+ *  put last, and the first words typed went into the right column. */
+export const insertColumnsCommand = $command<unknown, "InsertColumns">(
+  "InsertColumns",
+  (ctx) => () => (state, dispatch) => {
+    const paragraph = state.schema.nodes.paragraph;
+    const col = colSchema.type(ctx);
+    const node = colsSchema
+      .type(ctx)
+      .create(null, [col.create(null, paragraph.create()), col.create(null, paragraph.create())]);
+    if (!dispatch) return true;
+    dispatch(insertContainerBlock(state.tr, node).scrollIntoView());
+    return true;
+  },
+);
+
+export const columns = [
+  remarkDirective,
+  stripStrayDirectives,
+  colsSchema,
+  colSchema,
+  insertColumnsCommand,
+].flat();

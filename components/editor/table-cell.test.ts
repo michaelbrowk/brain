@@ -294,6 +294,51 @@ describe("line breaks in a cell", () => {
     await editor.destroy();
   });
 
+  it("keep a trailing line break, so a cell reads back as it was saved", async () => {
+    for (const cell of ["one<br>", "one<br><br>", "one<br><br>two"]) {
+      const md = `| a |\n| - |\n| ${cell} |`;
+      const first = await mount(md);
+      const saved = first.markdownNow();
+      await first.editor.destroy();
+      expect(rows(saved)[1], cell).toEqual([cell]);
+      const second = await mount(saved);
+      expect(second.markdownNow(), cell).toBe(saved);
+      await second.editor.destroy();
+    }
+  });
+
+  it("keep two Enters at the end of a cell across a save and a reopen", async () => {
+    const first = await mount(TABLE);
+    caret(first.view, after(first.view.state.doc, "a1"));
+    key(first.view, "Enter");
+    key(first.view, "Enter");
+    expect(count(first.view.state.doc, "hardbreak")).toBe(2);
+    const saved = first.markdownNow();
+    await first.editor.destroy();
+    const second = await mount(saved);
+    expect(count(second.view.state.doc, "hardbreak")).toBe(2);
+    expect(second.markdownNow()).toBe(saved);
+    await second.editor.destroy();
+  });
+
+  it("save an empty cell given only an Enter as an empty cell, the same every time", async () => {
+    const md = "| a | b |\n| - | - |\n| x | <br /> |";
+    const first = await mount(md);
+    let pos = -1;
+    first.view.state.doc.descendants((node, at) => {
+      if (node.type.name === "table_cell" && node.content.size <= 2) pos = at + 2;
+    });
+    caret(first.view, pos);
+    key(first.view, "Enter");
+    const saved = first.markdownNow();
+    await first.editor.destroy();
+    expect(rows(saved)[1]).toEqual(["x", ""]);
+    const second = await mount(saved);
+    expect(count(second.view.state.doc, "hardbreak")).toBe(0);
+    expect(rows(second.markdownNow())[1]).toEqual(["x", ""]);
+    await second.editor.destroy();
+  });
+
   it("Enter makes a new line in the cell and keeps the caret in it", async () => {
     const { editor, view, markdownNow } = await mount(TABLE);
     caret(view, after(view.state.doc, "a1"));

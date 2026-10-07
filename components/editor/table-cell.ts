@@ -107,10 +107,25 @@ function breaksToHtml(nodes: MarkdownNode[] | undefined): MarkdownNode[] | undef
   });
 }
 
+/** The preset's paragraph writer drops a paragraph's last hard break, which
+ *  outside a table is invisible. In a cell it is a line the reader made, and
+ *  without it `one<br>` saved as `one` and two Enters reopened as one. It is
+ *  written back here, so a cell's breaks are a fixed point of open and save. */
 function serializeCell(state: SerializerState, node: ProseNode) {
   state.openNode("tableCell").next(node.content);
   const cell = state.top();
-  if (cell) cell.children = breaksToHtml(cell.children);
+  if (cell) {
+    cell.children = breaksToHtml(cell.children);
+    const paragraph = cell.children?.[0];
+    // A cell that holds nothing but one break is an empty cell, and stays
+    // one: a lone `<br>` is what the preset reads as the empty placeholder.
+    if (
+      node.firstChild?.lastChild?.type.name === "hardbreak" &&
+      paragraph?.children?.length
+    ) {
+      paragraph.children.push({ ...BREAK_NODE });
+    }
+  }
   state.closeNode();
 }
 

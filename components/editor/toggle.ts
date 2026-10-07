@@ -422,8 +422,10 @@ const IOS_ENTER_FALLBACK_MS = 300;
  *  ProseMirror still replays the Enter it held back about 200ms later (its
  *  fallback for a keyboard that changed nothing), so that one replay is
  *  swallowed: the caret is in the body by then, and it would open a line.
- *  The replay calls `handleKeyDown` without a DOM event, so any real keydown
- *  ends the wait: a second Enter the writer presses at once is theirs. */
+ *  The replay calls `handleKeyDown` without a DOM event, so a real Enter
+ *  keydown ends the wait: a second Enter the writer presses at once is
+ *  theirs. Other keys do not: the body's first letters are typed inside the
+ *  200ms, and ending the wait on them let the replay open a line under them. */
 export const toggleTitleInput = $prose(() => {
   const handledAt = new WeakMap<EditorView, number>();
   return new Plugin({
@@ -439,8 +441,8 @@ export const toggleTitleInput = $prose(() => {
           handledAt.set(view, Date.now());
           return true;
         },
-        keydown: (view) => {
-          handledAt.delete(view);
+        keydown: (view, event) => {
+          if (event.key === "Enter" || event.keyCode === 13) handledAt.delete(view);
           return false;
         },
       },

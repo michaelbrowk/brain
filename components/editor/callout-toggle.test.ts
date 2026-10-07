@@ -183,6 +183,20 @@ describe("inserting a toggle", () => {
     );
   });
 
+  it("still swallows the iOS replay when the writer types on at once", async () => {
+    const { editor, view, serialize } = await mountAtEmptyLine();
+    editor.ctx.get(commandsCtx).call(insertToggleCommand.key);
+    type(view, "Two words");
+    view.dom.dispatchEvent(
+      new InputEvent("beforeinput", { inputType: "insertParagraph", bubbles: true, cancelable: true }),
+    );
+    // the first letter of the body is a real keydown, before the replay lands
+    view.dom.dispatchEvent(new KeyboardEvent("keydown", { key: "b", bubbles: true, cancelable: true }));
+    type(view, "body");
+    expect(press(view, "Enter")).toBe(true);
+    expect(serialize()).toBe('Before\n\n:::toggle{summary="Two words"}\nbody\n:::');
+  });
+
   it("draws the title placeholder without putting it in the file", async () => {
     const { editor, root, serialize } = await mountAtEmptyLine();
     editor.ctx.get(commandsCtx).call(insertToggleCommand.key);

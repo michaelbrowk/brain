@@ -328,3 +328,83 @@ test("a save that keeps failing is retried with backoff and the owner is told", 
   expect(refusals).toBe(0);
   await page.unroute(`**/api/page/${id}`);
 });
+
+test("Smart sort applied while a save is out and the tab hides still saves the sorted page", async ({
+  page,
+}) => {
+  await login(page);
+  const id = await makePage(page, "Sort in the window", "Body");
+  const children: string[] = [];
+  for (const title of ["Alpha", "Beta", "Gamma", "Delta"]) {
+    children.push(
+      await page.evaluate(
+        async (input) => {
+          const response = await fetch("/api/page", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(input),
+          });
+          return ((await response.json()) as { id: string }).id;
+        },
+        { parentId: id, title },
+      ),
+    );
+  }
+  const sections = ["First", "Second"];
+  await page.route("**/api/smart-sort", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sections,
+        assignments: Object.fromEntries(
+          children.map((child, index) => [child, sections[index % 2]]),
+        ),
+        order: children,
+        count: children.length,
+      }),
+    });
+  });
+  const content = await openPage(page, id);
+
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let markHeld!: () => void;
+  const held = new Promise<void>((resolve) => {
+    markHeld = resolve;
+  });
+  let holding = true;
+  await page.route(`**/api/page/${id}`, async (route) => {
+    if (holding && isOrdinarySave(route)) {
+      holding = false;
+      markHeld();
+      await gate;
+    }
+    await route.continue();
+  });
+
+  // A typed edit is on the wire; Smart sort queues its rewrite behind it;
+  // then the tab hides and the typed edit also leaves as a closing save.
+  await caretToEnd(content);
+  await page.keyboard.type(" typed");
+  await held;
+  await page.getByRole("button", { name: "Smart sort" }).click();
+  const dialog = page.getByRole("dialog", { name: "Smart sort" });
+  await expect(dialog.getByRole("status")).toHaveText(
+    "2 sections proposed. Nothing saved yet.",
+  );
+  await dialog.getByRole("button", { name: "Apply" }).click();
+  await hideTab(page);
+  await expect.poll(() => serverBody(page, id)).toBe("Body typed");
+  await showTab(page);
+  release();
+
+  // The rewrite is newer than the closing save and must not be dropped as
+  // stale behind it.
+  await expect(page.getByRole("dialog", { name: "Smart sort" })).toHaveCount(0);
+  await expect(page.getByText("Couldn't save the sorted page. Try again.")).toHaveCount(0);
+  await expect.poll(() => serverBody(page, id)).toContain("## First");
+  await page.unroute(`**/api/page/${id}`);
+});

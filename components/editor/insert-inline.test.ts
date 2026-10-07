@@ -26,7 +26,8 @@ import { columns, insertColumnsCommand } from "./columns";
 import { editingCore } from "./editing-core";
 import { emptyBlocks } from "./empty-block";
 import { images } from "./image";
-import { insertImage, insertInline, linkSelection } from "./insert-inline";
+import { insertImage, insertInline, insertInlineNear, linkSelection } from "./insert-inline";
+import { linkedWordsHref } from "@/lib/internal-page-link";
 import { linkPreviewPlugin } from "./link-preview";
 import { normalizeLegacy } from "./normalize";
 import { createPageRef, pageRef, setPageRefOrigin, syncLivePageInfo } from "./page-ref";
@@ -194,12 +195,93 @@ describe("a page ref placed at the caret", () => {
       caret(view, after(view.state.doc, "Intro"));
       press(view, "Enter");
       view.dispatch(insertInline(view.state, createPageRef(view.state.schema, PAGE))!);
-      expect(markdownNow()).toBe(`Intro\n\n${REF}\n\n<br />\n\nOutro`);
       type(view, "next");
 
       expect(markdownNow()).toBe(`Intro\n\n${REF}\n\nnext\n\nOutro`);
       const back = await reopen(markdownNow());
       expect(back.refs).toBe(1);
+    } finally {
+      await editor.destroy();
+    }
+  });
+
+  it("leaves no line behind when the caret goes elsewhere before a word is typed", async () => {
+    const { editor, view, markdownNow } = await mount("Intro\n\nX\n\nOutro");
+    try {
+      const x = after(view.state.doc, "X");
+      view.dispatch(view.state.tr.delete(x - 1, x));
+      caret(view, x - 1);
+      view.dispatch(insertInline(view.state, createPageRef(view.state.schema, PAGE))!);
+      // The caret waits on a line after the row ...
+      expect(view.state.selection.$from.parent.content.size).toBe(0);
+      expect(view.state.doc.childCount).toBe(4);
+      // ... which goes once the caret leaves it empty.
+      caret(view, after(view.state.doc, "Outro"));
+      expect(view.state.doc.childCount).toBe(3);
+      expect(markdownNow()).toBe(`Intro\n\n${REF}\n\nOutro`);
+      // The line the next block already was is never added, nor taken.
+      const reuse = await mount("Intro\n\nX\n\n<br />\n\nOutro");
+      try {
+        const at = after(reuse.view.state.doc, "X");
+        reuse.view.dispatch(reuse.view.state.tr.delete(at - 1, at));
+        caret(reuse.view, at - 1);
+        const before = reuse.view.state.doc.childCount;
+        reuse.view.dispatch(insertInline(reuse.view.state, createPageRef(reuse.view.state.schema, PAGE))!);
+        expect(reuse.view.state.doc.childCount).toBe(before);
+      } finally {
+        await reuse.editor.destroy();
+      }
+    } finally {
+      await editor.destroy();
+    }
+  });
+
+  for (const [name, wrap] of [
+    ["a quote", (line: string) => `> ${line}\n>\n> after`],
+    ["a callout", (line: string) => `:::callout{icon="💡"}\n${line}\n\nafter\n:::`],
+    ["a toggle's body", (line: string) => `:::toggle{summary="S"}\n${line}\n\nafter\n:::`],
+    ["a column", (line: string) => `::::cols\n:::col\n${line}\n\nafter\n:::\n\n:::col\nR\n:::\n::::`],
+  ] as const) {
+    it(`alone on a line in ${name} is a row there, with the caret on a line after it`, async () => {
+      const { editor, view } = await mount(wrap("X"));
+      try {
+        const x = after(view.state.doc, "X");
+        view.dispatch(view.state.tr.delete(x - 1, x));
+        caret(view, x - 1);
+        const container = view.state.selection.$from.node(-1).type.name;
+        view.dispatch(insertInline(view.state, createPageRef(view.state.schema, PAGE))!);
+        const { $from } = view.state.selection;
+        expect($from.parent.type.name).toBe("paragraph");
+        expect($from.parent.content.size).toBe(0);
+        expect($from.node(-1).type.name).toBe(container);
+        expect($from.node(-1).child($from.index(-1) - 1).firstChild?.type.name).toBe("page_ref");
+      } finally {
+        await editor.destroy();
+      }
+    });
+  }
+
+  it("alone in a list item is followed by a space the file does not keep", async () => {
+    const { editor, view, markdownNow } = await mount("* a\n* X\n* b");
+    try {
+      const x = after(view.state.doc, "X");
+      view.dispatch(
+        insertInline(view.state, createPageRef(view.state.schema, PAGE), { from: x - 1, to: x })!,
+      );
+      expect(view.state.selection.$from.parent.textContent).toBe(" ");
+      expect(markdownNow()).toBe(`* a\n\n* ${REF}\n\n* b`);
+      type(view, "tail");
+      expect(markdownNow()).toBe(`* a\n\n* ${REF} tail\n\n* b`);
+    } finally {
+      await editor.destroy();
+    }
+  });
+
+  it("is refused for a range across lines", async () => {
+    const { editor, view } = await mount("one\n\ntwo");
+    try {
+      const range = { from: after(view.state.doc, "on"), to: after(view.state.doc, "tw") };
+      expect(insertInline(view.state, createPageRef(view.state.schema, PAGE), range)).toBeNull();
     } finally {
       await editor.destroy();
     }
@@ -212,6 +294,7 @@ describe("a page ref placed at the caret", () => {
       view.dispatch(
         insertInline(view.state, createPageRef(view.state.schema, PAGE), { from: pos - 1, to: pos })!,
       );
+      expect(markdownNow()).toContain(`| ${REF} |`);
       type(view, "tail");
       expect(count(view.state.doc, "table")).toBe(1);
       expect(markdownNow()).toContain(`| ${REF} tail |`);
@@ -239,13 +322,43 @@ describe("Link to page over selected words", () => {
       view.dispatch(
         view.state.tr.setSelection(TextSelection.create(view.state.doc, to - "the spec".length, to)),
       );
-      view.dispatch(linkSelection(view.state, "/p/abc123")!);
-      expect(markdownNow()).toBe('read [the spec](/p/abc123 "the spec") today');
+      view.dispatch(linkSelection(view.state, linkedWordsHref("abc123"))!);
+      expect(markdownNow()).toBe("read [the spec](/p/abc123#words) today");
 
       const back = await reopen(markdownNow());
-      expect(back.markdown).toBe('read [the spec](/p/abc123 "the spec") today');
+      expect(back.markdown).toBe("read [the spec](/p/abc123#words) today");
       expect(back.refs).toBe(0);
       expect(back.doc.textContent).toBe("read the spec today");
+    } finally {
+      await editor.destroy();
+    }
+  });
+
+  it("links the words around a ref in the selection and leaves the ref as it is", async () => {
+    const { editor, view, markdownNow } = await mount("x [Old](/p/abc123) y");
+    try {
+      const doc = view.state.doc;
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(doc, 1, doc.firstChild!.nodeSize - 1)));
+      view.dispatch(linkSelection(view.state, linkedWordsHref("plain"))!);
+      const saved = markdownNow();
+      expect(saved).toBe(`[x](/p/plain#words) ${REF} [y](/p/plain#words)`);
+      const back = await reopen(saved);
+      expect(back.refs).toBe(1);
+      expect(back.markdown).toBe(saved);
+    } finally {
+      await editor.destroy();
+    }
+  });
+
+  it("does nothing where the selection holds no words", async () => {
+    const { editor, view } = await mount("x [Old](/p/abc123) y");
+    try {
+      let ref = -1;
+      view.state.doc.descendants((node, pos) => {
+        if (node.type.name === "page_ref") ref = pos;
+      });
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, ref, ref + 1)));
+      expect(linkSelection(view.state, linkedWordsHref("plain"))).toBeNull();
     } finally {
       await editor.destroy();
     }
@@ -253,14 +366,15 @@ describe("Link to page over selected words", () => {
 });
 
 describe("which page links read as refs", () => {
-  it("every /p/ link is a ref as before, except words linked with a title", async () => {
+  it("every /p/ link is a ref as on main, titled ones too; only the linked-words fragment keeps words", async () => {
     const back = await reopen(
       [
         "[Stale row](/p/plain)",
         "see [Old title](/p/plain) here",
-        "see [📄 Old title](/p/plain) here",
-        'see [the plan](/p/plain "the plan") here',
-        '[whole line](/p/plain "whole line")',
+        'see [🦊 Copied](/p/plain "🦊 Copied") here',
+        "see [the plan](/p/plain#words) here",
+        "[whole line](/p/plain#words)",
+        "see [a heading](/p/plain#heading) here",
       ].join("\n\n"),
     );
     expect(back.refs).toBe(3);
@@ -269,10 +383,37 @@ describe("which page links read as refs", () => {
         "[📄 Plain](/p/plain)",
         "see [📄 Plain](/p/plain) here",
         "see [📄 Plain](/p/plain) here",
-        'see [the plan](/p/plain "the plan") here',
-        '[whole line](/p/plain "whole line")',
+        "see [the plan](/p/plain#words) here",
+        "[whole line](/p/plain#words)",
+        "see [a heading](/p/plain#heading) here",
       ].join("\n\n"),
     );
+  });
+
+  it("a chip copied and pasted stays a chip, and its markup carries no title", async () => {
+    const { editor, view, markdownNow } = await mount("See [Old](/p/abc123) here.\n\nTarget: ");
+    try {
+      let ref = -1;
+      view.state.doc.descendants((node, pos) => {
+        if (node.type.name === "page_ref") ref = pos;
+      });
+      const { dom } = (view as unknown as {
+        serializeForClipboard: (slice: unknown) => { dom: HTMLElement };
+      }).serializeForClipboard(view.state.doc.slice(ref, ref + 1));
+      expect(dom.querySelector("a")?.hasAttribute("title")).toBe(false);
+      caret(view, view.state.doc.content.size - 1);
+      // jsdom has no ClipboardEvent, which `pasteHTML` builds its event from.
+      const scope = globalThis as { ClipboardEvent?: unknown };
+      scope.ClipboardEvent ??= class extends Event {
+        clipboardData: unknown = null;
+      };
+      (view as unknown as { pasteHTML: (html: string) => void }).pasteHTML(dom.innerHTML);
+      const back = await reopen(markdownNow());
+      expect(back.refs).toBe(2);
+      expect(markdownNow()).not.toContain('"');
+    } finally {
+      await editor.destroy();
+    }
   });
 });
 
@@ -301,15 +442,49 @@ describe("an image from the picker", () => {
       caret(view, after(view.state.doc, "first"));
       press(view, "Enter");
       view.dispatch(insertImage(view.state, { src: "/_attachments/a.png" })!);
-      // The empty line the caret waits on is a line the page shows, and the
-      // file keeps it the way it keeps every empty line between blocks.
-      expect(markdownNow()).toBe("first\n\n![](/_attachments/a.png)\n\n<br />\n\nlast");
-      expect((await reopen(markdownNow())).markdown).toBe(markdownNow());
       type(view, "after");
 
       expect(count(view.state.doc, "brain_image")).toBe(1);
       expect(markdownNow()).toBe("first\n\n![](/_attachments/a.png)\n\nafter\n\nlast");
       expect((await reopen(markdownNow())).markdown).toBe(markdownNow());
+    } finally {
+      await editor.destroy();
+    }
+  });
+
+  it("on a line with words is an inline image in that line", async () => {
+    const { editor, view, markdownNow } = await mount("words here");
+    try {
+      caret(view, after(view.state.doc, "words"));
+      view.dispatch(insertImage(view.state, { src: "/_attachments/a.png" })!);
+      expect(count(view.state.doc, "brain_image")).toBe(0);
+      expect(markdownNow()).toBe("words![](/_attachments/a.png) here");
+    } finally {
+      await editor.destroy();
+    }
+  });
+
+  it("where no image fits the line, goes after the block as a block image", async () => {
+    const { editor, view, markdownNow } = await mount("```\ncode\n```\n\nlast");
+    try {
+      caret(view, after(view.state.doc, "co"));
+      view.dispatch(insertImage(view.state, { src: "/_attachments/a.png" })!);
+      type(view, "after");
+      expect(markdownNow()).toBe("```\ncode\n```\n\n![](/_attachments/a.png)\n\nafter\n\nlast");
+    } finally {
+      await editor.destroy();
+    }
+  });
+
+  it("leaves no empty line behind when the caret goes elsewhere first", async () => {
+    const { editor, view, markdownNow } = await mount("first\n\nX\n\nlast");
+    try {
+      const x = after(view.state.doc, "X");
+      view.dispatch(view.state.tr.delete(x - 1, x));
+      caret(view, x - 1);
+      view.dispatch(insertImage(view.state, { src: "/_attachments/a.png" })!);
+      caret(view, after(view.state.doc, "last"));
+      expect(markdownNow()).toBe("first\n\n![](/_attachments/a.png)\n\nlast");
     } finally {
       await editor.destroy();
     }
@@ -339,8 +514,51 @@ describe("an attachment from the picker", () => {
 
       expect(view.state.doc.childCount).toBe(1);
       const saved = markdownNow();
+      expect(view.state.storedMarks?.length ?? 0).toBe(0);
       expect(saved).toBe(String.raw`alpha [📎 a\]b \*c\*.pdf](/_attachments/x.pdf) more omega`);
       expect((await reopen(saved)).markdown).toBe(saved);
+    } finally {
+      await editor.destroy();
+    }
+  });
+});
+
+describe("what arrives after the caret moved", () => {
+  it("lands in the line when it can, else at the selection's end, else on a new line after the block", async () => {
+    const { editor, view, markdownNow } = await mount("```\ncode\n```\n\nlast");
+    try {
+      caret(view, after(view.state.doc, "co"));
+      const file = { url: "/_attachments/x.pdf", name: "x.pdf" };
+      view.dispatch(insertInlineNear(view.state, attachmentLink(view.state.schema, file))!);
+      type(view, " more");
+      expect(markdownNow()).toBe("```\ncode\n```\n\n[📎 x.pdf](/_attachments/x.pdf) more\n\nlast");
+    } finally {
+      await editor.destroy();
+    }
+    const across = await mount("one\n\ntwo");
+    try {
+      const doc = across.view.state.doc;
+      across.view.dispatch(
+        across.view.state.tr.setSelection(
+          TextSelection.create(doc, after(doc, "on"), after(doc, "tw")),
+        ),
+      );
+      const file = { url: "/_attachments/x.pdf", name: "x.pdf" };
+      across.view.dispatch(insertInlineNear(across.view.state, attachmentLink(across.view.state.schema, file))!);
+      expect(across.markdownNow()).toBe("one\n\ntw[📎 x.pdf](/_attachments/x.pdf)o");
+    } finally {
+      await across.editor.destroy();
+    }
+  });
+
+  it("an attachment's name loses its line breaks, a ref's label takes the page's icon", async () => {
+    const { editor, view } = await mount("x");
+    try {
+      const { schema } = view.state;
+      expect(attachmentLink(schema, { url: "/a", name: "two\nlines\r\nhere" }).text).toBe("📎 two lines here");
+      expect(attachmentLink(schema, { url: "/a", name: " \n " }).text).toBe("📎 attachment");
+      expect(createPageRef(schema, { id: "a", title: "T", icon: "🦊" }).attrs.label).toBe("🦊 T");
+      expect(createPageRef(schema, { id: "a", title: "T" }).attrs.label).toBe("📄 T");
     } finally {
       await editor.destroy();
     }
@@ -360,6 +578,8 @@ describe("the slash menu", () => {
       inQuote: false,
     });
     expect(items.map((item) => item.label)).toEqual(["Image"]);
+    const inCell = visibleSlashItems(slashMenuItems({}), { query: "", inTable: true, inQuote: false });
+    expect(inCell.map((item) => item.label)).not.toContain("Columns");
   });
 
   it("puts columns in place of the empty line with the caret in the left one", async () => {

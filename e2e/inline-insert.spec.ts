@@ -153,6 +153,26 @@ test("[[ in a table cell stays in that cell", async ({ page }) => {
   expect((await savedMarkdown(page, id)).match(/^\| *-/gm)).toHaveLength(1);
 });
 
+test("@inline [[ on an empty list item keeps the next words in that item", async ({ page }) => {
+  const { id, content, targetId } = await openPage(page, "Wiki item", () => "* first\n* X\n* last");
+  await caretAt(content, "X", "after");
+  await page.keyboard.press("Backspace");
+  await pickWikiLink(page, "Target Wiki item", /Target Wiki item/);
+  await page.keyboard.type("tail");
+
+  await expect
+    .poll(() => savedMarkdown(page, id))
+    .toMatch(new RegExp(`^\\* first\\n\\n\\* ${refPattern(targetId)} tail\\n\\n\\* last$`));
+});
+
+test("a page URL pasted into a code block stays the address, not nothing", async ({ page }) => {
+  const { id, content, targetId } = await openPage(page, "Paste code", () => "```\ncode\n```");
+  await caretAt(content, "code", "after");
+  const origin = new URL(page.url()).origin;
+  await pasteText(content, `${origin}/p/${targetId}`);
+  await expect.poll(() => savedMarkdown(page, id)).toContain(`code${origin}/p/${targetId}`);
+});
+
 test("Link to page over selected words keeps the words as the link", async ({ page }) => {
   const { id, content, targetId } = await openPage(page, "Toolbar link", () => "read the spec today");
   await content.focus();
@@ -173,11 +193,15 @@ test("Link to page over selected words keeps the words as the link", async ({ pa
 
   await expect
     .poll(() => savedMarkdown(page, id))
-    .toBe(`read [the spec](/p/${targetId} "the spec") today`);
+    .toBe(`read [the spec](/p/${targetId}#words) today`);
   await page.reload();
   const reloaded = page.getByRole("textbox", { name: "Page content" });
-  await expect(reloaded.locator("a", { hasText: "the spec" })).toHaveAttribute("href", `/p/${targetId}`);
+  const words = reloaded.locator("a", { hasText: "the spec" });
+  await expect(words).toHaveAttribute("href", `/p/${targetId}#words`);
   await expect(reloaded).toContainText("read the spec today");
+  // The words open their page in the app, as a ref does.
+  await words.click();
+  await expect(page).toHaveURL(`/p/${targetId}`);
 });
 
 test("a page URL pasted mid-sentence becomes a link in that sentence", async ({ page }) => {
@@ -201,8 +225,12 @@ test("@inline Enter with the caret before a page row writes on a line below it",
   );
   const row = content.locator("p", { has: page.locator("a.brain-page-ref") });
   await expect(row).toHaveCount(1);
+  // The same beat as `caretAt`: WebKit's focus handling would otherwise put
+  // the caret back at the start of the page.
   await content.focus();
+  await page.waitForTimeout(150);
   await row.evaluate((line) => window.getSelection()?.collapse(line, 0));
+  await page.waitForTimeout(50);
   await page.keyboard.press("Enter");
   await page.keyboard.type("below");
 

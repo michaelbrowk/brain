@@ -30,7 +30,7 @@ import {
   uploadAttachment,
   type AttachmentUploadTarget,
 } from "./attachments";
-import { insertImage, insertInline } from "./insert-inline";
+import { insertImage, insertInlineNear } from "./insert-inline";
 import type { PageRef } from "./floating-toolbar";
 import { clampMenuLeft, shouldFlipAbove } from "./menu-position";
 
@@ -486,7 +486,7 @@ export function SlashMenu({
           // the next words became part of the file's name.
           const tr = asImage
             ? insertImage(s, { src: uploaded.url })
-            : insertInline(s, attachmentLink(s.schema, uploaded));
+            : insertInlineNear(s, attachmentLink(s.schema, uploaded));
           if (tr) view.dispatch(tr);
           view.focus();
         });

@@ -46,7 +46,7 @@ import {
   setPageRefOrigin,
   syncLivePageInfo,
 } from "./page-ref";
-import { insertInline } from "./insert-inline";
+import { insertInline, insertInlineNear } from "./insert-inline";
 import {
   createPageRefNesting,
   standalonePageRefAnchors,
@@ -841,7 +841,7 @@ function Inner({
   const insertUploadedAttachment = (file: UploadedAttachment) => {
     get()?.action((ctx) => {
       const view = ctx.get(editorViewCtx);
-      const tr = insertInline(view.state, attachmentLink(view.state.schema, file));
+      const tr = insertInlineNear(view.state, attachmentLink(view.state.schema, file));
       if (tr) view.dispatch(tr);
     });
   };
@@ -965,14 +965,17 @@ function Inner({
         const internal = classifyInternalPageLink(t, window.location.origin);
         if (!internal) return;
         const pg = pages?.find((x) => x.id === internal.id);
-        if (pg) {
+        if (!pg) return;
+        // Taken only where the link can go: a line that cannot hold it (a
+        // code block, a toggle's title, a selection across lines) gets the
+        // browser's own paste of the address, not nothing.
+        get()?.action((ctx) => {
+          const view = ctx.get(editorViewCtx);
+          const tr = insertInline(view.state, createPageRef(view.state.schema, pg));
+          if (!tr) return;
           e.preventDefault();
-          get()?.action((ctx) => {
-            const view = ctx.get(editorViewCtx);
-            const tr = insertInline(view.state, createPageRef(view.state.schema, pg));
-            if (tr) view.dispatch(tr);
-          });
-        }
+          view.dispatch(tr);
+        });
       }}
       onClickCapture={(e) => {
         // clicking a page link navigates (Notion behaviour). Clicking anywhere

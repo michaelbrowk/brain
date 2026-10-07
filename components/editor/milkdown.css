@@ -489,7 +489,9 @@ html:has(a[data-page-ref-nest-target="true"]) .brain-drop-cursor {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.milkdown .ProseMirror .brain-col .brain-page-ref {
+/* A row in a column truncates; a ref in a column's sentence stays in the
+   sentence, as it does anywhere else. */
+.milkdown .ProseMirror .brain-col p.brain-page-ref-only > .brain-page-ref {
   display: block;
   max-width: 100%;
   overflow: hidden;
@@ -508,7 +510,7 @@ html:has(a[data-page-ref-nest-target="true"]) .brain-drop-cursor {
   :is(.milkdown .ProseMirror, [data-derived-page-refs])
     p.brain-page-ref-only
     > .brain-page-ref,
-  .milkdown .ProseMirror .brain-col .brain-page-ref {
+  .milkdown .ProseMirror .brain-col p.brain-page-ref-only > .brain-page-ref {
     display: inline;
     overflow: visible;
   }

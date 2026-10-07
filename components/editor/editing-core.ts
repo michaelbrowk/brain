@@ -11,6 +11,7 @@ import {
 import { keymap } from "@milkdown/kit/prose/keymap";
 import { Decoration, DecorationSet } from "@milkdown/kit/prose/view";
 import { $prose, $useKeymap } from "@milkdown/kit/utils";
+import { addedLine } from "./insert-inline";
 
 /** Core caret behaviors every block editor needs.
  *
@@ -714,4 +715,5 @@ export const editingCore = [
   keepTabKeymap,
   escapeKeymap,
   pageRowEnterKeymap,
+  addedLine,
 ].flat();

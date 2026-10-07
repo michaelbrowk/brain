@@ -1,5 +1,12 @@
 import type { Node as ProseNode, ResolvedPos } from "@milkdown/kit/prose/model";
-import { type EditorState, TextSelection, type Transaction } from "@milkdown/kit/prose/state";
+import {
+  type EditorState,
+  Plugin,
+  PluginKey,
+  TextSelection,
+  type Transaction,
+} from "@milkdown/kit/prose/state";
+import { $prose } from "@milkdown/kit/utils";
 
 /** INLINE THINGS GO WHERE THE CARET IS.
  *
@@ -12,8 +19,10 @@ import { type EditorState, TextSelection, type Transaction } from "@milkdown/kit
  *  serializer escapes it like any other text, and it goes into the line the
  *  caret is in: one transaction, one undo, with the caret after it.
  *
- *  Null when the line cannot hold it (a code block, a toggle's title), and the
- *  caller does nothing rather than put it somewhere the reader did not ask. */
+ *  `insertInline` is null when the line cannot hold it (a code block, a
+ *  toggle's title), so a paste the editor cannot place is left to the
+ *  browser. `insertInlineNear` is for what arrives later (an upload) and
+ *  must land somewhere: the nearest place that takes it. */
 export interface InlineRange {
   from: number;
   to: number;
@@ -34,35 +43,64 @@ function fits($from: ResolvedPos, $to: ResolvedPos, content: ProseNode) {
   );
 }
 
+/** THE LINE ADDED FOR THE CARET GOES AGAIN IF NOTHING IS WRITTEN ON IT.
+ *
+ *  A page row and a block image have no place a key can land, so the caret
+ *  goes to a line after them, and where the next block is not an empty line
+ *  one is added. An empty line between blocks is written to the file as
+ *  `<br />`, so a line the writer never typed on would stay in the note as a
+ *  blank they did not ask for. This remembers the line it added, and takes it
+ *  out once the caret has left it empty. Out of the undo history: the undo of
+ *  the insertion takes the line with it anyway. */
+const addedLineKey = new PluginKey<number | null>("brainAddedLine");
+
+export const addedLine = $prose(
+  () =>
+    new Plugin<number | null>({
+      key: addedLineKey,
+      state: {
+        init: () => null,
+        apply(tr, previous) {
+          const meta = tr.getMeta(addedLineKey) as number | null | undefined;
+          if (meta !== undefined) return meta;
+          if (previous === null || !tr.docChanged) return previous;
+          const mapped = tr.mapping.mapResult(previous, 1);
+          return mapped.deleted ? null : mapped.pos;
+        },
+      },
+      appendTransaction(_transactions, _old, state) {
+        const pos = addedLineKey.getState(state);
+        if (pos === null || pos === undefined) return null;
+        const line = state.doc.nodeAt(pos);
+        if (!line || line.type.name !== "paragraph" || line.content.size > 0) {
+          return state.tr.setMeta(addedLineKey, null);
+        }
+        const { from, to } = state.selection;
+        if (from >= pos && to <= pos + line.nodeSize) return null;
+        return state.tr
+          .delete(pos, pos + line.nodeSize)
+          .setMeta(addedLineKey, null)
+          .setMeta("addToHistory", false);
+      },
+    }),
+);
+
 /** The first position of an empty paragraph right after the block that ends
- *  at `after`, adding one when the next block is anything else. */
+ *  at `after`, adding one (and saying so to `addedLine`) when the next block
+ *  is anything else. */
 function lineAfter(tr: Transaction, after: number): number {
   const paragraph = tr.doc.type.schema.nodes.paragraph;
   const next = tr.doc.resolve(after).nodeAfter;
   if (!(next?.type === paragraph && next.content.size === 0)) {
     tr.insert(after, paragraph.create());
+    tr.setMeta(addedLineKey, after);
   }
   return after + 1;
 }
 
-/** Put `content` (an inline node: a page ref, a linked text, an inline image)
- *  in place of `range`, the selection by default.
- *
- *  A page ref that ends up alone on its line is a page row, the block the
- *  subpage list and a centre drop are made of. The caret goes to a line after
- *  it, because a row has no place a typed key can land. Alone in a list item
- *  or a cell it is followed by a space instead, which is where the next words
- *  go and which the file does not keep. */
-export function insertInline(
-  state: EditorState,
-  content: ProseNode,
-  range: InlineRange = state.selection,
-): Transaction | null {
-  const $from = state.doc.resolve(range.from);
-  const $to = state.doc.resolve(range.to);
-  if (!fits($from, $to, content)) return null;
-
-  const tr = state.tr.replaceWith(range.from, range.to, content);
+/** `content` in place of `range` on `tr`, with the caret after it. */
+function placeInline(tr: Transaction, content: ProseNode, range: InlineRange): Transaction {
+  tr.replaceWith(range.from, range.to, content);
   let caret = range.from + content.nodeSize;
   const $caret = tr.doc.resolve(caret);
   const line = $caret.parent;
@@ -71,6 +109,9 @@ export function insertInline(
     if (line.type.name === "paragraph" && ROW_CONTAINERS.has(container.type.name)) {
       caret = lineAfter(tr, $caret.after());
     } else {
+      // A caret after a ref that is alone on its line takes no key: the
+      // browser carries the next one to the line below. A space gives it a
+      // place, and the file never keeps it (`remarkPageRefSpacer`).
       tr.insertText(" ", caret);
       caret += 1;
     }
@@ -78,30 +119,87 @@ export function insertInline(
   tr.setSelection(TextSelection.create(tr.doc, caret));
   // A link mark reaches the next key typed after it: the words written after
   // an attachment became part of its label.
-  const link = state.schema.marks.link;
+  const link = tr.doc.type.schema.marks.link;
   if (link && content.isText && link.isInSet(content.marks)) tr.removeStoredMark(link);
   return tr.scrollIntoView();
 }
 
+/** Put `content` (an inline node: a page ref, a linked text, an inline image)
+ *  in place of `range`, the selection by default. Null where that line cannot
+ *  hold it.
+ *
+ *  A page ref that ends up alone on its line is a page row, the block the
+ *  subpage list and a centre drop are made of. The caret goes to a line after
+ *  it (see `addedLine`). Alone in a list item or a cell it is followed by a
+ *  space instead. */
+export function insertInline(
+  state: EditorState,
+  content: ProseNode,
+  range: InlineRange = state.selection,
+): Transaction | null {
+  const $from = state.doc.resolve(range.from);
+  const $to = state.doc.resolve(range.to);
+  if (!fits($from, $to, content)) return null;
+  return placeInline(state.tr, content, range);
+}
+
+/** `block` after the nearest block around the caret that has room for it,
+ *  and where it went. */
+function blockNear(state: EditorState, block: ProseNode): { tr: Transaction; at: number } | null {
+  const { $to } = state.selection;
+  for (let depth = $to.depth; depth >= 1; depth -= 1) {
+    const parent = $to.node(depth - 1);
+    const index = $to.indexAfter(depth - 1);
+    if (!parent.canReplaceWith(index, index, block.type)) continue;
+    const at = $to.after(depth);
+    return { tr: state.tr.insert(at, block), at };
+  }
+  return null;
+}
+
+/** `insertInline` for what arrives after the caret may have moved (an
+ *  upload): where the caret is, or at the end of the selection when it spans
+ *  lines, or else on a new line after the nearest block that takes one.
+ *  Dropping it there would leave the file uploaded and the note without it. */
+export function insertInlineNear(state: EditorState, content: ProseNode): Transaction | null {
+  const here = insertInline(state, content);
+  if (here) return here;
+  const end = state.selection.to;
+  const collapsed = insertInline(state, content, { from: end, to: end });
+  if (collapsed) return collapsed;
+  const near = blockNear(state, state.schema.nodes.paragraph.create());
+  if (!near) return null;
+  return placeInline(near.tr, content, { from: near.at + 1, to: near.at + 1 });
+}
+
 /** "Link to page" over selected words: the words become the link and stay
  *  the words. Replacing them with the page's title threw away what the
- *  reader wrote. The link carries the words as its title too, which is how
- *  the next open tells it from a ref (`keepsLinkWords` in `page-ref.ts`).
- *  Null on an empty selection, where there are no words. */
+ *  reader wrote. The address is `linkedWordsHref`, which every reader of a
+ *  body already takes for an ordinary link, so the next open keeps the words
+ *  too.
+ *
+ *  The mark goes on text only. A page ref inside the selection is already a
+ *  link, and a link mark around it wrote a link inside a link, which the
+ *  file kept as visible brackets. Null where the selection holds no text. */
 export function linkSelection(state: EditorState, href: string): Transaction | null {
   const link = state.schema.marks.link;
   const { from, to, empty } = state.selection;
   if (!link || empty) return null;
-  const words = state.doc.textBetween(from, to, " ", " ").replace(/\s+/g, " ").trim();
-  if (!words) return null;
-  return state.tr.addMark(from, to, link.create({ href, title: words })).scrollIntoView();
+  const mark = link.create({ href });
+  const tr = state.tr;
+  state.doc.nodesBetween(from, to, (node, pos, parent) => {
+    if (!node.isText || !parent?.type.allowsMarkType(link)) return;
+    tr.addMark(Math.max(from, pos), Math.min(to, pos + node.nodeSize), mark);
+  });
+  return tr.docChanged ? tr.scrollIntoView() : null;
 }
 
 /** An image from the picker. On a line of its own it becomes the block image
  *  the page shows full width, in place of the empty line, with the caret on
  *  the line after it: left selected, the next key typed replaced it. On a
  *  line with words, in a heading or a cell, it is the inline image the
- *  Markdown reads back there. */
+ *  Markdown reads back there. Where neither fits (a code block, a toggle's
+ *  title) it goes after the nearest block that takes it, as a block image. */
 export function insertImage(
   state: EditorState,
   attrs: { src: string; alt?: string },
@@ -110,21 +208,27 @@ export function insertImage(
   const { $from, empty } = selection;
   const block = schema.nodes.brain_image;
   const parent = $from.parent;
+  const image = block?.create({ src: attrs.src, alt: attrs.alt ?? "" });
   if (
-    block &&
+    image &&
     empty &&
     parent.type.name === "paragraph" &&
     parent.content.size === 0 &&
     $from.depth > 0 &&
-    $from.node(-1).canReplaceWith($from.index(-1), $from.indexAfter(-1), block)
+    $from.node(-1).canReplaceWith($from.index(-1), $from.indexAfter(-1), image.type)
   ) {
     const start = $from.before();
-    const image = block.create({ src: attrs.src, alt: attrs.alt ?? "" });
     const tr = state.tr.replaceWith(start, $from.after(), image);
     const caret = lineAfter(tr, start + image.nodeSize);
     return tr.setSelection(TextSelection.create(tr.doc, caret)).scrollIntoView();
   }
   const inline = schema.nodes.image;
-  if (!inline) return null;
-  return insertInline(state, inline.create({ src: attrs.src, alt: attrs.alt ?? "" }));
+  const here = inline && insertInline(state, inline.create({ src: attrs.src, alt: attrs.alt ?? "" }));
+  if (here) return here;
+  if (!image) return null;
+  const near = blockNear(state, image);
+  if (!near) return null;
+  const tr = near.tr;
+  const caret = lineAfter(tr, near.at + image.nodeSize);
+  return tr.setSelection(TextSelection.create(tr.doc, caret)).scrollIntoView();
 }

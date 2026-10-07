@@ -478,8 +478,12 @@ function contentBetween(editor: Node, target: Node, clientY: number): boolean {
   while (node && node !== target) {
     let sibling = (node as Partial<Element>).nextElementSibling ?? null;
     while (sibling) {
+      // Only what flows below the document. The block handle, the drop
+      // cursor and the menus are positioned over it, not after it.
+      const position = sibling.ownerDocument.defaultView?.getComputedStyle(sibling).position;
+      const inFlow = position !== "absolute" && position !== "fixed";
       const rect = sibling.getBoundingClientRect();
-      if (rect.height > 0 && rect.top <= clientY) return true;
+      if (inFlow && rect.height > 0 && rect.top <= clientY) return true;
       sibling = sibling.nextElementSibling;
     }
     node = node.parentNode ?? null;

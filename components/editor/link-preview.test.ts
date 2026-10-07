@@ -582,3 +582,21 @@ describe("a click below the last block, when it is not the reader's to take", ()
     }
   });
 });
+
+describe("a click below the last block, past what floats over the page", () => {
+  it("is not stopped by a positioned element after the editor, like the block handle", async () => {
+    const { view } = await mount(`<${URL_TEXT}>`);
+    const handle = document.createElement("div");
+    handle.style.position = "absolute";
+    view.dom.after(handle);
+    const bottom = view.dom.getBoundingClientRect().bottom;
+    vi.spyOn(handle, "getBoundingClientRect").mockReturnValue(
+      DOMRect.fromRect({ x: 0, y: bottom, width: 24, height: 24 }),
+    );
+    view.dispatch(view.state.tr.setSelection(NodeSelection.create(view.state.doc, 0)));
+    document.body.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, button: 0, clientY: bottom + 10 }),
+    );
+    expect(view.state.selection).toBeInstanceOf(TextSelection);
+  });
+});

@@ -43,7 +43,18 @@ async function importToggle() {
   const tempDir = await mkdtemp(join(tmpdir(), "brain-toggle-roundtrip-"));
   await symlink(join(repoRoot, "node_modules"), join(tempDir, "node_modules"), "dir");
   const tempFile = join(tempDir, "toggle.mjs");
-  await writeFile(tempFile, output.outputText, "utf8");
+  // The block insert helper is the module's one sibling import; it is
+  // transpiled beside it and the import pointed at the copy.
+  const helper = ts.transpileModule(
+    await readFile(join(repoRoot, "components/editor/insert-block.ts"), "utf8"),
+    { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } },
+  );
+  await writeFile(join(tempDir, "insert-block.mjs"), helper.outputText, "utf8");
+  await writeFile(
+    tempFile,
+    output.outputText.replaceAll('"./insert-block"', '"./insert-block.mjs"'),
+    "utf8",
+  );
   return {
     module: await import(`${pathToFileURL(tempFile).href}?t=${Date.now()}`),
     cleanup: () => rm(tempDir, { recursive: true, force: true }),

@@ -234,6 +234,103 @@ function directiveLabelText(node: StrayDirectiveNode): string {
   return (node.children ?? []).map(directiveLabelText).join("");
 }
 
+const FENCE_LINE = /^ {0,3}:{3,}[ \t]*$/;
+
+/** The lines of a paragraph that is nothing but bare closing fences, read
+ *  from its source, or null. A `:::` inside a sentence is prose, and so is
+ *  an escaped `\:::`, which the source shows. */
+function fenceLines(node: StrayDirectiveNode, source: string): string[] | null {
+  if (node.type !== "paragraph") return null;
+  const lines = directiveSource(node, source)?.split(/\r?\n/);
+  return lines && lines.every((line) => FENCE_LINE.test(line)) ? lines : null;
+}
+
+/** A container Brain draws (the ones `stripStrayDirectiveNodes` keeps). */
+function isBrainContainer(node: StrayDirectiveNode | undefined): node is StrayDirectiveNode {
+  return (
+    node?.type === "containerDirective" &&
+    KNOWN_CONTAINER_DIRECTIVES.has(node.name ?? "") &&
+    isKnownContainerDirective(node)
+  );
+}
+
+function hasExplicitClosing(node: StrayDirectiveNode, source: string): boolean {
+  return explicitContainerClosing(directiveSource(node, source)?.split(/\r?\n/)) !== undefined;
+}
+
+/** Container fences of one length, nested, read as the nesting the writer
+ *  meant.
+ *
+ *  remark-directive closes a container at the first fence at least as long
+ *  as its own opening, so `:::toggle` holding `:::callout` ends both at the
+ *  callout's `:::`, and every closing fence the writer added after it is a
+ *  paragraph of literal colons. The editor saved that paragraph back as
+ *  `\:::`, one more on every nesting, and whatever stood between two such
+ *  fences fell out of the container it was written in. Brain's own
+ *  serializer always writes the outer fence longer, but an agent's
+ *  `write_page` or a hand-edited file does not.
+ *
+ *  The repair runs only on that shape, and only on Brain's own containers: a
+ *  callout, toggle or column closed by a fence while the one that is its last
+ *  child was still open, followed by paragraphs (or containers) and then a
+ *  paragraph of nothing but fences. Each fence closes the innermost container
+ *  still open, and the blocks before it go back into that container. The
+ *  read-ahead stops at the first block of any other kind, so a list, a
+ *  heading or a code block never travels, and blocks after the last fence
+ *  stay where the parser put them. The nodes moved keep their source
+ *  positions, and document order is unchanged, so the server's row
+ *  numbering (`lib/page-ref-nesting.ts`) agrees with the editor's. */
+function rejoinNestedClosings(siblings: StrayDirectiveNode[], source: string | undefined) {
+  if (source === undefined) return;
+  for (let index = 0; index < siblings.length; index += 1) {
+    const container = siblings[index];
+    if (!isBrainContainer(container) || !hasExplicitClosing(container, source)) continue;
+    const chain = [container];
+    for (;;) {
+      const last = chain.at(-1)!.children?.at(-1);
+      if (!isBrainContainer(last) || hasExplicitClosing(last, source)) break;
+      chain.push(last);
+    }
+    if (chain.length < 2) continue;
+
+    // Read ahead to the last fence the chain needs. Nothing moves unless one
+    // is found.
+    let fences = 0;
+    let end = -1;
+    for (let next = index + 1; next < siblings.length && fences < chain.length - 1; next += 1) {
+      const sibling = siblings[next];
+      const lines = fenceLines(sibling, source);
+      if (lines) {
+        fences += lines.length;
+        end = next;
+      } else if (sibling.type !== "paragraph" && sibling.type !== "containerDirective") {
+        break;
+      }
+    }
+    if (end < 0) continue;
+
+    let level = chain.length - 2;
+    const kept: StrayDirectiveNode[] = [];
+    for (let next = index + 1; next <= end; next += 1) {
+      const lines = fenceLines(siblings[next], source);
+      if (!lines) {
+        chain[level].children!.push(siblings[next]);
+        continue;
+      }
+      const closing = Math.min(lines.length, level + 1);
+      level -= closing;
+      // a fence past the last open container is prose, as the parser read it
+      if (lines.length > closing) {
+        kept.push({
+          type: "paragraph",
+          children: [{ type: "text", value: lines.slice(closing).map((line) => line.trim()).join("\n") }],
+        });
+      }
+    }
+    siblings.splice(index + 1, end - index, ...kept);
+  }
+}
+
 /** Rewrite every directive Brain does not own into literal prose, in place.
  *  `source` is the Markdown the tree was parsed from; with it the literal is
  *  the exact bytes, without it the directive is respelled. */
@@ -243,6 +340,7 @@ export function stripStrayDirectiveNodes(
 ): void {
   const walk = (node: StrayDirectiveNode) => {
     if (!Array.isArray(node.children)) return;
+    rejoinNestedClosings(node.children, source);
     node.children = node.children.flatMap((child): StrayDirectiveNode[] => {
       walk(child);
       // Brain owns no text directives. Preserve every one as literal prose.

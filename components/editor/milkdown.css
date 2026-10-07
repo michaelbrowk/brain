@@ -556,52 +556,87 @@ html:has(a[data-page-ref-nest-target="true"]) .brain-drop-cursor {
 .milkdown .ProseMirror .brain-callout-content {
   min-width: 0;
 }
-.milkdown .ProseMirror .brain-callout-content > :first-child,
-.milkdown .ProseMirror .brain-toggle-content > :first-child {
+.milkdown .ProseMirror .brain-callout-content > :first-child {
   margin-top: 0;
 }
-.milkdown .ProseMirror .brain-callout-content > * + *,
-.milkdown .ProseMirror .brain-toggle-content > * + * {
+.milkdown .ProseMirror .brain-callout-content > * + * {
   margin-top: 8px;
 }
 
+/* a toggle's children are its title (the <summary>) and its body blocks, side
+   by side in the <details>, so the body's inset sits on each block */
 .milkdown .ProseMirror .brain-toggle {
   background: color-mix(in oklch, var(--ink) 3%, transparent);
   border-radius: var(--r-md);
 }
+.milkdown .ProseMirror .brain-toggle > :not(summary) {
+  min-width: 0;
+  margin: 8px 12px 0 34px;
+}
+.milkdown .ProseMirror .brain-toggle > summary + * {
+  margin-top: 0;
+}
+.milkdown .ProseMirror .brain-toggle > :last-child:not(summary) {
+  margin-bottom: 12px;
+}
 .milkdown .ProseMirror .brain-toggle-head {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   min-height: 34px;
-  padding: 6px 10px;
+  padding: 5px 10px 5px 6px;
   color: var(--ink);
-  cursor: pointer;
+  cursor: text;
   list-style: none;
-  user-select: none;
 }
 .milkdown .ProseMirror .brain-toggle-head::-webkit-details-marker {
   display: none;
 }
+/* the arrow is the one control that folds; the callout icon's button atom */
 .milkdown .ProseMirror .brain-toggle-arrow {
   display: grid;
   place-items: center;
-  width: 16px;
-  height: 16px;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
   color: var(--ink-3);
+  cursor: pointer;
+  user-select: none;
+}
+.milkdown .ProseMirror .brain-toggle-arrow:hover {
+  background: var(--fill-hover);
+  color: var(--ink);
+}
+.milkdown .ProseMirror .brain-toggle-arrow:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+.milkdown .ProseMirror .brain-toggle-arrow svg {
   transition: transform 120ms;
 }
-.milkdown .ProseMirror .brain-toggle[open] .brain-toggle-arrow {
+.milkdown .ProseMirror .brain-toggle[open] > summary > .brain-toggle-arrow svg {
   transform: rotate(90deg);
 }
 .milkdown .ProseMirror .brain-toggle-summary {
+  position: relative;
+  flex: 1;
   min-width: 0;
   overflow-wrap: anywhere;
   font-weight: 500;
 }
-.milkdown .ProseMirror .brain-toggle-content {
-  min-width: 0;
-  padding: 0 12px 12px 34px;
+/* the untitled toggle's placeholder: drawn, never written (the empty-block
+   hint's ink-3 exception, DESIGN.md v2 → Colour) */
+.milkdown .ProseMirror .brain-toggle-head.is-empty > .brain-toggle-summary::before {
+  content: "Toggle";
+  position: absolute;
+  left: 0;
+  top: 0;
+  color: var(--ink-3);
+  pointer-events: none;
 }
 /* smooth expand/collapse of a native <details> — progressive enhancement:
    browsers without ::details-content (older) just snap, as before. The global

@@ -437,3 +437,32 @@ describe("link card: read back from the DOM", () => {
     expect(card?.attrs.text).toBe("https://example.com/a/");
   });
 });
+
+describe("a click below the last block, beside the subpages", () => {
+  it("in the gaps of the subpages list does nothing, directly under the document puts the caret", async () => {
+    const { view } = await mount(`<${URL_TEXT}>`);
+    // The page body: the editor's root, then the subpages below it, both in
+    // one wrapper, the way page-body.tsx lays them out.
+    const editorRoot = view.dom.parentElement!.parentElement!;
+    const wrapper = document.createElement("div");
+    editorRoot.replaceWith(wrapper);
+    const subpages = document.createElement("div");
+    wrapper.append(editorRoot, subpages);
+    const bottom = view.dom.getBoundingClientRect().bottom;
+    vi.spyOn(subpages, "getBoundingClientRect").mockReturnValue(
+      DOMRect.fromRect({ x: 0, y: bottom + 30, width: 600, height: 120 }),
+    );
+    view.dispatch(view.state.tr.setSelection(NodeSelection.create(view.state.doc, 0)));
+
+    wrapper.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, button: 0, clientY: bottom + 60 }),
+    );
+    expect(view.state.selection).toBeInstanceOf(NodeSelection);
+
+    wrapper.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, button: 0, clientY: bottom + 10 }),
+    );
+    expect(view.state.selection).toBeInstanceOf(TextSelection);
+    expect(view.state.selection.from).toBe(startOf(view, 1));
+  });
+});

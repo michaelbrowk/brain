@@ -463,7 +463,28 @@ export function clickedBelowDocument(
 ): boolean {
   const element = target as { contains?: (other: Node) => boolean } | null;
   if (typeof element?.contains !== "function" || element === editor) return false;
-  return element.contains(editor) && clientY > editorBottom;
+  if (!element.contains(editor) || clientY <= editorBottom) return false;
+  return !contentBetween(editor, target as Node, clientY);
+}
+
+/** Whether something drawn after the editor, inside the clicked element,
+ *  starts at or above the click. The page body holds the editor and then the
+ *  subpages list in one wrapper, so a click in a gap between subpage rows
+ *  lands on that wrapper, which encloses the editor too. It is a click on the
+ *  list, not under the document: only the paper directly under the last
+ *  line, before anything else begins, is the end of the page. */
+function contentBetween(editor: Node, target: Node, clientY: number): boolean {
+  let node: Node | null = editor;
+  while (node && node !== target) {
+    let sibling = (node as Partial<Element>).nextElementSibling ?? null;
+    while (sibling) {
+      const rect = sibling.getBoundingClientRect();
+      if (rect.height > 0 && rect.top <= clientY) return true;
+      sibling = sibling.nextElementSibling;
+    }
+    node = node.parentNode ?? null;
+  }
+  return false;
 }
 
 /** A click or tap below the last line writes at the end.

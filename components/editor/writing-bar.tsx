@@ -35,6 +35,12 @@ function outdentFor(state: EditorState): Command {
   return item ? liftListItem(item) : () => false;
 }
 
+/** The room below the last line while the bar is up (see the effect that
+ *  calls it), written on the editor's own root. */
+function padEditorRoot(root: HTMLElement | null, inset: number) {
+  if (root) root.style.paddingBottom = inset ? `${inset}px` : "";
+}
+
 interface BarState {
   canIndent: boolean;
   canOutdent: boolean;
@@ -72,12 +78,8 @@ export function WritingBar({
   const barRef = useRef<HTMLDivElement | null>(null);
 
   const withView = useCallback(
-    <T,>(read: (view: EditorView) => T): T | undefined => {
-      let out: T | undefined;
-      getEditor()?.action((ctx) => {
-        out = read(ctx.get(editorViewCtx));
-      });
-      return out;
+    (read: (view: EditorView) => void) => {
+      getEditor()?.action((ctx) => read(ctx.get(editorViewCtx)));
     },
     [getEditor],
   );
@@ -85,7 +87,7 @@ export function WritingBar({
   const update = useCallback(() => {
     cancelAnimationFrame(raf.current);
     raf.current = requestAnimationFrame(() => {
-      if (!isTouch || !container.current) {
+      if (!isTouch) {
         setState(null);
         return;
       }
@@ -93,7 +95,8 @@ export function WritingBar({
       // selection toolbar's link field): the keyboard is still up, so the
       // bar stays rather than dropping the toolbar by its own height.
       const inDock = Boolean(document.activeElement?.closest("[data-editor-dock]"));
-      const next = withView((view) => {
+      const next = getEditor()?.action((ctx): BarState | null => {
+        const view = ctx.get(editorViewCtx);
         if (!view.editable || !(view.hasFocus() || inDock)) return null;
         const { state: s } = view;
         return {
@@ -107,7 +110,7 @@ export function WritingBar({
       });
       setState(next ?? null);
     });
-  }, [container, isTouch, withView]);
+  }, [getEditor, isTouch]);
 
   useEffect(() => {
     update();
@@ -142,8 +145,7 @@ export function WritingBar({
   // under the keyboard.
   useEffect(() => {
     const inset = shown ? kbInset + height : 0;
-    const root = container.current;
-    if (root) root.style.paddingBottom = inset ? `${inset}px` : "";
+    padEditorRoot(container.current, inset);
     setDockedInset("writing-bar", inset);
     // A caret already under the keyboard comes up at once. Only when the
     // keyboard is there: the keyboard arrives after the tap and before the

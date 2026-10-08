@@ -562,10 +562,21 @@ describe("FloatingToolbar", () => {
     expect(view.dispatch).not.toHaveBeenCalled();
   });
 
-  it("leaves a download link alone", async () => {
+  it("leaves a download link alone, and a click with any modifier held", async () => {
     const anchor = await renderLinkedLine({ download: "" });
     await click(anchor);
     expect(document.body.querySelector('input[aria-label="Link"]')).toBeNull();
+
+    const plain = await renderLinkedLine();
+    for (const modifier of ["shiftKey", "altKey", "metaKey", "ctrlKey"] as const) {
+      await act(async () => {
+        plain.dispatchEvent(
+          new MouseEvent("click", { bubbles: true, cancelable: true, [modifier]: true }),
+        );
+      });
+      await settle();
+      expect(document.body.querySelector('input[aria-label="Link"]')).toBeNull();
+    }
   });
 
   it("opens for the words, not the link, when the selection spills out of a link", async () => {

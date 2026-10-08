@@ -649,7 +649,7 @@ export function FloatingToolbar({
   // address says address on its own, and then the page rows stand under the
   // address row rather than giving way. One of this Brain's own page URLs
   // links the words to the page (`hrefForWords`), shown as typed.
-  const linkCandidate = linkEdit ? null : hrefForWords(linkQueryText, origin);
+  const linkCandidate = hrefForWords(linkQueryText, origin);
   const addressOnItsOwn =
     /^(https?:\/\/|mailto:|www\.)/i.test(linkQueryText) ||
     linkQueryText.includes("/") ||

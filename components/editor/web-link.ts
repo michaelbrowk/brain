@@ -118,15 +118,12 @@ function pastedHref(text: string): string | null {
 
 /** A URL pasted while words are selected links those words and keeps them,
  *  across lines too. Null for anything else, and the paste goes on to the
- *  card and the clipboard plugin: nothing selected, a selection that starts
- *  in code or outside text, or text that is not one address. */
+ *  card and the clipboard plugin: nothing selected, text that is not one
+ *  address, or a selection with no words a link may go on (code, which
+ *  takes no marks: `linkSelection` answers null there). */
 export function pasteUrlOverSelection(state: EditorState, pasted: string): Transaction | null {
   const { selection } = state;
   if (!(selection instanceof TextSelection) || selection.empty) return null;
-  const { $from, $to } = selection;
-  if (!$from.parent.isTextblock || !$to.parent.isTextblock || $from.parent.type.spec.code) {
-    return null;
-  }
   const href = pastedHref(pasted);
   if (!href) return null;
   return linkSelection(state, href);

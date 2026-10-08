@@ -1,5 +1,4 @@
-import { InputRule, undoInputRule } from "@milkdown/kit/prose/inputrules";
-import { keymap } from "@milkdown/kit/prose/keymap";
+import { InputRule } from "@milkdown/kit/prose/inputrules";
 import { type EditorState, Plugin, PluginKey, TextSelection } from "@milkdown/kit/prose/state";
 import { $inputRule, $prose } from "@milkdown/kit/utils";
 import { pasteLinkCard } from "./link-preview";
@@ -84,12 +83,6 @@ export const typedUrlInputRule = $inputRule(
     ),
 );
 
-/** Backspace right after the space takes the link back out and leaves the
- *  address as the words it was, as Backspace after every other input rule
- *  does. The same key for the whole stack: a second binding of it is the
- *  same command. */
-export const typedUrlUndo = $prose(() => keymap({ Backspace: undoInputRule }));
-
 /** Enter after an address links it. An address alone on its line is drawn
  *  as the card a paste of it draws, with the caret on the line after, so a
  *  typed address and a pasted one open the same way next time (a card is
@@ -126,4 +119,8 @@ export const typedUrlEnter = $prose(
     }),
 );
 
-export const typedUrls = [typedUrlInputRule, typedUrlUndo, typedUrlEnter].flat();
+/** Backspace right after the space takes the link back out and leaves the
+ *  address as the words it was: the preset's own `undoInputRule` binding
+ *  answers for this rule as for every other, which `web-link.test.ts`
+ *  holds. */
+export const typedUrls = [typedUrlInputRule, typedUrlEnter].flat();

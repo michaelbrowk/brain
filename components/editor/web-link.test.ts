@@ -21,6 +21,7 @@ import {
   pasteUrlOverSelection,
   removeLink,
   setLinkHref,
+  webHref,
   webHrefFromInput,
   webLinks,
 } from "./web-link";
@@ -315,6 +316,16 @@ describe("a page URL over selected words (round 2, H1)", () => {
     expect(refs).toBe(0);
   });
 
+  it("is never the field's to edit: linked words, absolute or relative, are a page's", () => {
+    const origin = "http://brain.local";
+    expect(webHref("http://brain.local/p/abc123#words", origin)).toBeNull();
+    expect(webHref("http://brain.local/p/abc123", origin)).toBeNull();
+    expect(webHref("/p/abc123#words", origin)).toBeNull();
+    expect(webHref("https://example.com/p/abc123#words", origin)).toBe(
+      "https://example.com/p/abc123#words",
+    );
+  });
+
   it("is what the field writes too: hrefForWords maps a page address to the marker and leaves the web alone", () => {
     const origin = "http://brain.local";
     expect(hrefForWords("http://brain.local/p/abc123", origin)).toBe("/p/abc123#words");
@@ -389,6 +400,11 @@ describe("a typed address, round 2 (L1, L3, M3, M5, M6, M20)", () => {
       "https://c.example",
       "https://d.example",
     ]);
+    // Enter reads the same delimiters: the tail of a word is not an address.
+    const enter = await mount("");
+    type(enter.view, "foo.https://f.example");
+    key(enter.view, "Enter");
+    expect(links(enter.view)).toEqual([]);
   });
 
   it("Backspace right after the space takes the link back out, as every input rule's does", async () => {

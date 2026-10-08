@@ -9,6 +9,7 @@ import {
 } from "@milkdown/kit/prose/state";
 import { $prose } from "@milkdown/kit/utils";
 import { notifyEditorLinkField } from "@/lib/editor-events";
+import { classifyInternalPageLink, linkedWordsPageId } from "@/lib/internal-page-link";
 import { linkSelection } from "./insert-inline";
 
 /** WEB LINKS ON WORDS.
@@ -64,6 +65,16 @@ export function webHrefFromInput(input: string): string | null {
   } catch {
     return null;
   }
+  return href;
+}
+
+/** The href of a link the field may edit: a web address (http, https,
+ *  mailto) that is not one of this Brain's own pages. A page link and linked
+ *  words open their page, an attachment downloads, and neither is the
+ *  field's; null for those. */
+export function webHref(href: string | null | undefined, origin: string): string | null {
+  if (!href || !WEB_SCHEME.test(href)) return null;
+  if (classifyInternalPageLink(href, origin) || linkedWordsPageId(href, origin)) return null;
   return href;
 }
 

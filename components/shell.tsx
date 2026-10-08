@@ -3038,8 +3038,9 @@ export function Shell({
       // inert, and a chord that opened the palette or folded the sidebar
       // there would act on a window nobody can see. ⌘↵ is the composer's own.
       if (mailSheetOpen) return;
-      // ⌘K — match by key (K is never a dead key)
-      if (e.key.toLowerCase() === "k" && !e.altKey) {
+      // ⌘K — match by key (K is never a dead key). ⌘⇧K is the editor's
+      // link field, so the shifted chord is not the palette's.
+      if (e.key.toLowerCase() === "k" && !e.altKey && !e.shiftKey) {
         e.preventDefault();
         if (paletteOpen) onPaletteOpenChange(false);
         else openPalette();

@@ -24,8 +24,10 @@ export interface TaskLine {
   ordinal: number;
 }
 
-/** The spec's regex, in one place and nowhere else. */
-const TASK_LINE_RE = /^\s*[-*+]\s+\[( |x|X)\]\s+(.*)$/;
+/** The spec's regex, in one place and nowhere else. A bullet or a number
+ *  before the box: `1. [ ] b` is a task GFM draws, and the file keeps the
+ *  writer's list as it was. */
+const TASK_LINE_RE = /^\s*(?:[-*+]|\d{1,9}[.)])\s+\[( |x|X)\]\s+(.*)$/;
 
 /** An opening or closing code fence: three or more backticks or tildes.
  *  An indented code block is knowingly out of scope. Milkdown serialises code

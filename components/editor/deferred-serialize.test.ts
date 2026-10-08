@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
+import { Editor, defaultValueCtx, editorViewCtx, rootCtx } from "@milkdown/kit/core";
+import { commonmark } from "@milkdown/kit/preset/commonmark";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createDeferredSerializer } from "./deferred-serialize";
+import { createDeferredSerializer, deferredSerialize } from "./deferred-serialize";
 
 /** A browser whose idle moments the test hands out. */
 function fakeIdle() {
@@ -78,8 +80,9 @@ describe("createDeferredSerializer", () => {
     browser.idle(50);
     expect(slow).toHaveBeenCalledOnce();
 
+    // The 120 ms run earned 360 ms of quiet.
     serializer.schedule(slow);
-    vi.advanceTimersByTime(200);
+    vi.advanceTimersByTime(360);
     browser.idle(10);
     expect(slow).toHaveBeenCalledOnce();
     expect(browser.pending()).toBe(1);
@@ -95,7 +98,7 @@ describe("createDeferredSerializer", () => {
     vi.advanceTimersByTime(200);
     browser.idle(50);
     serializer.schedule(slow);
-    vi.advanceTimersByTime(200);
+    vi.advanceTimersByTime(360);
     for (let i = 0; i < 5; i += 1) {
       vi.advanceTimersByTime(150);
       browser.idle(5);
@@ -104,6 +107,38 @@ describe("createDeferredSerializer", () => {
     vi.advanceTimersByTime(300);
     browser.idle(5);
     expect(slow).toHaveBeenCalledTimes(2);
+  });
+
+  it("waits longer after a costly run, so a long page is not serialized between every two words", () => {
+    const browser = fakeIdle();
+    const serializer = createDeferredSerializer();
+    const slow = vi.fn(() => vi.advanceTimersByTime(120));
+    serializer.schedule(slow);
+    vi.advanceTimersByTime(200);
+    browser.idle(50);
+    expect(slow).toHaveBeenCalledOnce();
+
+    // A word gap of 260 ms: the 120 ms run earned 360 ms of quiet.
+    serializer.schedule(slow);
+    vi.advanceTimersByTime(260);
+    expect(browser.pending()).toBe(0);
+    serializer.schedule(slow);
+    vi.advanceTimersByTime(359);
+    expect(browser.pending()).toBe(0);
+    vi.advanceTimersByTime(1);
+    expect(browser.pending()).toBe(1);
+  });
+
+  it("caps the earned quiet at a second", () => {
+    const browser = fakeIdle();
+    const serializer = createDeferredSerializer();
+    const slow = vi.fn(() => vi.advanceTimersByTime(900));
+    serializer.schedule(slow);
+    vi.advanceTimersByTime(200);
+    browser.idle(50);
+    serializer.schedule(slow);
+    vi.advanceTimersByTime(1000);
+    expect(browser.pending()).toBe(1);
   });
 
   it("runs when the request itself times out", () => {
@@ -135,5 +170,64 @@ describe("createDeferredSerializer", () => {
     serializer.schedule(work);
     vi.advanceTimersByTime(200);
     expect(work).toHaveBeenCalledOnce();
+  });
+});
+
+describe("deferredSerialize in an editor", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal("requestIdleCallback", undefined);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    document.body.replaceChildren();
+  });
+
+  async function mount(serialize: () => void) {
+    const root = document.body.appendChild(document.createElement("div"));
+    const editor = await Editor.make()
+      .config((ctx) => {
+        ctx.set(rootCtx, root);
+        ctx.set(defaultValueCtx, "hello");
+      })
+      .use(commonmark)
+      .use(deferredSerialize(createDeferredSerializer(), serialize))
+      .create();
+    return { editor, view: editor.ctx.get(editorViewCtx) };
+  }
+
+  it("serializes once after a change, and not after a caret move", async () => {
+    const serialize = vi.fn();
+    const { view } = await mount(serialize);
+    view.dispatch(view.state.tr.insertText("x", 1));
+    vi.advanceTimersByTime(200);
+    expect(serialize).toHaveBeenCalledOnce();
+    view.dispatch(view.state.tr.setSelection(view.state.selection));
+    vi.advanceTimersByTime(500);
+    expect(serialize).toHaveBeenCalledOnce();
+  });
+
+  it("is not put off by the view being updated with the state it already has", async () => {
+    // ProseMirror hands plugin views the same state again on `setProps`;
+    // the chrome around the editor does that often, and each one used to
+    // restart the quiet period, so the serialize never came.
+    const serialize = vi.fn();
+    const { view } = await mount(serialize);
+    view.dispatch(view.state.tr.insertText("x", 1));
+    for (let i = 0; i < 5; i += 1) {
+      vi.advanceTimersByTime(100);
+      view.setProps({});
+    }
+    vi.advanceTimersByTime(100);
+    expect(serialize).toHaveBeenCalledOnce();
+  });
+
+  it("leaves a transaction outside the history for the next flush", async () => {
+    const serialize = vi.fn();
+    const { view } = await mount(serialize);
+    view.dispatch(view.state.tr.insertText("x", 1).setMeta("addToHistory", false));
+    vi.advanceTimersByTime(1500);
+    expect(serialize).not.toHaveBeenCalled();
   });
 });

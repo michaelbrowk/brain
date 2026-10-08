@@ -14,6 +14,7 @@ import { attachmentRefs } from "./attachment-refs";
 import { editingCore } from "./editing-core";
 import { linkPreviewPlugin } from "./link-preview";
 import { pageRef, setPageRefOrigin } from "./page-ref";
+import { typedUrls } from "./typed-url";
 import {
   linkRangeAt,
   pasteUrlOverSelection,
@@ -44,6 +45,7 @@ async function mount(markdown: string, unfurl = true): Promise<Mounted> {
     .use(attachmentRefs)
     .use(editingCore)
     .use(webLinks)
+    .use(typedUrls)
     .use(pageRef)
     .use(linkPreviewPlugin(unfurl))
     .use(history)

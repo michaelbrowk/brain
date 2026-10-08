@@ -67,6 +67,7 @@ import { handleWrapperImageDrop, imageUploadPlugin } from "./image-upload";
 import { math } from "./math";
 import { linkPreviewPlugin } from "./link-preview";
 import { webLinks } from "./web-link";
+import { typedUrls } from "./typed-url";
 import { isInTable, noNestedTables } from "./table-guard";
 import { tableCells } from "./table-cell";
 import { loadGuard } from "./load-guard";
@@ -565,6 +566,9 @@ function Inner({
       // before the link card: a URL pasted over selected words links the
       // words, and only a URL pasted on its own reaches the card
       .use(webLinks)
+      // a bare address typed into the line is a link once the space or
+      // Enter after it is typed
+      .use(typedUrls)
       .use(colorMarks)
       .use(columns)
       .use(emptyBlocks)

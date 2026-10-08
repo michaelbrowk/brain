@@ -32,6 +32,7 @@ import { linkSelection } from "./insert-inline";
 import { linkedWordsHref } from "@/lib/internal-page-link";
 import { isInTable } from "./table-guard";
 import { selectionIsInQuote, selectionIsTask, toggleTaskCommand } from "./task-checkbox";
+import { setDockedInset } from "./scroll-band";
 import { useTouchDock } from "./touch-dock";
 
 /** The material of a bar docked above the keyboard on a phone: this toolbar
@@ -383,6 +384,24 @@ export function FloatingToolbar({
     // coordinates would turn the measurement correction into a render loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [Boolean(pos), linkOpen, colorOpen, aiOpen, aiLoading, update]);
+
+  // Docked on a phone it stands on the writing bar, so the band the caret
+  // keeps out of (scroll-band.ts) grows by its height while it is up, and
+  // the selection it belongs to comes up above it at once. The submenus
+  // change its height, so they re-measure.
+  const docked = Boolean(pos?.mobile);
+  useLayoutEffect(() => {
+    if (!docked) {
+      setDockedInset("selection-toolbar", 0);
+      return;
+    }
+    setDockedInset("selection-toolbar", barRef.current?.getBoundingClientRect().height ?? 0);
+    getEditor()?.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      view.dispatch(view.state.tr.scrollIntoView());
+    });
+    return () => setDockedInset("selection-toolbar", 0);
+  }, [docked, getEditor, linkOpen, colorOpen, aiOpen]);
 
   const closeAiAndRestoreSelection = useCallback(() => {
     setAiOpen(false);

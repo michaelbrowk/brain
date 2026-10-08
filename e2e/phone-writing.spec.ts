@@ -300,6 +300,11 @@ test("@mobile the selection toolbar stacks above the writing bar", async ({ page
   const barBox = await settledBox(bar);
   expect(Math.round(toolbarBox.y + toolbarBox.height)).toBe(Math.round(barBox.y));
   expect(Math.round(barBox.y + barBox.height)).toBe((await viewportHeight(page)) - KEYBOARD);
+  // The selected line stands above both: the toolbar docking widened the
+  // band by its own height and brought the selection up.
+  await expect
+    .poll(async () => (await line.boundingBox())!.y + (await line.boundingBox())!.height)
+    .toBeLessThanOrEqual(toolbarBox.y);
   await page.screenshot({ path: shots(`selection-and-bar-${testInfo.project.name}.png`) });
 });
 

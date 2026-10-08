@@ -6,7 +6,8 @@ import { $prose } from "@milkdown/kit/utils";
  *  (36 + inset 12): scrolling starts inside the band and lands below it. At
  *  the bottom it is the resting 24 / 32, plus whatever is docked over the
  *  window's bottom edge on a phone: the keyboard, which the layout viewport
- *  does not shrink for, and the writing bar standing on it.
+ *  does not shrink for, the writing bar standing on it, and the selection
+ *  toolbar stacked on that while words are selected.
  *
  *  The band is a plugin prop rather than a view option so it can change
  *  without `setProps`: ProseMirror reads `scrollThreshold` and `scrollMargin`
@@ -22,11 +23,19 @@ const band = {
   scrollMargin: { top: 76, right: 0, bottom: REST_MARGIN, left: 0 },
 };
 
-/** Widens the bottom of the band by what stands on the window's bottom edge
- *  (0 puts the resting band back). One keyboard per window, so one band. */
-export function setScrollBandInset(bottomInset: number) {
-  band.scrollThreshold.bottom = REST_THRESHOLD + bottomInset;
-  band.scrollMargin.bottom = REST_MARGIN + bottomInset;
+/** What each docked thing takes of the window's bottom edge, by owner (the
+ *  writing bar with the keyboard under it, the selection toolbar stacked on
+ *  that), so the two add up and each can leave without knowing about the
+ *  other. One keyboard per window, so one band. 0 takes the owner out. */
+const docked = new Map<string, number>();
+
+export function setDockedInset(owner: string, px: number) {
+  if (px > 0) docked.set(owner, px);
+  else docked.delete(owner);
+  let total = 0;
+  for (const height of docked.values()) total += height;
+  band.scrollThreshold.bottom = REST_THRESHOLD + total;
+  band.scrollMargin.bottom = REST_MARGIN + total;
 }
 
 /** The band as the view reads it now. */

@@ -15,7 +15,7 @@ import { DUR, EASE_OUT } from "@/lib/motion";
 import { EDITOR_DOC_CHANGED_EVENT, notifyEditorDocChanged } from "@/lib/editor-events";
 import { indentCode, outdentCode } from "./editing-core";
 import { DOCK_CLASS, DOCK_SAFE_BOTTOM, Sep, TB, Tt } from "./floating-toolbar";
-import { setScrollBandInset } from "./scroll-band";
+import { setDockedInset } from "./scroll-band";
 import { selectionIsInQuote, selectionIsTask, toggleTaskCommand } from "./task-checkbox";
 import { useTouchDock } from "./touch-dock";
 
@@ -144,7 +144,7 @@ export function WritingBar({
     const inset = shown ? kbInset + height : 0;
     const root = container.current;
     if (root) root.style.paddingBottom = inset ? `${inset}px` : "";
-    setScrollBandInset(inset);
+    setDockedInset("writing-bar", inset);
     // A caret already under the keyboard comes up at once. Only when the
     // keyboard is there: the keyboard arrives after the tap and before the
     // first key, where a state update cannot land on a keystroke.

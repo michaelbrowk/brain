@@ -204,21 +204,36 @@ test("Mod-Shift-k opens the field over the selection and not the palette, and Es
   expect(await page.evaluate(() => window.getSelection()?.toString() ?? "")).toBe("the spec");
 });
 
-test("Mod-click opens a link in a new tab, as a browser's would", async ({ page, context }, testInfo) => {
+test("a modifier click on a link stays the browser's: no field, nothing prevented", async ({
+  page,
+}, testInfo) => {
   test.skip(!!testInfo.project.use.hasTouch, "a finger holds no modifier");
-  await context.route("https://example.com/**", (route) =>
-    route.fulfill({ contentType: "text/html", body: "<title>Example</title>" }),
-  );
   const { content } = await openPage(
     page,
     "Open link",
     "read [the spec](https://example.com/open) today",
   );
-  const [opened] = await Promise.all([
-    context.waitForEvent("page"),
-    content.locator("a", { hasText: "the spec" }).click({ modifiers: ["ControlOrMeta"] }),
-  ]);
-  expect(opened.url()).toBe("https://example.com/open");
-  await opened.close();
+  const link = content.locator("a", { hasText: "the spec" });
+  // Dispatched rather than clicked: the browser would act on the chord, and
+  // what this holds is only that Brain stays out of its way. The same
+  // contract every link keeps (critical-flows, "without hijacking native
+  // links"), read here for a web link on words.
+  const prevented = await link.evaluate((anchor) => {
+    let wasPrevented: boolean | null = null;
+    anchor.addEventListener(
+      "click",
+      (event) => {
+        wasPrevented = event.defaultPrevented;
+        event.preventDefault();
+      },
+      { once: true },
+    );
+    anchor.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, metaKey: true }),
+    );
+    return wasPrevented;
+  });
+  expect(prevented).toBe(false);
+  await page.waitForTimeout(300);
   await expect(toolbarOf(page).getByRole("textbox", { name: "Link" })).toHaveCount(0);
 });

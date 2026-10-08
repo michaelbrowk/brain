@@ -989,7 +989,15 @@ function Inner({
         // clicking a page link navigates (Notion behaviour). Clicking anywhere
         // else — including the empty part of a link's line — places the cursor,
         // so you can add prose above/below a link block.
-        if (e.defaultPrevented || e.button !== 0 || e.shiftKey || e.altKey) return;
+        if (
+          e.defaultPrevented ||
+          e.button !== 0 ||
+          e.metaKey ||
+          e.ctrlKey ||
+          e.shiftKey ||
+          e.altKey
+        )
+          return;
         const anchor = (e.target as HTMLElement).closest<HTMLAnchorElement>("a");
         const target = anchor?.getAttribute("target")?.trim().toLowerCase();
         if (
@@ -999,21 +1007,14 @@ function Inner({
         )
           return;
         // A web link on words is the floating toolbar's on a plain click: the
-        // field opens over it with its address, to change, open or remove.
-        // With Cmd or Ctrl held the click opens it, as a browser's would. A
+        // field opens over it with its address, to change, open or remove. A
         // card keeps its own click, which opens.
-        const web =
-          anchor.dataset.pageRef === undefined && !anchor.hasAttribute("data-brain-link-card")
-            ? webHref(anchor.getAttribute("href"), window.location.origin)
-            : null;
-        if (web !== null) {
-          if (!e.metaKey && !e.ctrlKey) return;
-          e.preventDefault();
-          e.stopPropagation();
-          window.open(web, "_blank", "noopener,noreferrer");
+        if (
+          anchor.dataset.pageRef === undefined &&
+          !anchor.hasAttribute("data-brain-link-card") &&
+          webHref(anchor.getAttribute("href"), window.location.origin) !== null
+        )
           return;
-        }
-        if (e.metaKey || e.ctrlKey) return;
         // A page ref goes by its id, every other anchor by its href. The
         // view already resolved a local attachment href for display;
         // resolving again is idempotent and covers an anchor that did not.

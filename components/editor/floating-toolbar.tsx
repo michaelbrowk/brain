@@ -472,9 +472,10 @@ export function FloatingToolbar({
   );
 
   // A plain click on a web link, after the editor has put the caret in it.
-  // The editor's own click handler leaves a web link alone on a plain click
-  // and opens it on Cmd/Ctrl-click; a page link, linked words, an attachment
-  // and a card never reach here (`webHref`, the card's own attribute).
+  // The editor's own click handler leaves a web link alone on a plain click;
+  // a modifier click stays the browser's, as for every link; a page link,
+  // linked words, an attachment and a card never reach here (`webHref`, the
+  // card's own attribute).
   useEffect(() => {
     const onClick = (event: MouseEvent) => {
       if (
@@ -488,12 +489,14 @@ export function FloatingToolbar({
         return;
       const target = event.target instanceof Element ? event.target : null;
       const anchor = target?.closest<HTMLAnchorElement>("a[href]") ?? null;
+      const windowTarget = anchor?.getAttribute("target")?.trim().toLowerCase();
       if (
         !anchor ||
         !container.current?.contains(anchor) ||
         anchor.dataset.pageRef !== undefined ||
         anchor.hasAttribute("data-brain-link-card") ||
         anchor.hasAttribute("download") ||
+        (windowTarget && windowTarget !== "_self") ||
         webHref(anchor.getAttribute("href"), window.location.origin) === null
       )
         return;

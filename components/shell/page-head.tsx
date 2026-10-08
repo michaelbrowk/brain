@@ -138,6 +138,11 @@ export function PageHead({
   onRunSmartSort,
   onSetStickers,
 }: PageHeadProps) {
+  // The head the lone crumb waits for: title, the Edited line and the chip
+  // row together (use-title-reveal.ts). Watched on the title alone, the
+  // crumb came while "+ Category" was still in the band.
+  const headRef = useRef<HTMLDivElement>(null);
+  useTitleReveal(headRef, PAGE_TITLE_REVEAL);
   // header left-aligns to the board's left edge (not centered).
   // group/head spans icon + title + meta so hover reveals every
   // affordance (Add icon / Add cover / …) at once
@@ -168,7 +173,7 @@ export function PageHead({
           </EmojiPicker>
         )}
       </div>
-      <div>
+      <div ref={headRef}>
         <TitleInput
           pageId={page.id}
           value={page.title}
@@ -445,7 +450,6 @@ function TitleInput({
 }) {
   const [draft, setDraft] = useState(value);
   const ref = useRef<HTMLTextAreaElement>(null);
-  useTitleReveal(ref, PAGE_TITLE_REVEAL);
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
       const recovered = recoverTitleDraft(localStorage, pageId, value);

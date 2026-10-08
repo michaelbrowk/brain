@@ -28,6 +28,24 @@ const table: { name: string; markdown: string; lines: Expectation[] }[] = [
     lines: [{ index: 0, checked: false, text: "alpha" }],
   },
   {
+    name: "a numbered item with a dot is a task line, and stays numbered",
+    markdown: "1. [ ] alpha\n2. [x] beta",
+    lines: [
+      { index: 0, checked: false, text: "alpha" },
+      { index: 1, checked: true, text: "beta" },
+    ],
+  },
+  {
+    name: "a numbered item with a parenthesis is a task line",
+    markdown: "1) [ ] alpha",
+    lines: [{ index: 0, checked: false, text: "alpha" }],
+  },
+  {
+    name: "a number without a box is not a task line",
+    markdown: "1. alpha",
+    lines: [],
+  },
+  {
     name: "a lowercase x is checked",
     markdown: "- [x] alpha",
     lines: [{ index: 0, checked: true, text: "alpha" }],

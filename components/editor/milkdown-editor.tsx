@@ -66,6 +66,7 @@ import { images } from "./image";
 import { handleWrapperImageDrop, imageUploadPlugin } from "./image-upload";
 import { math } from "./math";
 import { markdownFidelity } from "./markdown-fidelity";
+import { autolink } from "./autolink";
 import { linkPreviewPlugin } from "./link-preview";
 import { isInTable, noNestedTables } from "./table-guard";
 import { tableCells } from "./table-cell";
@@ -573,6 +574,8 @@ function Inner({
       // before pageRef: the serializer configuration, whose text handler the
       // page-ref spacer wraps
       .use(markdownFidelity)
+      // a typed address becomes a link on the space that ends it
+      .use(autolink)
       .use(pageRef)
       .use(linkPreviewPlugin(!!capabilities.unfurl))
       .use(tableBlock)

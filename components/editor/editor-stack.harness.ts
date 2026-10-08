@@ -9,7 +9,6 @@ import { tableBlock } from "@milkdown/kit/component/table-block";
 import { clipboard } from "@milkdown/kit/plugin/clipboard";
 import { cursor } from "@milkdown/kit/plugin/cursor";
 import { history } from "@milkdown/kit/plugin/history";
-import { listener } from "@milkdown/kit/plugin/listener";
 import { commonmark, syncHeadingIdPlugin } from "@milkdown/kit/preset/commonmark";
 import { gfm } from "@milkdown/kit/preset/gfm";
 import { Node as ProseNode } from "@milkdown/kit/prose/model";
@@ -19,6 +18,7 @@ import { callout } from "./callout";
 import { colorMarks } from "./color-mark";
 import { columnDrop } from "./column-drop";
 import { columns } from "./columns";
+import { createDeferredSerializer, deferredSerialize } from "./deferred-serialize";
 import { editingCore } from "./editing-core";
 import { emptyBlocks } from "./empty-block";
 import { images } from "./image";
@@ -136,7 +136,7 @@ export async function mountFullStack(markdown: string): Promise<MountedStack> {
     .use(columnDrop)
     .use(searchHighlight)
     .use(loadGuard(() => {}))
-    .use(listener)
+    .use(deferredSerialize(createDeferredSerializer(), () => {}))
     .create();
   const view = editor.ctx.get(editorViewCtx) as EditorView;
   const serialize = () => editor.ctx.get(serializerCtx)(view.state.doc);

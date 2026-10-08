@@ -2,9 +2,12 @@
 
 import type { Node as ProseNode } from "@milkdown/kit/prose/model";
 import { Schema } from "@milkdown/kit/prose/model";
+import { EditorState } from "@milkdown/kit/prose/state";
 import { describe, expect, it, vi } from "vitest";
 import type { TreeNode } from "@/lib/store/types";
+import { wholeDocumentWalks } from "./editor-stack.harness";
 import {
+  createPageRefNestingPlugin,
   decodePageRefDragPayload,
   encodePageRefDragPayload,
   findRemovedStandalonePageRef,
@@ -13,6 +16,7 @@ import {
   resolveStandalonePageRefDom,
   standalonePageRefAnchors,
   validatePageRefNestingTarget,
+  type RequestRemovePageRef,
 } from "./page-ref-nesting";
 
 function treeNode(
@@ -508,5 +512,32 @@ describe("findRemovedStandalonePageRef across lanes", () => {
 
     expect(findRemovedStandalonePageRef(before, after, 1, 1 + inside.nodeSize))
       .toBeNull();
+  });
+});
+
+describe("the removal guard on a transaction", () => {
+  const guarded = (onRequestRemove: RequestRemovePageRef) =>
+    EditorState.create({
+      // "A" is 0..3, the row 3..6.
+      doc: pageRefSchema.node("doc", null, [prose("A"), standaloneRef("target", "T")]),
+      plugins: [createPageRefNestingPlugin(() => null, false, () => {}, onRequestRemove)],
+    });
+
+  it("asks before a standalone row is deleted and refuses the transaction", () => {
+    const onRequestRemove = vi.fn();
+    const state = guarded(onRequestRemove);
+    const next = state.apply(state.tr.delete(3, 6));
+    expect(onRequestRemove).toHaveBeenCalledWith({ id: "target", occurrence: 0, label: "T" });
+    expect(next.doc.eq(state.doc)).toBe(true);
+  });
+
+  it("counts nothing while a paragraph is typed into", () => {
+    const onRequestRemove = vi.fn();
+    const state = guarded(onRequestRemove);
+    const walks = wholeDocumentWalks(() => {
+      state.apply(state.tr.insertText("x", 1));
+    });
+    expect(walks).toBe(0);
+    expect(onRequestRemove).not.toHaveBeenCalled();
   });
 });

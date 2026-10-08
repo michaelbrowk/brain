@@ -18,8 +18,8 @@ import {
   type FilePageRefResult,
   type UnfiledPage,
 } from "@/lib/page-filing";
+import { editsStayInsideTextblocks } from "./changed-ranges";
 import { editorWrapper } from "./column-drop";
-import { isBlockLaneDepth } from "./columns";
 import { pageRefVisibleText } from "./page-ref";
 
 /** Exported so a transaction's filing meta can be read back off it. */
@@ -134,36 +134,44 @@ function headingText(node: ProseNode): string {
  *  heading in one says nothing about the other. */
 export function documentSections(doc: ProseNode): DocumentSection[] {
   const sections: DocumentSection[] = [];
-  /** Open sections per lane, keyed by the lane's content start. */
-  const open = new Map<number, number[]>();
-  doc.descendants((node, pos) => {
-    const $pos = doc.resolve(pos);
-    if (node.type.name === "heading") {
-      if (!isBlockLaneDepth($pos, $pos.depth)) return false;
-      const laneStart = $pos.start();
-      const depth = typeof node.attrs.level === "number" ? node.attrs.level : 1;
-      const stack = open.get(laneStart) ?? [];
-      while (stack.length > 0) {
-        const candidate = sections[stack[stack.length - 1]];
-        if (candidate.depth < depth) break;
-        candidate.end = pos;
-        stack.pop();
+  // One lane at a time, carrying its content start, so no position is ever
+  // resolved: a lane's children are at a known depth, and the lanes a `cols`
+  // row opens are lanes because the row stands in one (`isBlockLaneDepth`'s
+  // rule, applied forward). Resolving every node made a count of a long page
+  // cost four milliseconds.
+  const walkLane = (lane: ProseNode, laneStart: number) => {
+    /** Open sections of this lane, by index into `sections`. */
+    const open: number[] = [];
+    const laneEnd = laneStart + lane.content.size;
+    lane.forEach((node, offset) => {
+      const pos = laneStart + offset;
+      if (node.type.name === "heading") {
+        const depth = typeof node.attrs.level === "number" ? node.attrs.level : 1;
+        while (open.length > 0) {
+          const candidate = sections[open[open.length - 1]];
+          if (candidate.depth < depth) break;
+          candidate.end = pos;
+          open.pop();
+        }
+        open.push(sections.length);
+        sections.push({
+          index: sections.length,
+          depth,
+          text: headingText(node),
+          end: laneEnd,
+        });
+        return;
       }
-      stack.push(sections.length);
-      open.set(laneStart, stack);
-      sections.push({
-        index: sections.length,
-        depth,
-        text: headingText(node),
-        end: $pos.end(),
+      // Only lanes are entered: the columns of a `cols` row that is itself
+      // in a lane. Everything else holds its own content.
+      if (node.type.name !== "cols") return;
+      node.forEach((column, columnOffset) => {
+        // pos + 1 enters the `cols`, + 1 again enters the column itself.
+        if (column.type.name === "col") walkLane(column, pos + columnOffset + 2);
       });
-      return false;
-    }
-    // Only lanes are entered: a `cols` row that is itself in a lane, and its
-    // columns. Everything else holds its own content.
-    if (node.type.name === "cols") return isBlockLaneDepth($pos, $pos.depth);
-    return node.type.name === "col";
-  });
+    });
+  };
+  walkLane(doc, 0);
   return sections;
 }
 
@@ -210,6 +218,67 @@ export function filePageRefTransaction(
  *  for a tick. The outgoing view clears the shared heading list only while it
  *  is still the one that filled it. */
 let headingOwner: symbol | null = null;
+
+/** Keeps `lib/page-filing`'s heading list in step with the live document, so
+ *  the tail's menu offers the sections the editor counts. */
+const documentHeadingsKey = new PluginKey<readonly DocumentHeading[]>(
+  "brainDocumentHeadings",
+);
+
+function headingsOf(doc: ProseNode): readonly DocumentHeading[] {
+  return documentSections(doc).map(({ index, depth, text }) => ({
+    index,
+    depth,
+    text,
+  }));
+}
+
+/** Keeps `lib/page-filing`'s heading list in step with the live document, so
+ *  the tail's menu offers the sections the editor counts.
+ *
+ *  The list is plugin state, recounted only by a transaction that could have
+ *  changed it: one that wrote inside a heading, or changed the shape of the
+ *  document. A keystroke inside a paragraph keeps the list it had, so typing
+ *  on a long page does not recount every section per key. The view publishes
+ *  the state when its identity changes. */
+export function documentHeadingsPlugin(): Plugin<readonly DocumentHeading[]> {
+  return new Plugin<readonly DocumentHeading[]>({
+    key: documentHeadingsKey,
+    state: {
+      init: (_config, state) => headingsOf(state.doc),
+      apply: (tr, headings) => {
+        if (!tr.docChanged) return headings;
+        if (editsStayInsideTextblocks(tr, (block) => block.type.name === "heading")) {
+          return headings;
+        }
+        return headingsOf(tr.doc);
+      },
+    },
+    view: (view) => {
+      const token = Symbol("page-filing");
+      headingOwner = token;
+      const publish = (headings: readonly DocumentHeading[]) => {
+        if (headingOwner !== token) return;
+        setDocumentHeadings(headings);
+      };
+      publish(documentHeadingsKey.getState(view.state) ?? []);
+      return {
+        update: (updated, previous) => {
+          const headings = documentHeadingsKey.getState(updated.state);
+          if (headings && headings !== documentHeadingsKey.getState(previous)) {
+            publish(headings);
+          }
+        },
+        destroy: () => {
+          if (headingOwner === token) {
+            headingOwner = null;
+            setDocumentHeadings([]);
+          }
+        },
+      };
+    },
+  });
+}
 
 /** `docHasPageRef` walks the whole document and `dragover` fires continuously.
  *  Nothing edits mid-drag, so the answer holds for as long as the document
@@ -316,20 +385,6 @@ export function pageFilingPlugin(): Plugin<DecorationSet> {
       } satisfies FiledFlashMeta);
     },
     view: (view) => {
-      const token = Symbol("page-filing");
-      headingOwner = token;
-      const publish = (doc: ProseNode) => {
-        if (headingOwner !== token) return;
-        setDocumentHeadings(
-          documentSections(doc).map(({ index, depth, text }) => ({
-            index,
-            depth,
-            text,
-          })),
-        );
-      };
-      publish(view.state.doc);
-
       const onFile = (event: Event) => {
         if (!(event instanceof CustomEvent)) return;
         const detail = asFilePageRefDetail(event.detail);
@@ -391,8 +446,7 @@ export function pageFilingPlugin(): Plugin<DecorationSet> {
       window.addEventListener("dragend", endDrag);
       window.addEventListener("drop", endDrag);
       return {
-        update: (updated, previous) => {
-          if (!updated.state.doc.eq(previous.doc)) publish(updated.state.doc);
+        update: (updated) => {
           const [flash] = pageFilingKey.getState(updated.state)?.find() ?? [];
           const spec: unknown = flash ? flash.spec : null;
           if (spec === flashSpec) return;
@@ -409,10 +463,6 @@ export function pageFilingPlugin(): Plugin<DecorationSet> {
           window.removeEventListener("drop", endDrag);
           if (flashTimer !== 0) window.clearTimeout(flashTimer);
           endDrag();
-          if (headingOwner === token) {
-            headingOwner = null;
-            setDocumentHeadings([]);
-          }
         },
       };
     },
@@ -468,4 +518,7 @@ export function pageFilingPlugin(): Plugin<DecorationSet> {
 
 /** What Milkdown mounts. The plugin itself is built above, where a test can
  *  reach it without an editor. */
-export const pageFiling = $prose(() => pageFilingPlugin());
+export const pageFiling = [
+  $prose(() => documentHeadingsPlugin()),
+  $prose(() => pageFilingPlugin()),
+];

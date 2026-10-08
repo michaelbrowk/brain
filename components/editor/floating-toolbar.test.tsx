@@ -8,10 +8,11 @@ import {
   EditorState,
   NodeSelection,
   TextSelection,
+  type Transaction,
 } from "@milkdown/kit/prose/state";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { EDITOR_DOC_CHANGED_EVENT } from "@/lib/editor-events";
+import { EDITOR_DOC_CHANGED_EVENT, EDITOR_LINK_FIELD_EVENT } from "@/lib/editor-events";
 
 const milkdown = vi.hoisted(() => ({ getEditor: vi.fn() }));
 
@@ -46,11 +47,24 @@ const schema = new Schema({
     table_cell: { content: "block+" },
     text: { group: "inline" },
   },
+  marks: {
+    link: { attrs: { href: {}, title: { default: null } } },
+  },
 });
 
-function documentFor(inTable: boolean, task: boolean, quote: boolean) {
+const LINKED_HREF = "https://example.com/old";
+
+function documentFor(inTable: boolean, task: boolean, quote: boolean, linked = false) {
   const nodes = schema.nodes;
-  const line = nodes.paragraph.create(null, schema.text("selected editor text"));
+  const line = nodes.paragraph.create(
+    null,
+    linked
+      ? [
+          schema.text("selected", [schema.marks.link.create({ href: LINKED_HREF })]),
+          schema.text(" editor text"),
+        ]
+      : schema.text("selected editor text"),
+  );
   if (quote) {
     return nodes.doc.create(null, nodes.blockquote.create(null, line));
   }
@@ -75,8 +89,9 @@ function editorState(
   empty = false,
   task = false,
   quote = false,
+  linked = false,
 ): EditorState {
-  const doc = documentFor(inTable, task, quote);
+  const doc = documentFor(inTable, task, quote, linked);
   let line = 0;
   doc.descendants((node, pos) => {
     if (line === 0 && node.isTextblock) line = pos + 1;
@@ -112,6 +127,9 @@ describe("FloatingToolbar", () => {
     state: EditorState;
     focus: ReturnType<typeof vi.fn>;
     hasFocus: ReturnType<typeof vi.fn>;
+    dispatch: ReturnType<typeof vi.fn>;
+    posAtDOM: ReturnType<typeof vi.fn>;
+    domAtPos: ReturnType<typeof vi.fn>;
   };
   let editor: { action: ReturnType<typeof vi.fn> };
 
@@ -154,6 +172,13 @@ describe("FloatingToolbar", () => {
       state: editorState(false),
       focus: vi.fn(),
       hasFocus: vi.fn(() => true),
+      // A dispatch that applies, so a second action reads the first's result.
+      dispatch: vi.fn((tr: Transaction) => {
+        view.state = view.state.apply(tr);
+      }),
+      // The first line's text starts at position 1 in every document here.
+      posAtDOM: vi.fn(() => 1),
+      domAtPos: vi.fn(() => ({ node: editorRoot.firstChild, offset: 0 })),
     };
     const ctx = { get: () => view };
     editor = {
@@ -202,7 +227,7 @@ describe("FloatingToolbar", () => {
       "Italic",
       "Strikethrough",
       "Code",
-      "Link to page",
+      "Link",
       "Colour",
     ]);
     expect(toolbar.querySelector('[aria-label="Table"]')).toBeNull();
@@ -276,10 +301,10 @@ describe("FloatingToolbar", () => {
     await renderWithSelection(false);
     await click(
       document.body.querySelector(
-        '[aria-label="Link to page"]',
+        '[aria-label="Link"]',
       ) as HTMLButtonElement,
     );
-    expect(document.body.querySelector('input[aria-label="Link to page"]')).not.toBeNull();
+    expect(document.body.querySelector('input[aria-label="Link"]')).not.toBeNull();
 
     view.hasFocus.mockReturnValue(false);
     await act(async () =>
@@ -287,7 +312,7 @@ describe("FloatingToolbar", () => {
     );
     await settle();
     expect(document.body.querySelector('[role="toolbar"]')).not.toBeNull();
-    expect(document.body.querySelector('input[aria-label="Link to page"]')).not.toBeNull();
+    expect(document.body.querySelector('input[aria-label="Link"]')).not.toBeNull();
   });
 
   it("keeps the saved selection while a main toolbar button owns focus", async () => {
@@ -308,11 +333,11 @@ describe("FloatingToolbar", () => {
     await renderWithSelection(false);
     await click(
       document.body.querySelector(
-        '[aria-label="Link to page"]',
+        '[aria-label="Link"]',
       ) as HTMLButtonElement,
     );
     const input = document.body.querySelector(
-      'input[aria-label="Link to page"]',
+      'input[aria-label="Link"]',
     ) as HTMLInputElement;
     expect(input).not.toBeNull();
 
@@ -341,8 +366,106 @@ describe("FloatingToolbar", () => {
     await settle();
 
     expect(view.focus).toHaveBeenCalledTimes(1);
-    expect(document.body.querySelector('input[aria-label="Link to page"]')).toBeNull();
+    expect(document.body.querySelector('input[aria-label="Link"]')).toBeNull();
     expect(document.body.querySelector('[role="toolbar"]')).not.toBeNull();
+  });
+
+  /** The field's value, through the setter React listens to. */
+  async function typeInto(input: HTMLInputElement, value: string) {
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      setter?.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await settle();
+  }
+
+  async function keyOn(element: Element, key: string) {
+    await act(async () => {
+      element.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+    });
+    await settle();
+  }
+
+  function linkedRuns(state: EditorState) {
+    const runs: Array<{ text: string; href: string }> = [];
+    state.doc.descendants((node) => {
+      const mark = node.marks.find((m) => m.type.name === "link");
+      if (node.isText && mark) runs.push({ text: node.text ?? "", href: String(mark.attrs.href) });
+    });
+    return runs;
+  }
+
+  it("takes an address in the Link field: the page rows give way to one row, and Enter links the words", async () => {
+    await renderWithSelection(false);
+    await click(document.body.querySelector('[aria-label="Link"]') as HTMLButtonElement);
+    const input = document.body.querySelector('input[aria-label="Link"]') as HTMLInputElement;
+    expect(input.placeholder).toBe("Paste a link or search pages");
+    expect(document.body.textContent).toContain("No pages");
+
+    await typeInto(input, "example.com/spec");
+    expect(document.body.textContent).toContain("Link to https://example.com/spec");
+    expect(document.body.textContent).not.toContain("No pages");
+
+    await keyOn(input, "Enter");
+    expect(view.dispatch).toHaveBeenCalledTimes(1);
+    expect(linkedRuns(view.state)).toEqual([{ text: "selected", href: "https://example.com/spec" }]);
+    expect(view.state.doc.textContent).toBe("selected editor text");
+    expect(view.focus).toHaveBeenCalled();
+    expect(document.body.querySelector('input[aria-label="Link"]')).toBeNull();
+  });
+
+  it("opens over a clicked link with its address, rewrites it on Enter, and Remove link takes it off the words", async () => {
+    view.state = editorState(false, "text", true, false, false, true);
+    editorRoot.replaceChildren();
+    const anchor = document.createElement("a");
+    anchor.href = LINKED_HREF;
+    anchor.textContent = "selected";
+    editorRoot.append(anchor, document.createTextNode(" editor text"));
+    const container = createRef<HTMLDivElement>();
+    container.current = editorRoot;
+    await act(async () => root.render(<FloatingToolbar container={container} />));
+    await settle();
+    expect(document.body.querySelector('[role="toolbar"]')).toBeNull();
+
+    await click(anchor);
+    const input = document.body.querySelector('input[aria-label="Link"]') as HTMLInputElement;
+    expect(input).not.toBeNull();
+    expect(input.value).toBe(LINKED_HREF);
+    expect(input.placeholder).toBe("Link address");
+    expect(document.body.querySelector('[aria-label="Open link"]')).not.toBeNull();
+    expect(document.body.querySelector('[aria-label="Remove link"]')).not.toBeNull();
+
+    await typeInto(input, "https://example.com/new");
+    await keyOn(input, "Enter");
+    expect(linkedRuns(view.state)).toEqual([{ text: "selected", href: "https://example.com/new" }]);
+    expect(view.state.doc.textContent).toBe("selected editor text");
+
+    anchor.href = "https://example.com/new";
+    await click(anchor);
+    const remove = document.body.querySelector('[aria-label="Remove link"]') as HTMLButtonElement;
+    expect(remove).not.toBeNull();
+    await click(remove);
+    expect(linkedRuns(view.state)).toEqual([]);
+    expect(view.state.doc.textContent).toBe("selected editor text");
+  });
+
+  it("opens the field for Mod-Shift-k over the selection, and leaves the field alone when nothing is selected", async () => {
+    await renderWithSelection(false);
+    await act(async () => window.dispatchEvent(new CustomEvent(EDITOR_LINK_FIELD_EVENT)));
+    await settle();
+    const input = document.body.querySelector('input[aria-label="Link"]') as HTMLInputElement;
+    expect(input).not.toBeNull();
+    expect(input.value).toBe("");
+
+    await keyOn(input, "Escape");
+    expect(document.body.querySelector('input[aria-label="Link"]')).toBeNull();
+
+    view.state = editorState(false, "text", true);
+    window.getSelection()?.removeAllRanges();
+    await act(async () => window.dispatchEvent(new CustomEvent(EDITOR_LINK_FIELD_EVENT)));
+    await settle();
+    expect(document.body.querySelector('input[aria-label="Link"]')).toBeNull();
   });
 
   it("presses the Task button only while the line is already a task, both ways", async () => {

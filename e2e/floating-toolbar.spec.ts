@@ -120,11 +120,11 @@ test("floating toolbar preserves select-all, keyboard focus, and Link Escape", a
   await content.focus();
   await page.keyboard.press("ControlOrMeta+A");
   const linkButton = toolbar.getByRole("button", {
-    name: "Link to page",
+    name: "Link",
     exact: true,
   });
   await linkButton.click();
-  const linkInput = toolbar.getByRole("textbox", { name: "Link to page" });
+  const linkInput = toolbar.getByRole("textbox", { name: "Link" });
   await expect(linkInput).toBeFocused();
 
   await linkInput.press("Escape");

@@ -782,7 +782,8 @@ export function FloatingToolbar({
               </button>
             </div>
           ) : linkOpen ? (
-            <div className="w-[260px]">
+            // Docked above the keyboard the field takes the bar's whole width.
+            <div className={pos.mobile ? "w-full" : "w-[260px]"}>
               <input
                 autoFocus
                 aria-label="Link"

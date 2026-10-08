@@ -9,8 +9,13 @@ import {
 } from "@milkdown/kit/prose/state";
 import { $prose } from "@milkdown/kit/utils";
 import { notifyEditorLinkField } from "@/lib/editor-events";
-import { classifyInternalPageLink, linkedWordsPageId } from "@/lib/internal-page-link";
+import {
+  classifyInternalPageLink,
+  linkedWordsHref,
+  linkedWordsPageId,
+} from "@/lib/internal-page-link";
 import { linkSelection } from "./insert-inline";
+import { currentPageRefOrigin } from "./page-ref";
 
 /** WEB LINKS ON WORDS.
  *
@@ -78,37 +83,60 @@ export function webHref(href: string | null | undefined, origin: string): string
   return href;
 }
 
-/** A pasted or typed address: a scheme, `www.` or a mail address, nothing
- *  looser. The field may take `example.com`, because the reader asked for a
- *  link; a paste is also how plain words arrive, and `notes.txt` pasted over
- *  a selection must stay the words it is. */
-function pastedWebHref(text: string): string | null {
-  const trimmed = text.trim();
+/** The address words get linked to, for what a person typed into the field
+ *  or pasted over a selection. One of this Brain's own page URLs, absolute
+ *  or `/p/<id>`, becomes the linked-words address E2 writes,
+ *  `/p/<id>#words`: a page href on words would read back as a chip with the
+ *  page's title, and the words would be gone on the next open. Anything else
+ *  is a web address, or null. */
+export function hrefForWords(input: string, origin: string): string | null {
+  const text = input.trim();
+  const page = classifyInternalPageLink(text, origin);
+  if (page) return linkedWordsHref(page.id);
+  const words = linkedWordsPageId(text, origin);
+  if (words) return linkedWordsHref(words);
+  return webHrefFromInput(text);
+}
+
+/** A pasted address: a scheme, `www.`, a mail address or one of this
+ *  Brain's pages, nothing looser. The field may take `example.com`, because
+ *  the reader asked for a link; a paste is also how plain words arrive, and
+ *  `notes.txt` pasted over a selection must stay the words it is. The
+ *  editor's own copy of a bare link is `<https://…>`, so the brackets come
+ *  off first. */
+function pastedHref(text: string): string | null {
+  const trimmed = text.trim().replace(/^<([^<>\s]+)>$/, "$1");
+  const origin = currentPageRefOrigin();
+  if (classifyInternalPageLink(trimmed, origin) || linkedWordsPageId(trimmed, origin)) {
+    return hrefForWords(trimmed, origin);
+  }
   if (!TYPED_URL_START.test(trimmed) && !WEB_SCHEME.test(trimmed) && !EMAIL.test(trimmed)) {
     return null;
   }
   return webHrefFromInput(trimmed);
 }
 
-/** A URL pasted while words are selected links those words and keeps them.
- *  Null for anything else, and the paste goes on to the card and the
- *  clipboard plugin: nothing selected, more than one line selected, a line
- *  that holds code, or text that is not one address. */
+/** A URL pasted while words are selected links those words and keeps them,
+ *  across lines too. Null for anything else, and the paste goes on to the
+ *  card and the clipboard plugin: nothing selected, a selection that starts
+ *  in code or outside text, or text that is not one address. */
 export function pasteUrlOverSelection(state: EditorState, pasted: string): Transaction | null {
   const { selection } = state;
   if (!(selection instanceof TextSelection) || selection.empty) return null;
   const { $from, $to } = selection;
-  if (!$from.sameParent($to) || !$from.parent.isTextblock || $from.parent.type.spec.code) {
+  if (!$from.parent.isTextblock || !$to.parent.isTextblock || $from.parent.type.spec.code) {
     return null;
   }
-  const href = pastedWebHref(pasted);
+  const href = pastedHref(pasted);
   if (!href) return null;
   return linkSelection(state, href);
 }
 
 /** The link the caret stands in, over its whole extent: the run of text
- *  carrying the same link mark, across the other marks it may also carry. A
- *  caret at the end of a link counts as in it, the way typing there does.
+ *  carrying the same link mark, across the other marks it may also carry. At
+ *  a boundary the caret belongs to the link it is leaving, the one typing
+ *  there would extend (`$pos.marks()`); at the start of a link that follows
+ *  plain words, where a click on the link lands, it belongs to that link.
  *  Null where the position carries no link. */
 export function linkRangeAt(state: EditorState, pos: number): LinkRange | null {
   const link = state.schema.marks.link;
@@ -119,11 +147,11 @@ export function linkRangeAt(state: EditorState, pos: number): LinkRange | null {
   const children: ProseNode[] = [];
   parent.forEach((child) => children.push(child));
   let index = $pos.index();
-  let mark = children[index] ? link.isInSet(children[index].marks) : undefined;
-  if (!mark && $pos.textOffset === 0 && index > 0) {
+  let mark = link.isInSet($pos.marks());
+  if (mark && $pos.textOffset === 0 && index > 0 && !mark.isInSet(children[index]?.marks ?? [])) {
     index -= 1;
-    mark = link.isInSet(children[index].marks);
   }
+  if (!mark && children[index]) mark = link.isInSet(children[index].marks);
   if (!mark) return null;
   let first = index;
   let last = index;

@@ -24,7 +24,7 @@ import {
 } from "@milkdown/kit/plugin/cursor";
 import type { Ctx } from "@milkdown/kit/ctx";
 import { listener, listenerCtx } from "@milkdown/kit/plugin/listener";
-import { NodeSelection, Plugin, PluginKey } from "@milkdown/kit/prose/state";
+import { NodeSelection, Plugin, PluginKey, TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import { Milkdown, MilkdownProvider, useEditor } from "@milkdown/react";
 import { $prose, insert } from "@milkdown/kit/utils";
@@ -969,9 +969,17 @@ function Inner({
           get()?.action(insert(toGfmTable(tsv)));
           return;
         }
-        // pasting a page URL turns into a titled link to that page
+        // pasting a page URL turns into a titled link to that page. Over
+        // selected words it links the words instead and keeps them, which
+        // is the paste plugin's (`web-link.ts`): a chip in their place threw
+        // the words away.
         const internal = classifyInternalPageLink(t, window.location.origin);
         if (!internal) return;
+        const overWords = get()?.action((ctx) => {
+          const { selection } = ctx.get(editorViewCtx).state;
+          return selection instanceof TextSelection && !selection.empty;
+        });
+        if (overWords) return;
         const pg = pages?.find((x) => x.id === internal.id);
         if (!pg) return;
         // Taken only where the link can go: a line that cannot hold it (a
@@ -1008,8 +1016,12 @@ function Inner({
           return;
         // A web link on words is the floating toolbar's on a plain click: the
         // field opens over it with its address, to change, open or remove. A
-        // card keeps its own click, which opens.
+        // card keeps its own click, which opens. A read-only editor has no
+        // field, and left alone the click would follow the href in this tab:
+        // it goes on to open as every link's does.
+        const editable = get()?.action((ctx) => ctx.get(editorViewCtx).editable) ?? false;
         if (
+          editable &&
           anchor.dataset.pageRef === undefined &&
           !anchor.hasAttribute("data-brain-link-card") &&
           webHref(anchor.getAttribute("href"), window.location.origin) !== null

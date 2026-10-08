@@ -33,16 +33,16 @@ import {
   notifyNestedTableBlocked,
 } from "@/lib/editor-events";
 import { linkSelection } from "./insert-inline";
-import { linkedWordsHref } from "@/lib/internal-page-link";
+import { linkedWordsHref, linkedWordsPageId } from "@/lib/internal-page-link";
 import { isInTable } from "./table-guard";
 import { selectionIsInQuote, selectionIsTask, toggleTaskCommand } from "./task-checkbox";
 import {
   type LinkRange,
+  hrefForWords,
   linkRangeAt,
   removeLink,
   setLinkHref,
   webHref,
-  webHrefFromInput,
 } from "./web-link";
 
 const COLORS = [
@@ -226,6 +226,9 @@ export function FloatingToolbar({
   // there (a click on it, or the caret in it): Enter rewrites its address
   // over its whole extent, and the rows under the field open or remove it.
   const [linkEdit, setLinkEdit] = useState<LinkRange | null>(null);
+  // The origin a page address is judged against, read once: the window is
+  // not a value to read while rendering.
+  const [origin] = useState(() => (typeof window === "undefined" ? "" : window.location.origin));
   const [inTable, setInTable] = useState(false);
   const [inQuote, setInQuote] = useState(false);
   const [taskActive, setTaskActive] = useState(false);
@@ -453,11 +456,11 @@ export function FloatingToolbar({
       const { state } = ctx.get(editorViewCtx);
       const { from, to } = state.selection;
       const range = linkRangeAt(state, from);
-      if (!range || to > range.to || webHref(range.href, window.location.origin) === null) return;
+      if (!range || to > range.to || webHref(range.href, origin) === null) return;
       found = range;
     });
     return found;
-  }, [getEditor]);
+  }, [getEditor, origin]);
 
   /** The field over a link with nothing selected, anchored to the anchor
    *  element the link is drawn as, so the bar stands over it. */
@@ -497,18 +500,22 @@ export function FloatingToolbar({
         anchor.hasAttribute("data-brain-link-card") ||
         anchor.hasAttribute("download") ||
         (windowTarget && windowTarget !== "_self") ||
-        webHref(anchor.getAttribute("href"), window.location.origin) === null
+        webHref(anchor.getAttribute("href"), origin) === null
       )
         return;
       getEditor()?.action((ctx) => {
         const view = ctx.get(editorViewCtx);
+        // A read-only editor (a lossy load, a frozen page) has no field: it
+        // would edit a document that is never saved. The click stays the
+        // editor's, which opens the link.
+        if (!view.editable) return;
         const range = linkRangeAt(view.state, view.posAtDOM(anchor, 0));
         if (range) openLinkFieldOver(anchor, range);
       });
     };
     document.addEventListener("click", onClick);
     return () => document.removeEventListener("click", onClick);
-  }, [container, getEditor, openLinkFieldOver]);
+  }, [container, getEditor, openLinkFieldOver, origin]);
 
   // Mod-Shift-k in the editor: the field for the selected words, or for the
   // link the caret stands in. With neither there is nothing to link.
@@ -516,6 +523,7 @@ export function FloatingToolbar({
     const onAsk = () => {
       getEditor()?.action((ctx) => {
         const view = ctx.get(editorViewCtx);
+        if (!view.editable) return;
         const { selection } = view.state;
         if (!selection.empty) {
           if (!selectionOwnsFloatingToolbar(view.state, true)) return;
@@ -525,7 +533,7 @@ export function FloatingToolbar({
           return;
         }
         const range = linkRangeAt(view.state, selection.from);
-        if (!range || webHref(range.href, window.location.origin) === null) return;
+        if (!range || webHref(range.href, origin) === null) return;
         const { node } = view.domAtPos(Math.min(range.from + 1, range.to));
         const element = node instanceof Element ? node : node.parentElement;
         const anchor = element?.closest<HTMLAnchorElement>("a[href]");
@@ -534,7 +542,7 @@ export function FloatingToolbar({
     };
     window.addEventListener(EDITOR_LINK_FIELD_EVENT, onAsk);
     return () => window.removeEventListener(EDITOR_LINK_FIELD_EVENT, onAsk);
-  }, [getEditor, openLinkField, openLinkFieldOver, webLinkAroundSelection]);
+  }, [getEditor, openLinkField, openLinkFieldOver, origin, webLinkAroundSelection]);
 
   useEffect(() => {
     if (!aiOpen) return;
@@ -630,6 +638,27 @@ export function FloatingToolbar({
     setPos(null);
   };
 
+  const linkQueryText = linkQuery.trim();
+  const linkResults = linkEdit
+    ? []
+    : pages
+        .filter((pg) => pg.title.toLowerCase().includes(linkQuery.trim().toLowerCase()))
+        .slice(0, 6);
+  // The address the typed text reads as. A bare domain (`notes.md`) is one
+  // only when no page is titled like it: a scheme, `www.`, a path or a mail
+  // address says address on its own, and then the page rows stand under the
+  // address row rather than giving way. One of this Brain's own page URLs
+  // links the words to the page (`hrefForWords`), shown as typed.
+  const linkCandidate = linkEdit ? null : hrefForWords(linkQueryText, origin);
+  const addressOnItsOwn =
+    /^(https?:\/\/|mailto:|www\.)/i.test(linkQueryText) ||
+    linkQueryText.includes("/") ||
+    linkQueryText.includes("@");
+  const typedHref =
+    linkCandidate && (addressOnItsOwn || linkResults.length === 0) ? linkCandidate : null;
+  const typedHrefLabel =
+    typedHref && linkedWordsPageId(typedHref, origin) !== null ? linkQueryText : typedHref;
+
   /** The link the field opened over, where it still is: the document may
    *  have changed under the field, and a rewrite of other words is worse
    *  than none. */
@@ -685,25 +714,16 @@ export function FloatingToolbar({
         removeEditedLink();
         return;
       }
-      const href = webHrefFromInput(typed);
+      const href = hrefForWords(typed, origin);
       if (href) applyWebLink(href);
       return;
     }
-    const href = webHrefFromInput(typed);
-    if (href) {
-      applyWebLink(href);
+    if (typedHref) {
+      applyWebLink(typedHref);
       return;
     }
     if (linkResults[0]) insertPageLink(linkResults[0]);
   };
-
-  const typedHref = linkEdit ? null : webHrefFromInput(linkQuery);
-  const linkResults =
-    linkEdit || typedHref
-      ? []
-      : pages
-          .filter((pg) => pg.title.toLowerCase().includes(linkQuery.trim().toLowerCase()))
-          .slice(0, 6);
 
   if (typeof document === "undefined") return null;
 
@@ -824,20 +844,21 @@ export function FloatingToolbar({
                       Remove link
                     </Row>
                   </>
-                ) : typedHref ? (
-                  <Row label={`Link to ${typedHref}`} onRun={() => applyWebLink(typedHref)}>
-                    <Icon name="link-linear" size={14} className="text-ink-3" />
-                    <span className="truncate">Link to {typedHref}</span>
-                  </Row>
                 ) : (
                   <>
+                    {typedHref && (
+                      <Row label={`Link to ${typedHrefLabel}`} onRun={() => applyWebLink(typedHref)}>
+                        <Icon name="link-linear" size={14} className="text-ink-3" />
+                        <span className="truncate">Link to {typedHrefLabel}</span>
+                      </Row>
+                    )}
                     {linkResults.map((pg) => (
                       <Row key={pg.id} label={pg.title} onRun={() => insertPageLink(pg)}>
                         <span className="text-[14px]">{pg.icon ?? DEFAULT_PAGE_ICON}</span>
                         <span className="truncate">{pg.title}</span>
                       </Row>
                     ))}
-                    {linkResults.length === 0 && (
+                    {!typedHref && linkResults.length === 0 && (
                       <p className="px-2 py-3 text-center text-[12px] text-ink-3">No pages</p>
                     )}
                   </>

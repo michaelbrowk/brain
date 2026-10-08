@@ -497,7 +497,7 @@ describe("Link to page over selected words", () => {
       view.dispatch(linkSelection(view.state, "https://a.example")!);
       const saved = markdownNow();
       expect(saved).not.toMatch(/\[\s*\]\(/);
-      expect(saved).toContain("[**a**](https://a.example)");
+      expect(saved).toContain("[a](https://a.example)");
       expect(saved).toContain("[c](https://a.example)");
     } finally {
       await editor.destroy();

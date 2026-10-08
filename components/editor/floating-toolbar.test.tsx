@@ -127,6 +127,7 @@ describe("FloatingToolbar", () => {
     state: EditorState;
     focus: ReturnType<typeof vi.fn>;
     hasFocus: ReturnType<typeof vi.fn>;
+    editable: boolean;
     dispatch: ReturnType<typeof vi.fn>;
     posAtDOM: ReturnType<typeof vi.fn>;
     domAtPos: ReturnType<typeof vi.fn>;
@@ -172,6 +173,7 @@ describe("FloatingToolbar", () => {
       state: editorState(false),
       focus: vi.fn(),
       hasFocus: vi.fn(() => true),
+      editable: true,
       // A dispatch that applies, so a second action reads the first's result.
       dispatch: vi.fn((tr: Transaction) => {
         view.state = view.state.apply(tr);
@@ -495,7 +497,7 @@ describe("FloatingToolbar", () => {
     container.current = editorRoot;
     const pages = [
       { id: "notes", title: "notes.md" },
-      { id: "spec", title: "example.com spec" },
+      { id: "spec", title: "the example.com/spec page" },
     ];
     await act(async () => root.render(<FloatingToolbar container={container} pages={pages} />));
     await act(async () => document.dispatchEvent(new Event("selectionchange")));
@@ -510,7 +512,16 @@ describe("FloatingToolbar", () => {
     await keyOn(input, "Enter");
     expect(linkedRuns(view.state)).toEqual([{ text: "selected", href: "/p/notes#words" }]);
 
-    // No page matches: the bare domain is an address.
+    // No page matches: the bare domain is an address. (The bar went with
+    // the link, and jsdom moved the selection into the field; selecting the
+    // words again brings it back.)
+    const reselect = document.createRange();
+    reselect.setStart(editorRoot.firstChild as Text, 0);
+    reselect.setEnd(editorRoot.firstChild as Text, 8);
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(reselect);
+    await act(async () => document.dispatchEvent(new Event("selectionchange")));
+    await settle();
     await click(document.body.querySelector('[aria-label="Link"]') as HTMLButtonElement);
     const again = document.body.querySelector('input[aria-label="Link"]') as HTMLInputElement;
     await typeInto(again, "other.md");
@@ -520,12 +531,12 @@ describe("FloatingToolbar", () => {
     // and the page rows stand under it.
     await typeInto(again, "example.com/spec");
     expect(document.body.textContent).toContain("Link to https://example.com/spec");
-    expect(document.body.querySelector('[aria-label="example.com spec"]')).not.toBeNull();
+    expect(document.body.querySelector('[aria-label="the example.com/spec page"]')).not.toBeNull();
     const rows = [...document.body.querySelectorAll('[role="toolbar"] button')].map((b) =>
       b.getAttribute("aria-label"),
     );
     expect(rows.indexOf("Link to https://example.com/spec")).toBeLessThan(
-      rows.indexOf("example.com spec"),
+      rows.indexOf("the example.com/spec page"),
     );
     await keyOn(again, "Enter");
     expect(linkedRuns(view.state)[0]).toEqual({ text: "selected", href: "https://example.com/spec" });
@@ -541,7 +552,7 @@ describe("FloatingToolbar", () => {
   });
 
   it("stays shut for a read-only editor: no field on a click or on Mod-Shift-k", async () => {
-    (view as unknown as { editable: boolean }).editable = false;
+    view.editable = false;
     const anchor = await renderLinkedLine();
     await click(anchor);
     expect(document.body.querySelector('input[aria-label="Link"]')).toBeNull();

@@ -179,7 +179,7 @@ import {
   type ListName,
   type LogbookRow,
 } from "../tasks/lists";
-import { parseTaskLines } from "../tasks/task-lines";
+import { TASK_TOKEN_RE, parseTaskLines } from "../tasks/task-lines";
 import {
   mergeCheckboxStates,
   type CheckboxMergeResult,
@@ -8227,12 +8227,11 @@ function assertToday(today: string | undefined): asserts today is string {
   }
 }
 
-/** The checkbox token, and nothing else on the line. The line number comes
- *  from `parseTaskLines`, which splits on /\r?\n/; splitting on "\n" alone
- *  and joining the same way agrees with it on every index and returns a CRLF
+/** The checkbox token is `TASK_TOKEN_RE` from `lib/tasks/task-lines.ts`, the
+ *  same marker `parseTaskLines` reads. The line number comes from
+ *  `parseTaskLines`, which splits on /\r?\n/; splitting on "\n" alone and
+ *  joining the same way agrees with it on every index and returns a CRLF
  *  body byte for byte. */
-const TASK_TOKEN_RE = /^(\s*[-*+]\s+\[)( |x|X)(\])/;
-
 function withCheckbox(
   markdown: string,
   line: number,

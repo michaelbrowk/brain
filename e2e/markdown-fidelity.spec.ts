@@ -127,6 +127,44 @@ test("opening a hand-written note writes nothing, and an edit changes one line",
   expect(after).toBe(HAND_WRITTEN.replace("Last line.", "Last line. Edited."));
 });
 
+test("an empty page mounts, takes typing and saves it", async ({ page }) => {
+  await login(page);
+  const id = await makePage(page, "Empty", "");
+  const content = await openPage(page, id);
+  await expect(content.locator("p").first()).toBeAttached();
+  await content.click();
+  await Promise.all([
+    page.waitForResponse(
+      (candidate) =>
+        candidate.url().endsWith(`/api/page/${id}`) &&
+        candidate.request().method() === "PUT" &&
+        candidate.ok(),
+    ),
+    page.keyboard.type("First words"),
+  ]);
+  expect((await serverBody(page, id)).trim()).toBe("First words");
+});
+
+test("Enter after a typed address starts a new paragraph, with no newline inside the old one", async ({ page }) => {
+  await login(page);
+  const id = await makePage(page, "Enter after link", "Visit");
+  const content = await openPage(page, id);
+  await caretToEnd(page);
+  await page.keyboard.type(" https://example.com/docs");
+  await page.keyboard.press("Enter");
+  await Promise.all([
+    page.waitForResponse(
+      (candidate) =>
+        candidate.url().endsWith(`/api/page/${id}`) &&
+        candidate.request().method() === "PUT" &&
+        candidate.ok(),
+    ),
+    page.keyboard.type("next"),
+  ]);
+  await expect(content.locator("p").first()).toHaveText("Visit https://example.com/docs");
+  expect((await serverBody(page, id)).trim()).toBe("Visit https://example.com/docs\n\nnext");
+});
+
 test("a typed address becomes a link and is written bare", async ({ page }) => {
   await login(page);
   const id = await makePage(page, "Typed link", "Visit");

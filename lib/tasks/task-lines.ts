@@ -24,10 +24,17 @@ export interface TaskLine {
   ordinal: number;
 }
 
-/** The spec's regex, in one place and nowhere else. A bullet or a number
- *  before the box: `1. [ ] b` is a task GFM draws, and the file keeps the
- *  writer's list as it was. */
-const TASK_LINE_RE = /^\s*(?:[-*+]|\d{1,9}[.)])\s+\[( |x|X)\]\s+(.*)$/;
+/** The marker before the box: a bullet or a number. `1. [ ] b` is a task GFM
+ *  draws, and the file keeps the writer's list as it was. */
+const TASK_MARKER = String.raw`(?:[-*+]|\d{1,9}[.)])`;
+
+/** The spec's regex, in one place and nowhere else. */
+const TASK_LINE_RE = new RegExp(String.raw`^\s*${TASK_MARKER}\s+\[( |x|X)\]\s+(.*)$`);
+
+/** The checkbox token and nothing else on the line, for the store's write of
+ *  a completion: the same marker as the reading above, so a line the index
+ *  reads is a line a tick can change. Groups: head, box, tail. */
+export const TASK_TOKEN_RE = new RegExp(String.raw`^(\s*${TASK_MARKER}\s+\[)( |x|X)(\])`);
 
 /** An opening or closing code fence: three or more backticks or tildes.
  *  An indented code block is knowingly out of scope. Milkdown serialises code

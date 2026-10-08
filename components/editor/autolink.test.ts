@@ -97,6 +97,37 @@ describe("typed URLs become links as they are typed", () => {
     expect(linksIn(view)).toEqual([{ text: "https://example.com", href: "https://example.com" }]);
   });
 
+  it("leaves GFM's trailing punctuation outside: _ * ~ and an unbalanced )", async () => {
+    const { view } = await mount("see");
+    caretAtEnd(view);
+    type(view, " https://x.io/a_ https://x.io/b* (https://x.io/c) https://en.wikipedia.org/wiki/A_(b) ");
+
+    expect(linksIn(view).map((l) => l.text)).toEqual([
+      "https://x.io/a",
+      "https://x.io/b",
+      "https://x.io/c",
+      "https://en.wikipedia.org/wiki/A_(b)",
+    ]);
+  });
+
+  it("lets Enter after an address split the paragraph, with no newline in it", async () => {
+    // Input rules see Enter as a typed newline; it is not a terminator here,
+    // so the key goes on to split the block. The address is written bare
+    // either way and reads as a link on the next open.
+    const { view, serialize } = await mount("x");
+    caretAtEnd(view);
+    type(view, " see https://x.io/a");
+    const handled = view.someProp("handleKeyDown", (f) =>
+      f(view, new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })),
+    );
+    expect(handled).toBe(true);
+    type(view, "next");
+
+    expect(serialize()).toBe("x see https://x.io/a\n\nnext");
+    expect(view.state.doc.childCount).toBe(2);
+    expect(view.state.doc.textContent).not.toContain("\n");
+  });
+
   it("does not link inside code", async () => {
     const { view } = await mount("```\nx\n```");
     const code = view.state.doc.firstChild!;

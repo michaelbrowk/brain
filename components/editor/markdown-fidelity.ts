@@ -30,7 +30,14 @@
  *  to GFM.
  *
  *  `scripts/verify-serialize-fidelity.mjs` is the gate: the first serialize
- *  of every fixture and every note must be the input, byte for byte. */
+ *  of every fixture and every note must be the input, byte for byte.
+ *
+ *  Known and older than this module, left for a later round: a `<br />` line
+ *  inside a callout, a toggle or a column is dropped on load (the preset's
+ *  empty-line pass strips it where the container's parser does not put a
+ *  paragraph back); a run of empty paragraphs at the end of a page loses
+ *  one per save (the preset skips the last block when it is empty); an
+ *  inline `<br>` inside a paragraph outside a table is stripped on load. */
 import { remarkStringifyOptionsCtx } from "@milkdown/kit/core";
 import type { MilkdownPlugin } from "@milkdown/kit/ctx";
 import {
@@ -40,7 +47,6 @@ import {
   headingSchema,
   hrSchema,
   orderedListSchema,
-  paragraphSchema,
 } from "@milkdown/kit/preset/commonmark";
 import { extendListItemSchemaForTask, tableSchema } from "@milkdown/kit/preset/gfm";
 import type { Node as ProseNode } from "@milkdown/kit/prose/model";
@@ -125,7 +131,9 @@ function readShapes(node: Positioned, source: string) {
       case "table":
         // The whole table, bytes and all: column padding is the writer's,
         // and it is written back as long as no cell changed.
-        node.source = source.slice(start, end);
+        // The store folds CRLF on the way in; the kept bytes must too, or a
+        // CRLF file's table came back with the one block that still had CR.
+        node.source = source.slice(start, end).replace(/\r\n?/g, "\n");
         break;
       default:
         break;
@@ -442,38 +450,11 @@ const fidelityTable = tableSchema.extendSchema((prev) => (ctx) => {
   };
 });
 
-/** An empty paragraph that is all a plain list item or a table cell holds is
- *  written as nothing: `-` and `|  |` are what the writer typed, and
- *  `<br />` there was the serializer's own noise. */
-function isBareContainer(state: SerializerState): boolean {
-  const top = state.top() as
-    | { type: string; children?: unknown[]; props?: Record<string, unknown> }
-    | undefined;
-  if (!top) return false;
-  if (top.type === "tableCell") return true;
-  return (
-    top.type === "listItem" &&
-    (top.children?.length ?? 0) === 0 &&
-    top.props?.checked == null
-  );
-}
-
-const fidelityParagraph = paragraphSchema.extendSchema((prev) => (ctx) => {
-  const base = prev(ctx);
-  return {
-    ...base,
-    toMarkdown: {
-      match: base.toMarkdown.match,
-      runner: (state: SerializerState, node: ProseNode) => {
-        if (node.content.size === 0 && isBareContainer(state)) {
-          state.openNode("paragraph").closeNode();
-          return;
-        }
-        base.toMarkdown.runner(state, node);
-      },
-    },
-  };
-});
+/* No extension of `paragraph`. Milkdown re-appends an extended schema at the
+ * end of its group, and `paragraph` last in the block group makes
+ * `blockquote` the default block: `createAndFill` recursed until the stack
+ * ran out and no empty page could mount. The empty-item and empty-cell rule
+ * lives in the stringify layer below instead. */
 
 /* ------------------------------------------------------------------------ */
 /* 3. Stringify handlers                                                     */
@@ -558,7 +539,6 @@ function brainUnsafe(base: Unsafe[]): Unsafe[] {
     if (p.character === "@" && p.before === "[+\\-.\\w]") continue;
     if (p.character === "." && p.before === "[Ww]") continue;
     if (p.character === ":" && (p.before === "[ps]" || p.before === "[^:]")) continue;
-    if (p.character === ":" && p.atBreak && p.after === ":") continue;
     if (p.character === "_" && phrasing && !p.atBreak) {
       kept.push(
         { ...p, before: `[^${WORD}]` },
@@ -566,10 +546,17 @@ function brainUnsafe(base: Unsafe[]): Unsafe[] {
       );
       continue;
     }
-    if (p.character === "[" && phrasing && !p.atBreak && p.notInConstruct) {
+    if (p.character === "[" && phrasing && !p.atBreak && !p.before && !p.after) {
       // `[` is syntax only when a `]` later turns into a link, a reference
-      // or a footnote; `[[Wiki]]` and `[not a link]` are words.
+      // or a footnote; `[[Wiki]]` and `[not a link]` are words. The base
+      // table and gfm-footnote each carry one such entry.
       kept.push({ ...p, after: "(?:\\^|[^\\]\\n]*\\][\\[(:])" });
+      continue;
+    }
+    if (p.character === "[" && p.atBreak && !p.after) {
+      // At a line start, `[` opens a definition or a footnote definition
+      // only with `]:` or `^` behind it; `[[Wiki]]` on its own line is words.
+      kept.push({ ...p, after: "(?:\\^|[^\\]\\n]*\\]:)" });
       continue;
     }
     kept.push(p);
@@ -593,8 +580,10 @@ function withUnsafe<T>(state: State, unsafe: Unsafe[], run: () => T): T {
 
 const text: Handler = (node, _parent, state, info) => {
   const value = str(node.value);
-  // The preset's own shortcut: whitespace runs need nothing.
-  if (/^[^*_\\]*\s+$/.test(value)) return value;
+  // Whitespace alone needs nothing. The preset's shortcut took any run that
+  // ENDED in whitespace, so `\- ` before `**a**` lost its backslash and the
+  // line came back a list.
+  if (/^\s+$/.test(value)) return value;
   return withUnsafe(state, brainUnsafe(state.unsafe), () =>
     state.safe(value, { ...info, encode: [] }),
   );
@@ -640,6 +629,36 @@ const list: Handler = (node, parent, state, info) => {
   return value;
 };
 
+/** The item with its checkbox. gfm's own handler wrote the box after `.`
+ *  markers only, so `1) [x] done` came back `1) done`. */
+const listItem: Handler = (node, parent, state, info) => {
+  const marker = state.bulletCurrent ?? "-";
+  let bullet = marker;
+  if (parent?.type === "list" && parent.ordered) {
+    const start = typeof parent.start === "number" && parent.start > -1 ? parent.start : 1;
+    const index = state.options.incrementListMarker === false ? 0 : (parent.children ?? []).indexOf(node);
+    bullet = String(start + index) + marker;
+  }
+  let size = bullet.length + 1;
+  const indent = state.options.listItemIndent ?? "one";
+  if (indent === "tab" || (indent === "mixed" && (parent?.spread === true || node.spread === true))) {
+    size = Math.ceil(size / 4) * 4;
+  }
+  const head = node.children?.[0];
+  const checkbox =
+    typeof node.checked === "boolean" && head?.type === "paragraph" ? `[${node.checked ? "x" : " "}] ` : "";
+  const tracker = state.createTracker(info);
+  tracker.move(bullet + " ".repeat(size - bullet.length) + checkbox);
+  tracker.shift(size);
+  const exit = state.enter("listItem");
+  const value = state.indentLines(state.containerFlow(node, tracker.current()), (line, index, blank) => {
+    if (index) return (blank ? "" : " ".repeat(size)) + line;
+    return (blank ? bullet : bullet + " ".repeat(size - bullet.length) + checkbox) + line;
+  });
+  exit();
+  return value;
+};
+
 /* --- headings ------------------------------------------------------------- */
 
 const heading: Handler = (node, _parent, state, info) => {
@@ -649,7 +668,10 @@ const heading: Handler = (node, _parent, state, info) => {
   const hasBreak = (node.children ?? []).some(
     (child) => child.type === "break" || (typeof child.value === "string" && /\r?\n|\r/.test(child.value)),
   );
-  if (rank < 3 && (node.setext === true || hasBreak)) {
+  // An emptied setext heading has nothing to underline: `=====` alone would
+  // read back as a paragraph.
+  const hasText = (node.children ?? []).length > 0;
+  if (rank < 3 && hasText && (node.setext === true || hasBreak)) {
     const exit = state.enter("headingSetext");
     const subexit = state.enter("phrasing");
     const value = state.containerPhrasing(node, { ...tracker.current(), before: "\n", after: "\n" });
@@ -723,9 +745,11 @@ const code: Handler = (node, _parent, state, info) => {
 
 const thematicBreak: Handler = (node, _parent, state) => {
   const rule = str(node.rule);
-  if (/^(?:[-*_][ \t]*){3,}$/.test(rule)) return rule;
-  // Three dashes right under a line of an item would be a setext underline.
-  return state.stack.includes("listItem") ? "***" : "---";
+  // Dashes right under the line of a tight item would be a setext underline,
+  // wherever the rule came from.
+  const inItem = state.stack.includes("listItem");
+  if (/^(?:[-*_][ \t]*){3,}$/.test(rule) && !(inItem && rule.includes("-"))) return rule;
+  return inItem ? "***" : "---";
 };
 
 const hardBreak: Handler = (node, _parent, state, info) => {
@@ -743,13 +767,22 @@ const textOf = (node: MarkdownNode): string =>
   typeof node.value === "string" ? node.value : (node.children ?? []).map(textOf).join("");
 
 /** `https://x`, `www.x` and `me@x` are links GFM reads without brackets, so
- *  a link whose text is its own address needs none. */
-function literalForm(node: MarkdownNode): string | null {
+ *  a link whose text is its own address needs none, where GFM would read
+ *  one: after a line start, whitespace or `*_~(`, before whitespace or the
+ *  trailing punctuation it leaves outside, and with no such punctuation on
+ *  the address itself. Anywhere else a bare address is not a link, or is a
+ *  different one, and the brackets stay. */
+function literalForm(node: MarkdownNode, info?: Pick<Info, "before" | "after">): string | null {
   if ((node.children ?? []).length !== 1 || node.children?.[0]?.type !== "text") return null;
   if (node.title) return null;
   const label = textOf(node);
   const url = str(node.url);
   if (!label || /[\s<>]/.test(label)) return null;
+  if (/[?!.,:*_~]$/.test(label) || !balancedParens(label)) return null;
+  if (info) {
+    if (!/(?:^|[\s*_~(])$/.test(info.before)) return null;
+    if (!/^(?:$|[\s<?!.,:*_~)])/.test(info.after)) return null;
+  }
   if (url === label && /^https?:\/\//i.test(label)) return label;
   if (url === `http://${label}` && /^www\./i.test(label)) return label;
   if (url === `mailto:${label}` && /^[\w.+-]+@[\w-]+(?:\.[\w-]+)+$/.test(label)) return label;
@@ -769,7 +802,7 @@ function balancedParens(url: string): boolean {
 const link: Handler = (node, _parent, state, info) => {
   const tracker = state.createTracker(info);
   const url = str(node.url);
-  const literal = node.form === "angle" ? null : literalForm(node);
+  const literal = node.form === "angle" ? null : literalForm(node, info);
   if (literal) {
     const exit = state.enter("autolink");
     const value = tracker.move(literal);
@@ -827,8 +860,8 @@ const link: Handler = (node, _parent, state, info) => {
   exit();
   return value;
 };
-(link as Handler & { peek?: Handler }).peek = (node) =>
-  node.form !== "angle" && literalForm(node) ? literalForm(node)!.charAt(0) : "[";
+(link as Handler & { peek?: Handler }).peek = (node, _parent, _state, info) =>
+  node.form !== "angle" && literalForm(node, info) ? literalForm(node, info)!.charAt(0) : "[";
 
 /* --- the root: one link stays one link ----------------------------------- */
 
@@ -886,7 +919,10 @@ function joinSplitLinks(node: MarkdownNode) {
       }
       break;
     }
-    if (pieces.length === 1) {
+    // Only a run the serializer split is joined: at least one piece is the
+    // link under a mark. Two plain links to one address a space apart are
+    // two links, and two page refs are two chips.
+    if (pieces.length === 1 || pieces.every((piece) => isSpace(piece) || piece.type === "link")) {
       joined.push(children[index]!);
       index += 1;
       continue;
@@ -981,8 +1017,37 @@ function keepUnchangedTables(node: MarkdownNode, state: State) {
   });
 }
 
+const isBreakHtml = (node: MarkdownNode) =>
+  node.type === "html" && /^<br\s*\/?>$/i.test(str(node.value).trim());
+
+/** The preset writes an empty paragraph as `<br />`. In a plain list item
+ *  that is all the item holds, or in a table cell, the paragraph is the
+ *  container's own and the writer typed `-` or `|  |`: the break goes. An
+ *  empty task item keeps it, because `- [ ]` without content is not a task
+ *  to GFM. */
+function stripBareBreaks(node: MarkdownNode) {
+  const children = node.children;
+  if (!children) return;
+  for (const child of children) stripBareBreaks(child);
+  if (node.type === "tableCell") {
+    for (const child of children) {
+      if (child.type === "paragraph" && child.children?.length && child.children.every(isBreakHtml)) {
+        child.children = [];
+      }
+    }
+    return;
+  }
+  if (node.type === "listItem" && node.checked == null && children.length === 1) {
+    const only = children[0]!;
+    if (only.type === "paragraph" && only.children?.length === 1 && isBreakHtml(only.children[0]!)) {
+      node.children = [];
+    }
+  }
+}
+
 const root: Handler = (node, _parent, state, info) => {
   joinSplitLinks(node);
+  stripBareBreaks(node);
   keepUnchangedTables(node, state);
   return state.containerFlow(node, info);
 };
@@ -1009,6 +1074,7 @@ export const fidelityStringify: MilkdownPlugin = (ctx) => {
         ...(current.handlers ?? {}),
         text,
         list,
+        listItem,
         heading,
         code,
         thematicBreak,
@@ -1032,6 +1098,5 @@ export const markdownFidelity = [
   fidelityHardbreak,
   fidelityLink,
   fidelityTable,
-  fidelityParagraph,
   fidelityStringify,
 ].flat();

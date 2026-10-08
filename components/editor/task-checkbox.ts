@@ -5,7 +5,6 @@ import type { Node as ProseNode, NodeType, ResolvedPos } from "@milkdown/kit/pro
 import { liftListItem, splitListItem, wrapRangeInList } from "@milkdown/kit/prose/schema-list";
 import { EditorState, Plugin, PluginKey, TextSelection } from "@milkdown/kit/prose/state";
 import type { Command, Transaction } from "@milkdown/kit/prose/state";
-import { canSplit } from "@milkdown/kit/prose/transform";
 import { Decoration, DecorationSet } from "@milkdown/kit/prose/view";
 import type {
   EditorView,
@@ -1393,18 +1392,12 @@ export interface TaskTrigger {
  *  from the first block of the range to the last, so a press on the second
  *  bullet of a list took the first one with it and nested the second. */
 type TaskTarget =
-  | { kind: "item"; pos: number; task: boolean; ordered: boolean }
+  | { kind: "item"; pos: number; task: boolean }
   | { kind: "block"; pos: number; end: number };
 
 /** Nothing sane nests a list this deep. The bound is here so a schema that
  *  surprises the lift ends the loop rather than the session. */
 const MAX_LIFTS = 12;
-
-/** What a list item looks like once it stands in a bullet list. An ordered
- *  item carries its number in `label` and `ordered` in `listType`, and both
- *  have to follow the item into its new list, or it draws a `1.` beside its
- *  own checkbox. */
-const BULLET_ITEM_ATTRS = { label: "•", listType: "bullet" };
 
 /** The lines the selection touches, in document order, and nothing else. */
 function taskTargets(doc: ProseNode, from: number, to: number): TaskTarget[] {
@@ -1427,12 +1420,7 @@ function taskTargets(doc: ProseNode, from: number, to: number): TaskTarget[] {
     const itemPos = $block.before($block.depth);
     if (seen.has(itemPos)) return false;
     seen.add(itemPos);
-    targets.push({
-      kind: "item",
-      pos: itemPos,
-      task: isTaskItem($block.parent),
-      ordered: $block.node($block.depth - 1).type.name === "ordered_list",
-    });
+    targets.push({ kind: "item", pos: itemPos, task: isTaskItem($block.parent) });
     return false;
   });
   return targets;
@@ -1449,21 +1437,15 @@ export function selectionIsTask(state: Pick<EditorState, "doc" | "selection">): 
   return targets.length > 0 && targets.every((t) => t.kind === "item" && t.task);
 }
 
-/** A bullet item becomes a task where it stands: one attribute on the item
- *  that is already there. No wrap, so it cannot nest, and no range, so the
- *  sibling above it is no part of the press.
- *
- *  `rebullet` is for an item fresh out of an ordered list and nothing
- *  else: the attributes an item already sitting in a bullet list carries are
- *  its own, and a press has no business rewriting them. */
-function markItemAsTask(tr: Transaction, pos: number, rebullet = false) {
+/** A list item becomes a task where it stands, bullet or numbered: one
+ *  attribute on the item that is already there. No wrap, so it cannot nest,
+ *  and no range, so the sibling above it is no part of the press. The
+ *  attributes the item carries are its own, and a press has no business
+ *  rewriting them: `1. [ ] b` is a task line to the store as `- [ ] b` is. */
+function markItemAsTask(tr: Transaction, pos: number) {
   const node = tr.doc.nodeAt(pos);
   if (!node || node.type.name !== "list_item") return;
-  tr.setNodeMarkup(pos, undefined, {
-    ...node.attrs,
-    ...(rebullet ? BULLET_ITEM_ATTRS : {}),
-    checked: false,
-  });
+  tr.setNodeMarkup(pos, undefined, { ...node.attrs, checked: false });
 }
 
 /** `checked: false` on the items a wrap created, and on nothing else. */
@@ -1490,60 +1472,6 @@ function wrapBlocksAsTasks(
   if (!wrapRangeInList(tr, range, bulletListType)) return;
   const moved = tr.mapping.slice(base);
   markNewItemsAsTask(tr, moved.map(range.start, -1), moved.map(range.end, 1));
-}
-
-/** An ordered item becomes a bullet task item at the same depth.
- *
- *  The list is split around the item the way a lift splits one, and the piece
- *  left holding the item becomes a bullet list. `1. [ ] text` is not a task
- *  line to `TASK_LINE_RE`, so writing one drew a checkbox that
- *  `parseTaskLines` could not see: the counts disagreed and every + Task on
- *  the page answered "This note could not be read". */
-function convertOrderedItem(
-  tr: Transaction,
-  pos: number,
-  bulletListType: NodeType,
-): number | null {
-  const item = tr.doc.nodeAt(pos);
-  if (!item) return null;
-  const $item = tr.doc.resolve(pos);
-  const list = $item.parent;
-  const index = $item.index();
-  const base = tr.steps.length;
-  // The later split first, so it does not move the earlier one.
-  const end = pos + item.nodeSize;
-  const tailSplit = index < list.childCount - 1 && canSplit(tr.doc, end, 1);
-  if (tailSplit) tr.split(end, 1);
-  if (index > 0 && canSplit(tr.doc, pos, 1)) tr.split(pos, 1);
-  const itemPos = tr.mapping.slice(base).map(pos);
-  const $now = tr.doc.resolve(itemPos);
-  if ($now.parent.type.name !== "ordered_list") return itemPos;
-  if (tailSplit) keepTailCounting(tr, $now, list.attrs.order, index);
-  tr.setNodeMarkup($now.before($now.depth), bulletListType, { spread: list.attrs.spread });
-  return itemPos;
-}
-
-/** The piece of an ordered list below the press goes on counting.
- *
- *  `tr.split` copies the list's own attributes, `order` among them, so the
- *  tail restarted at the number the head began with: `3. / 4. / 5.` with the
- *  middle line pressed read `3.`, the task, `3.`. The line that left is not a
- *  numbered line any more, so the count carries on over the lines that are:
- *  `3.`, the task, `4.`. The preset's own `syncListOrderPlugin` reads `order`
- *  back off the list and relabels the items under it. */
-function keepTailCounting(
-  tr: Transaction,
-  $item: ResolvedPos,
-  order: unknown,
-  index: number,
-) {
-  const tailPos = $item.after($item.depth);
-  const tail = tr.doc.nodeAt(tailPos);
-  if (!tail || tail.type.name !== "ordered_list") return;
-  tr.setNodeMarkup(tailPos, undefined, {
-    ...tail.attrs,
-    order: (typeof order === "number" ? order : 1) + index,
-  });
 }
 
 /** The siblings BELOW the pressed item stay in the list they were in.
@@ -1605,8 +1533,8 @@ function liftItemToParagraph(tr: Transaction, pos: number, listItemType: NodeTyp
  *
  *  The rule the whole of it serves: the command acts on the blocks the
  *  selection touches, in place, and nowhere else. A paragraph gains a task
- *  item, a bullet becomes one where it stands, an ordered item moves to a
- *  bullet list at its own depth, and a task goes back to a paragraph.
+ *  item, a bullet or a numbered item becomes one where it stands, and a
+ *  task goes back to a paragraph.
  *
  *  `mode` decides only what a line that is ALREADY a task does: the slash
  *  menu's Task leaves it alone, the toolbar's Task takes it back. */
@@ -1646,12 +1574,7 @@ function taskCommand(mode: "ensure" | "toggle", trigger: TaskTrigger | null): Co
         // Already a task: nothing to do, and `checked: true` is not something
         // a press that leaves the line a task may drop on the floor.
         if (target.task) continue;
-        if (!target.ordered) {
-          markItemAsTask(tr, target.pos);
-          continue;
-        }
-        const moved = convertOrderedItem(tr, target.pos, bulletListType);
-        if (moved !== null) markItemAsTask(tr, moved, true);
+        markItemAsTask(tr, target.pos);
         continue;
       }
       if (lift) continue;

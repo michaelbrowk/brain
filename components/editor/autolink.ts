@@ -14,17 +14,20 @@ import { InputRule } from "@milkdown/kit/prose/inputrules";
 import { $inputRule } from "@milkdown/kit/utils";
 
 /** An address and the character that finished it. The address starts the
- *  text or follows whitespace, so `foo@bar` inside a word is left alone. */
-const ADDRESS = /(?:^|[\s(])((?:https?:\/\/|www\.)[^\s<]+|[\w.+-]+@[\w-]+(?:\.[\w-]+)+)([\s)])$/i;
+ *  text or follows what GFM lets precede one (whitespace, `*`, `_`, `~`,
+ *  `(`), so `foo@bar` inside a word is left alone. A space, a tab or a
+ *  closing parenthesis ends it; Enter reaches input rules as a newline and
+ *  is not a terminator here, or the newline would land in the paragraph. */
+const ADDRESS = /(?:^|[\s(*_~])((?:https?:\/\/|www\.)[^\s<]+|[\w.+-]+@[\w-]+(?:\.[\w-]+)+)([ \t)])$/i;
 
-/** GFM's trailing-punctuation rule, close enough: `.`, `,`, `:`, `;`, `!`,
- *  `?`, a closing quote, and a `)` that has no opening one. */
+/** GFM's trailing-punctuation rule: `?`, `!`, `.`, `,`, `:`, `*`, `_`, `~`
+ *  and a `)` that has no opening one stay outside the link. */
 function trimAddress(raw: string): string {
   let address = raw;
   for (;;) {
     const last = address.at(-1);
     if (last === undefined) break;
-    if (".,:;!?'\"".includes(last)) {
+    if ("?!.,:*_~".includes(last)) {
       address = address.slice(0, -1);
       continue;
     }
@@ -48,6 +51,9 @@ export const autolinkRule = $inputRule((ctx) => {
   return new InputRule(ADDRESS, (state, match, start, end) => {
     const [, raw, terminator] = match;
     if (!raw || !terminator) return null;
+    // A `)` that closes a parenthesis inside the address is part of it,
+    // as in a Wikipedia title; the space after will end the address.
+    if (terminator === ")" && (raw.match(/\(/g)?.length ?? 0) > (raw.match(/\)/g)?.length ?? 0)) return null;
     const address = trimAddress(raw);
     if (!address) return null;
     const $start = state.doc.resolve(start);

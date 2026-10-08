@@ -296,26 +296,27 @@ describe("the Task command", () => {
     agreesWithTheStore(view);
   });
 
-  it("moves an ordered item to a bullet task line the store can read", async () => {
+  it("makes an ordered item a task where it stands, numbered as it was", async () => {
     const view = await mountEditor("1. first\n");
     caretInLine(view, 0);
 
     press(view, ensureTaskCommand);
 
-    // `1. [ ] first` is a checkbox to the editor and prose to the store.
-    expect(serialize(view)).toBe("* [ ] first\n");
+    // `1. [ ] first` is a checkbox to the editor and to the store alike.
+    expect(serialize(view)).toBe("1. [ ] first\n");
     expect(boxes(view)).toHaveLength(1);
     agreesWithTheStore(view);
   });
 
-  it("splits an ordered list around the item the press was on", async () => {
+  it("leaves an ordered list whole around the item the press was on", async () => {
     const view = await mountEditor("1. first\n2. second\n3. third\n");
     caretInLine(view, 1);
 
     press(view, ensureTaskCommand);
 
-    expect(serialize(view)).toBe("1. first\n\n* [ ] second\n\n2. third\n");
+    expect(serialize(view)).toBe("1. first\n2. [ ] second\n3. third\n");
     expect(boxes(view)).toHaveLength(1);
+    expect(view.dom.querySelectorAll("ol")).toHaveLength(1);
     agreesWithTheStore(view);
   });
 
@@ -483,15 +484,13 @@ describe("the Task command", () => {
     expect(serialize(view)).toBe("/task\n");
   });
 
-  it("keeps the count going in the tail of a split ordered list", async () => {
+  it("keeps the count going through an ordered task", async () => {
     const view = await mountEditor("3. a\n4. b\n5. c\n");
     caretInLine(view, 1);
 
     press(view, ensureTaskCommand);
 
-    // Two numbered lines are left and they read as two, rather than the tail
-    // restarting at the number the head began with.
-    expect(serialize(view)).toBe("3. a\n\n* [ ] b\n\n4. c\n");
+    expect(serialize(view)).toBe("3. a\n4. [ ] b\n5. c\n");
     agreesWithTheStore(view);
   });
 

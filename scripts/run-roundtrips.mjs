@@ -13,6 +13,9 @@ const harnesses = readdirSync(dir)
 // serialization idempotency guards rev stability (fixed-point serializer) —
 // same gate, different invariant than per-block fidelity
 harnesses.push("verify-serialize-idempotent.mjs");
+// serialization fidelity: the fixed point must be the writer's own bytes, so
+// the first save of a hand-written file changes only what the edit changed
+harnesses.push("verify-serialize-fidelity.mjs");
 
 let failed = 0;
 for (const h of harnesses) {

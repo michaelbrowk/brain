@@ -65,6 +65,7 @@ import { toggle, toggleMemoryCtx } from "./toggle";
 import { images } from "./image";
 import { handleWrapperImageDrop, imageUploadPlugin } from "./image-upload";
 import { math } from "./math";
+import { markdownFidelity } from "./markdown-fidelity";
 import { linkPreviewPlugin } from "./link-preview";
 import { isInTable, noNestedTables } from "./table-guard";
 import { tableCells } from "./table-cell";
@@ -569,6 +570,9 @@ function Inner({
       .use(images)
       .use(imageUploadPlugin(capabilities.upload ?? null))
       .use(math)
+      // before pageRef: the serializer configuration, whose text handler the
+      // page-ref spacer wraps
+      .use(markdownFidelity)
       .use(pageRef)
       .use(linkPreviewPlugin(!!capabilities.unfurl))
       .use(tableBlock)

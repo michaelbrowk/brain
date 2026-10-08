@@ -16,6 +16,7 @@ import { linkPreviewPlugin } from "./link-preview";
 import { pageRef, setPageRefOrigin } from "./page-ref";
 import { typedUrls } from "./typed-url";
 import {
+  hrefForWords,
   linkRangeAt,
   pasteUrlOverSelection,
   removeLink,
@@ -131,6 +132,15 @@ function links(view: EditorView) {
     found.push({ text: node.text ?? "", href: String(mark.attrs.href) });
   });
   return found;
+}
+
+/** The block shape of the document, for comparing two editors. */
+function shape(view: EditorView) {
+  const out: string[] = [];
+  view.state.doc.descendants((node) => {
+    if (!node.isText) out.push(node.type.name);
+  });
+  return out.join(" ");
 }
 
 describe("a URL pasted over selected words", () => {
@@ -280,6 +290,147 @@ describe("the field's address", () => {
     expect(webHrefFromInput("javascript:alert(1)")).toBeNull();
     expect(webHrefFromInput("https://exa mple.com")).toBeNull();
     expect(webHrefFromInput("")).toBeNull();
+  });
+});
+
+describe("a page URL over selected words (round 2, H1)", () => {
+  it("pasted, absolute or relative, links the words to the page with the words marker, and a reload keeps them", async () => {
+    const { view, markdown } = await mount("some words here and more words too");
+    select(view, "words");
+    expect(paste(view, "http://brain.local/p/abc123")).toBe(true);
+    expect(links(view)).toEqual([{ text: "words", href: "/p/abc123#words" }]);
+    caret(view, 1);
+    select(view, "more words");
+    expect(paste(view, "/p/plain")).toBe(true);
+    expect(links(view)).toEqual([
+      { text: "words", href: "/p/abc123#words" },
+      { text: "more words", href: "/p/plain#words" },
+    ]);
+    expect(markdown()).toBe("some [words](/p/abc123#words) here and [more words](/p/plain#words) too");
+
+    const again = await mount(markdown());
+    expect(again.view.state.doc.textContent).toBe("some words here and more words too");
+    let refs = 0;
+    again.view.state.doc.descendants((node) => {
+      if (node.type.name === "page_ref") refs += 1;
+    });
+    expect(refs).toBe(0);
+  });
+
+  it("is what the field writes too: hrefForWords maps a page address to the marker and leaves the web alone", () => {
+    const origin = "http://brain.local";
+    expect(hrefForWords("http://brain.local/p/abc123", origin)).toBe("/p/abc123#words");
+    expect(hrefForWords("/p/abc123", origin)).toBe("/p/abc123#words");
+    expect(hrefForWords("http://brain.local/p/abc123#words", origin)).toBe("/p/abc123#words");
+    expect(hrefForWords("https://example.com/a", origin)).toBe("https://example.com/a");
+    expect(hrefForWords("example.com", origin)).toBe("https://example.com");
+    expect(hrefForWords("the spec", origin)).toBeNull();
+  });
+});
+
+describe("what a paste takes (round 2, L4, M13, M14)", () => {
+  it("takes Brain's own clipboard form <https://…> and a selection across two paragraphs", async () => {
+    const { view, markdown } = await mount("one two\n\nthree four");
+    select(view, "two");
+    expect(paste(view, "<https://example.com/angle>")).toBe(true);
+    expect(links(view)).toEqual([{ text: "two", href: "https://example.com/angle" }]);
+    view.dispatch(
+      view.state.tr.setSelection(TextSelection.create(view.state.doc, 1, after(view, "three"))),
+    );
+    expect(paste(view, "https://example.com/across")).toBe(true);
+    expect(markdown()).toBe(
+      "[one](https://example.com/across) [two](https://example.com/across)\n\n[three](https://example.com/across) four",
+    );
+  });
+
+  it("leaves words pasted over a selection alone: a file name is not an address", async () => {
+    const { view } = await mount("some words here");
+    select(view, "words");
+    expect(pasteUrlOverSelection(view.state, "notes.txt")).toBeNull();
+    expect(pasteUrlOverSelection(view.state, "readme.md")).toBeNull();
+  });
+
+  it("refuses an address with a space even where the URL parser would encode it", () => {
+    expect(webHrefFromInput("https://example.com/x y")).toBeNull();
+    expect(webHrefFromInput("www.example.com/x y")).toBeNull();
+  });
+});
+
+describe("the link under the caret at a boundary (round 2, L2, M3, M4)", () => {
+  it("belongs to the link the caret leaves, as typing there does, and to the next one at a line's start", async () => {
+    const { view } = await mount(
+      "[aaa](https://a.example)[bbb](https://b.example) tail [ccc](https://c.example)",
+    );
+    expect(linkRangeAt(view.state, after(view, "aaa"))?.href).toBe("https://a.example");
+    expect(linkRangeAt(view.state, after(view, "bbb"))?.href).toBe("https://b.example");
+    expect(linkRangeAt(view.state, after(view, "bb"))?.href).toBe("https://b.example");
+    expect(linkRangeAt(view.state, 1)?.href).toBe("https://a.example");
+    // A click lands at the start of a link that follows plain words.
+    expect(linkRangeAt(view.state, after(view, "tail "))?.href).toBe("https://c.example");
+    expect(linkRangeAt(view.state, after(view, "tai"))).toBeNull();
+  });
+
+  it("keeps the link's title through a rewrite of its address", async () => {
+    const { view, markdown } = await mount('[word](https://a.example "The Title") tail');
+    const range = linkRangeAt(view.state, after(view, "wo"))!;
+    view.dispatch(setLinkHref(view.state, range, "https://b.example"));
+    expect(markdown()).toBe('[word](https://b.example "The Title") tail');
+  });
+});
+
+describe("a typed address, round 2 (L1, L3, M3, M5, M6, M20)", () => {
+  it("is linked after the delimiters GFM allows, and not mid-word", async () => {
+    const { view } = await mount("");
+    type(
+      view,
+      "see (https://a.example) *https://b.example* _https://c.example_ ~https://d.example~ foo.https://e.example ",
+    );
+    expect(links(view).map((l) => l.href)).toEqual([
+      "https://a.example",
+      "https://b.example",
+      "https://c.example",
+      "https://d.example",
+    ]);
+  });
+
+  it("Backspace right after the space takes the link back out, as every input rule's does", async () => {
+    const { view } = await mount("");
+    type(view, "see https://a.example ");
+    expect(links(view)).toHaveLength(1);
+    expect(key(view, "Backspace")).toBe(true);
+    expect(view.state.doc.textContent).toBe("see https://a.example");
+    expect(links(view)).toEqual([]);
+  });
+
+  it("alone on its line, Enter draws the card a paste draws, with the caret on the line after", async () => {
+    const typed = await mount("");
+    type(typed.view, "https://a.example");
+    expect(key(typed.view, "Enter")).toBe(true);
+    const pasted = await mount("");
+    paste(pasted.view, "https://a.example");
+    expect(shape(typed.view)).toBe(shape(pasted.view));
+    expect(shape(typed.view)).toContain("link_card");
+    expect(typed.markdown()).toBe(pasted.markdown());
+    expect(typed.view.state.selection.from).toBe(pasted.view.state.selection.from);
+
+    // Without the card capability the address stays an inline link and
+    // Enter splits the line as it always did.
+    const plain = await mount("", false);
+    type(plain.view, "https://a.example");
+    expect(key(plain.view, "Enter")).toBe(false);
+    expect(links(plain.view)).toEqual([{ text: "https://a.example", href: "https://a.example" }]);
+  });
+
+  it("does nothing inside inline code, and nothing for Enter with a modifier", async () => {
+    const code = await mount("`code https://a.example` tail");
+    caret(code.view, after(code.view, "a.example"));
+    type(code.view, " ");
+    expect(links(code.view)).toEqual([]);
+
+    const { view } = await mount("see https://b.example");
+    caret(view, after(view, "b.example"));
+    expect(key(view, "Enter", { metaKey: true })).toBe(false);
+    expect(links(view)).toEqual([]);
   });
 });
 

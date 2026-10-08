@@ -204,6 +204,93 @@ test("Mod-Shift-k opens the field over the selection and not the palette, and Es
   expect(await page.evaluate(() => window.getSelection()?.toString() ?? "")).toBe("the spec");
 });
 
+test("a page URL pasted or typed into the field over selected words links the words to the page, and a reload keeps them", async ({
+  page,
+}) => {
+  await login(page);
+  const targetId = await createPage(page, "Paste target", "");
+  const id = await createPage(page, "Page URL over words", "read the spec and the notes today");
+  await page.goto(`/p/${id}`);
+  const content = page.getByRole("textbox", { name: "Page content" });
+  await expect(content).toBeVisible();
+  const origin = new URL(page.url()).origin;
+
+  await selectWords(content, "the spec");
+  await pasteText(content, `${origin}/p/${targetId}`);
+  await expect
+    .poll(() => savedMarkdown(page, id))
+    .toBe(`read [the spec](/p/${targetId}#words) and the notes today`);
+
+  await selectWords(content, "the notes");
+  const toolbar = toolbarOf(page);
+  await toolbar.getByRole("button", { name: "Link", exact: true }).click();
+  const field = toolbar.getByRole("textbox", { name: "Link" });
+  await field.fill(`${origin}/p/${targetId}`);
+  await page.keyboard.press("Enter");
+  await expect
+    .poll(() => savedMarkdown(page, id))
+    .toBe(`read [the spec](/p/${targetId}#words) and [the notes](/p/${targetId}#words) today`);
+
+  await page.reload();
+  const reloaded = page.getByRole("textbox", { name: "Page content" });
+  await expect(reloaded).toContainText("read the spec and the notes today");
+  await expect(reloaded.locator("a.brain-page-ref")).toHaveCount(0);
+});
+
+test("a typed address alone on its line becomes the card a paste makes, on Enter", async ({
+  page,
+}) => {
+  await page.route("**/api/unfurl**", (route) =>
+    route.fulfill({
+      json: { title: "Example", description: "An example", siteName: "example.com" },
+    }),
+  );
+  const { id, content } = await openPage(page, "Typed card", "");
+  await content.click();
+  await page.keyboard.type("https://example.com/typed-card");
+  await page.keyboard.press("Enter");
+  await expect(content.locator("a[data-brain-link-card]")).toHaveCount(1);
+  await page.keyboard.type("after");
+  await expect
+    .poll(() => savedMarkdown(page, id))
+    .toMatch(
+      /^(<https:\/\/example\.com\/typed-card>|\[https:\/\/example\.com\/typed-card\]\(https:\/\/example\.com\/typed-card\))\n\nafter$/,
+    );
+});
+
+test("on a read-only page a click on a link opens it, and no field appears", async ({
+  page,
+  context,
+}, testInfo) => {
+  test.skip(!!testInfo.project.use.hasTouch, "the popup is the desktop shape of the check");
+  await context.route("https://example.com/**", (route) =>
+    route.fulfill({ contentType: "text/html", body: "<title>Example</title>" }),
+  );
+  // Words straight inside a columns row, outside any column, open the page
+  // read-only (editor-tables.spec.ts holds that shape).
+  const markdown = [
+    "read [the spec](https://example.com/readonly) today",
+    "",
+    "::::cols",
+    "LOOSE WORDS",
+    "",
+    ":::col",
+    "b",
+    ":::",
+    "::::",
+  ].join("\n");
+  const { content } = await openPage(page, "Read-only link", markdown);
+  await expect(content).toHaveAttribute("aria-readonly", "true");
+  const [opened] = await Promise.all([
+    context.waitForEvent("page"),
+    content.locator("a", { hasText: "the spec" }).click(),
+  ]);
+  expect(opened.url()).toBe("https://example.com/readonly");
+  await opened.close();
+  await expect(page).toHaveURL(/\/p\//);
+  await expect(toolbarOf(page).getByRole("textbox", { name: "Link" })).toHaveCount(0);
+});
+
 test("a modifier click on a link stays the browser's: no field, nothing prevented", async ({
   page,
 }, testInfo) => {

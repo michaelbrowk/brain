@@ -468,6 +468,146 @@ describe("FloatingToolbar", () => {
     expect(document.body.querySelector('input[aria-label="Link"]')).toBeNull();
   });
 
+  /** A linked first word in the editor's DOM, matching `editorState(…, linked)`. */
+  async function renderLinkedLine(attributes: Record<string, string> = {}) {
+    view.state = editorState(false, "text", true, false, false, true);
+    editorRoot.replaceChildren();
+    const anchor = document.createElement("a");
+    anchor.href = LINKED_HREF;
+    anchor.textContent = "selected";
+    for (const [name, value] of Object.entries(attributes)) anchor.setAttribute(name, value);
+    editorRoot.append(anchor, document.createTextNode(" editor text"));
+    const container = createRef<HTMLDivElement>();
+    container.current = editorRoot;
+    await act(async () => root.render(<FloatingToolbar container={container} />));
+    await settle();
+    return anchor;
+  }
+
+  it("keeps page rows under the address row, and reads a bare file-like name as a page first", async () => {
+    view.state = editorState(false);
+    const range = document.createRange();
+    range.setStart(editorRoot.firstChild as Text, 0);
+    range.setEnd(editorRoot.firstChild as Text, 8);
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+    const container = createRef<HTMLDivElement>();
+    container.current = editorRoot;
+    const pages = [
+      { id: "notes", title: "notes.md" },
+      { id: "spec", title: "example.com spec" },
+    ];
+    await act(async () => root.render(<FloatingToolbar container={container} pages={pages} />));
+    await act(async () => document.dispatchEvent(new Event("selectionchange")));
+    await settle();
+    await click(document.body.querySelector('[aria-label="Link"]') as HTMLButtonElement);
+    const input = document.body.querySelector('input[aria-label="Link"]') as HTMLInputElement;
+
+    // A page is titled like a file: the page wins while one matches.
+    await typeInto(input, "notes.md");
+    expect(document.body.querySelector('[aria-label="notes.md"]')).not.toBeNull();
+    expect(document.body.textContent).not.toContain("Link to https://notes.md");
+    await keyOn(input, "Enter");
+    expect(linkedRuns(view.state)).toEqual([{ text: "selected", href: "/p/notes#words" }]);
+
+    // No page matches: the bare domain is an address.
+    await click(document.body.querySelector('[aria-label="Link"]') as HTMLButtonElement);
+    const again = document.body.querySelector('input[aria-label="Link"]') as HTMLInputElement;
+    await typeInto(again, "other.md");
+    expect(document.body.textContent).toContain("Link to https://other.md");
+
+    // A scheme, www. or a path is an address even beside a matching page,
+    // and the page rows stand under it.
+    await typeInto(again, "example.com/spec");
+    expect(document.body.textContent).toContain("Link to https://example.com/spec");
+    expect(document.body.querySelector('[aria-label="example.com spec"]')).not.toBeNull();
+    const rows = [...document.body.querySelectorAll('[role="toolbar"] button')].map((b) =>
+      b.getAttribute("aria-label"),
+    );
+    expect(rows.indexOf("Link to https://example.com/spec")).toBeLessThan(
+      rows.indexOf("example.com spec"),
+    );
+    await keyOn(again, "Enter");
+    expect(linkedRuns(view.state)[0]).toEqual({ text: "selected", href: "https://example.com/spec" });
+  });
+
+  it("writes the words marker for a page address typed into the field", async () => {
+    await renderWithSelection(false);
+    await click(document.body.querySelector('[aria-label="Link"]') as HTMLButtonElement);
+    const input = document.body.querySelector('input[aria-label="Link"]') as HTMLInputElement;
+    await typeInto(input, `${window.location.origin}/p/abc123`);
+    await keyOn(input, "Enter");
+    expect(linkedRuns(view.state)).toEqual([{ text: "selected", href: "/p/abc123#words" }]);
+  });
+
+  it("stays shut for a read-only editor: no field on a click or on Mod-Shift-k", async () => {
+    (view as unknown as { editable: boolean }).editable = false;
+    const anchor = await renderLinkedLine();
+    await click(anchor);
+    expect(document.body.querySelector('input[aria-label="Link"]')).toBeNull();
+    await act(async () => window.dispatchEvent(new CustomEvent(EDITOR_LINK_FIELD_EVENT)));
+    await settle();
+    expect(document.body.querySelector('input[aria-label="Link"]')).toBeNull();
+    expect(view.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("leaves a download link alone", async () => {
+    const anchor = await renderLinkedLine({ download: "" });
+    await click(anchor);
+    expect(document.body.querySelector('input[aria-label="Link"]')).toBeNull();
+  });
+
+  it("opens for the words, not the link, when the selection spills out of a link", async () => {
+    view.state = editorState(false, "text", false, false, false, true);
+    const range = document.createRange();
+    range.setStart(editorRoot.firstChild as Text, 0);
+    range.setEnd(editorRoot.firstChild as Text, 12);
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+    const container = createRef<HTMLDivElement>();
+    container.current = editorRoot;
+    await act(async () => root.render(<FloatingToolbar container={container} />));
+    await act(async () => document.dispatchEvent(new Event("selectionchange")));
+    await settle();
+    // "selected edi": the selection runs past the link's end.
+    view.state = view.state.apply(
+      view.state.tr.setSelection(TextSelection.create(view.state.doc, 1, 13)),
+    );
+    await click(document.body.querySelector('[aria-label="Link"]') as HTMLButtonElement);
+    const input = document.body.querySelector('input[aria-label="Link"]') as HTMLInputElement;
+    expect(input.value).toBe("");
+    expect(input.placeholder).toBe("Paste a link or search pages");
+    expect(document.body.querySelector('[aria-label="Remove link"]')).toBeNull();
+  });
+
+  it("does not rewrite a link whose address changed under the open field, and removes on an emptied Enter", async () => {
+    const anchor = await renderLinkedLine();
+    await click(anchor);
+    const input = document.body.querySelector('input[aria-label="Link"]') as HTMLInputElement;
+    // Another hand changed the link while the field was open.
+    view.state = view.state.apply(
+      view.state.tr
+        .removeMark(1, 9, schema.marks.link)
+        .addMark(1, 9, schema.marks.link.create({ href: "https://example.com/elsewhere" })),
+    );
+    view.dispatch.mockClear();
+    await typeInto(input, "https://example.com/new");
+    await keyOn(input, "Enter");
+    expect(view.dispatch).not.toHaveBeenCalled();
+    expect(linkedRuns(view.state)).toEqual([
+      { text: "selected", href: "https://example.com/elsewhere" },
+    ]);
+
+    anchor.href = "https://example.com/elsewhere";
+    await click(anchor);
+    const field = document.body.querySelector('input[aria-label="Link"]') as HTMLInputElement;
+    expect(field.value).toBe("https://example.com/elsewhere");
+    await typeInto(field, "");
+    await keyOn(field, "Enter");
+    expect(linkedRuns(view.state)).toEqual([]);
+    expect(view.state.doc.textContent).toBe("selected editor text");
+  });
+
   it("presses the Task button only while the line is already a task, both ways", async () => {
     await renderWithSelection(false);
     const taskButton = () =>

@@ -108,10 +108,13 @@ file:
   and you add or update its harness beside the others in `scripts/`.
   `scripts/run-roundtrips.mjs` discovers them by name, so
   `verify-<block>-roundtrip.mjs` runs with nothing to register. A file named
-  anything else runs only if that script names it: today one does, the
-  serializer's own `verify-serialize-idempotent.mjs`, appended by hand at the
-  end of the list. A block that does not survive `markdown → editor →
-  markdown` unchanged is a data-loss bug.
+  anything else runs only if that script names it: today two do, the
+  serializer's own `verify-serialize-idempotent.mjs` (the output is a fixed
+  point) and `verify-serialize-fidelity.mjs` (the fixed point is the writer's
+  own bytes, one fixture per Markdown shape under `scripts/fixtures/fidelity/`),
+  appended by hand at the end of the list. A block that does not survive
+  `markdown → editor → markdown` unchanged is a data-loss bug, and a shape the
+  first save rewrites is a diff the writer never made.
 - **A new environment variable is documented in the same commit**, or step 2
   fails. The reverse is true too: delete the reader, delete the block.
 - **Design tokens only.** Colours, sizes, radii and type live in

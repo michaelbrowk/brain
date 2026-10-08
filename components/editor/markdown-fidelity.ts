@@ -101,7 +101,12 @@ function readShapes(node: Positioned, source: string) {
         break;
       }
       case "heading":
-        if (head !== "#") node.setext = true;
+        if (head !== "#") {
+          node.setext = true;
+          // The underline as drawn: CommonMark asks no length of it, and a
+          // writer who drew three dashes gets three dashes back.
+          node.underline = (source.slice(start, end).split("\n").at(-1) ?? "").trim().length;
+        }
         break;
       case "code": {
         const fence = /^(`{3,}|~{3,})/.exec(source.slice(start, end));
@@ -266,12 +271,20 @@ const fidelityHeading = headingSchema.extendSchema((prev) => (ctx) => {
   const base = prev(ctx);
   return {
     ...base,
-    attrs: { ...base.attrs, setext: { default: false, validate: "boolean" } },
+    attrs: {
+      ...base.attrs,
+      setext: { default: false, validate: "boolean" },
+      underline: { default: 0, validate: "number" },
+    },
     parseMarkdown: {
       match: base.parseMarkdown.match,
       runner: (state: ParserState, node: MarkdownNode, type) => {
         state
-          .openNode(type, { level: node.depth, setext: node.setext === true })
+          .openNode(type, {
+            level: node.depth,
+            setext: node.setext === true,
+            underline: typeof node.underline === "number" ? node.underline : 0,
+          })
           .next(node.children ?? [])
           .closeNode();
       },
@@ -283,6 +296,7 @@ const fidelityHeading = headingSchema.extendSchema((prev) => (ctx) => {
           .openNode("heading", undefined, {
             depth: node.attrs.level,
             setext: node.attrs.setext === true,
+            underline: typeof node.attrs.underline === "number" ? node.attrs.underline : 0,
           })
           .next(contentWithoutTrailingBreak(node))
           .closeNode();
@@ -642,7 +656,8 @@ const heading: Handler = (node, _parent, state, info) => {
     subexit();
     exit();
     const lastLine = value.length - (Math.max(value.lastIndexOf("\r"), value.lastIndexOf("\n")) + 1);
-    return value + "\n" + (rank === 1 ? "=" : "-").repeat(Math.max(lastLine, 1));
+    const drawn = typeof node.underline === "number" && node.underline > 0 ? node.underline : lastLine;
+    return value + "\n" + (rank === 1 ? "=" : "-").repeat(Math.max(drawn, 1));
   }
   const sequence = "#".repeat(rank);
   const exit = state.enter("headingAtx");

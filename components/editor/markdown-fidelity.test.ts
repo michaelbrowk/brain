@@ -190,6 +190,17 @@ describe("round three: links under one mark, empty items, cells, trailing spaces
     expect(serialize()).toBe("| a |\n| --- |\n| <br> |\n\n| b |\n| --- |\n| <br><br> |");
   });
 
+  it("trims trailing spaces of a block's last text instead of writing &#x20;", async () => {
+    const { view, serialize } = await mount("see");
+    caretAtEnd(view);
+    type(view, " https://x.io/a. ");
+    expect(serialize()).toBe("see https://x.io/a.");
+    const heading = await mount("# Title");
+    caretAtEnd(heading.view);
+    type(heading.view, "   ");
+    expect(heading.serialize()).toBe("# Title");
+  });
+
   it("writes a rule inside a * item with a character that is not the bullet (M18)", async () => {
     const { view, serialize } = await mount("* a\n* b\n\n---");
     let hr = -1;

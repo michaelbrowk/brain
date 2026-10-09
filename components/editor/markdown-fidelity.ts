@@ -584,8 +584,13 @@ const text: Handler = (node, _parent, state, info) => {
   // ENDED in whitespace, so `\- ` before `**a**` lost its backslash and the
   // line came back a list.
   if (/^\s+$/.test(value)) return value;
+  // Spaces at the end of a block mean nothing to Markdown; written, they
+  // came back as `&#x20;`. Trimmed only at a block end: before a hard break
+  // or in a cell `after` is not a line end.
+  const trimmed = info.after === "\n" ? value.replace(/[ \t]+$/, "") : value;
+  if (!trimmed) return "";
   return withUnsafe(state, brainUnsafe(state.unsafe), () =>
-    state.safe(value, { ...info, encode: [] }),
+    state.safe(trimmed, { ...info, encode: [] }),
   );
 };
 

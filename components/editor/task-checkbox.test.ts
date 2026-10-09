@@ -7,13 +7,12 @@ import {
   Editor,
   defaultValueCtx,
   editorViewCtx,
-  editorViewOptionsCtx,
   rootCtx,
 } from "@milkdown/kit/core";
 import { history, undoCommand } from "@milkdown/kit/plugin/history";
 import { commonmark } from "@milkdown/kit/preset/commonmark";
 import { gfm } from "@milkdown/kit/preset/gfm";
-import { TextSelection, type Transaction } from "@milkdown/kit/prose/state";
+import { TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import { callCommand, getMarkdown } from "@milkdown/kit/utils";
 import { afterEach, describe, expect, it } from "vitest";
@@ -49,45 +48,6 @@ async function mountEditor(markdown: string): Promise<EditorView> {
   const view = editor.action((ctx) => ctx.get(editorViewCtx));
   editors.set(view, editor);
   return view;
-}
-
-/** The same mount, told it is not editable, counting what the editor
- *  dispatches to itself. `mutationsFrozen` and a pending page-ref restore both
- *  reach the view as `editable: () => false` in `milkdown-editor.tsx`, so this
- *  is what a frozen page looks like from inside the plugin. */
-async function mountFrozenEditor(markdown: string): Promise<{
-  readonly view: EditorView;
-  readonly dispatched: Transaction[];
-  readonly unfreeze: () => void;
-}> {
-  const root = document.createElement("div");
-  document.body.append(root);
-  const dispatched: Transaction[] = [];
-  const editor = await Editor.make()
-    .config((ctx) => {
-      ctx.set(rootCtx, root);
-      ctx.set(defaultValueCtx, markdown);
-      ctx.set(editorViewOptionsCtx, {
-        editable: () => false,
-        dispatchTransaction(this: EditorView, transaction: Transaction) {
-          dispatched.push(transaction);
-          this.updateState(this.state.apply(transaction));
-        },
-      });
-    })
-    .use(commonmark)
-    .use(gfm)
-    .use(history)
-    .use(taskCheckbox)
-    .create();
-  open.push(editor);
-  const view = editor.action((ctx) => ctx.get(editorViewCtx));
-  editors.set(view, editor);
-  return {
-    view,
-    dispatched,
-    unfreeze: () => view.setProps({ editable: () => true }),
-  };
 }
 
 function serialize(view: EditorView): string {
@@ -336,106 +296,51 @@ describe("the Task command", () => {
     agreesWithTheStore(view);
   });
 
-  it("moves an ordered item to a bullet task line the store can read", async () => {
+  it("makes an ordered item a task where it stands, numbered as it was", async () => {
     const view = await mountEditor("1. first\n");
     caretInLine(view, 0);
 
     press(view, ensureTaskCommand);
 
-    // `1. [ ] first` is a checkbox to the editor and prose to the store.
-    expect(serialize(view)).toBe("* [ ] first\n");
+    // `1. [ ] first` is a checkbox to the editor and to the store alike.
+    expect(serialize(view)).toBe("1. [ ] first\n");
     expect(boxes(view)).toHaveLength(1);
     agreesWithTheStore(view);
   });
 
-  it("splits an ordered list around the item the press was on", async () => {
+  it("leaves an ordered list whole around the item the press was on", async () => {
     const view = await mountEditor("1. first\n2. second\n3. third\n");
     caretInLine(view, 1);
 
     press(view, ensureTaskCommand);
 
-    expect(serialize(view)).toBe("1. first\n\n* [ ] second\n\n2. third\n");
+    expect(serialize(view)).toBe("1. first\n2. [ ] second\n3. third\n");
     expect(boxes(view)).toHaveLength(1);
+    expect(view.dom.querySelectorAll("ol")).toHaveLength(1);
     agreesWithTheStore(view);
   });
 
   /** A TASK ITEM UNDER AN ORDERED LIST, WITHOUT A PRESS.
    *
-   *  The Task press moves an ordered item to a bullet one, but nobody presses
-   *  anything when a note is opened, pasted into, or imported from Notion.
-   *  `1. [ ] b` draws a checkbox the editor understands and `TASK_LINE_RE`
-   *  does not, and one such line made every + Task on the page answer "This
-   *  note could not be read". The editor re-bullets it on the way in. */
-  it("re-bullets an ordered task item a loaded note arrived with", async () => {
+   *  Nobody presses anything when a note is opened, pasted into, or imported
+   *  from Notion, and the file keeps the writer's list as it was: `1. [ ] b`
+   *  draws a checkbox, stays numbered, and `TASK_LINE_RE` reads it the way
+   *  it reads `- [ ] b`. Opening the note writes nothing. */
+  it("keeps an ordered task item a loaded note arrived with, and the store reads it", async () => {
     const view = await mountEditor("1. a\n2. [ ] b\n3. c\n");
 
-    expect(serialize(view)).toBe("1. a\n\n* [ ] b\n\n2. c\n");
+    expect(serialize(view)).toBe("1. a\n2. [ ] b\n3. c\n");
     expect(boxes(view)).toHaveLength(1);
+    expect(view.dom.querySelector("ol")).not.toBeNull();
     expect(parseTaskLines(serialize(view))).toHaveLength(1);
     agreesWithTheStore(view);
   });
 
-  it("re-bullets an all-task ordered list as one list, not one per line", async () => {
-    const view = await mountEditor("1. [ ] one\n2. [x] two\n");
-
-    expect(serialize(view)).toBe("* [ ] one\n\n* [x] two\n");
-    expect(view.dom.querySelectorAll("ul")).toHaveLength(1);
-    expect(view.dom.querySelector("ol")).toBeNull();
-    agreesWithTheStore(view);
-  });
-
-  /** A FROZEN PAGE IS NOT WRITTEN, NOT EVEN TO FIX IT.
-   *
-   *  The load-time pass dispatches a real `docChanged` transaction, and
-   *  `brainImmediateDirty` in `milkdown-editor.tsx` counts one as a document
-   *  change, so opening a note with `1. [ ] b` saves it. A mount that refuses
-   *  the reader's own edits — `mutationsFrozen`, or a page-ref restore still
-   *  pending — must not write either. The pass reads the view's own
-   *  `editable`, which is what that one predicate answers. */
-  it("writes nothing on a mount that is not editable", async () => {
-    const frozen = await mountFrozenEditor("1. a\n2. [ ] b\n3. c\n");
-
-    expect(frozen.dispatched).toHaveLength(0);
-    expect(serialize(frozen.view)).toBe("1. a\n2. [ ] b\n3. c\n");
-  });
-
-  it("re-bullets once the same mount becomes editable", async () => {
-    const frozen = await mountFrozenEditor("1. a\n2. [ ] b\n3. c\n");
-    expect(frozen.dispatched).toHaveLength(0);
-
-    frozen.unfreeze();
-
-    expect(frozen.dispatched).toHaveLength(1);
-    expect(frozen.dispatched[0].docChanged).toBe(true);
-    expect(frozen.dispatched[0].getMeta("addToHistory")).toBe(false);
-    expect(serialize(frozen.view)).toBe("1. a\n\n* [ ] b\n\n2. c\n");
-  });
-
-  it("keeps a re-bulleted ordered task done if that is how it arrived", async () => {
+  it("keeps an ordered task done if that is how it arrived", async () => {
     const view = await mountEditor("1. [x] b\n");
 
-    expect(serialize(view)).toBe("* [x] b\n");
+    expect(serialize(view)).toBe("1. [x] b\n");
     expect(box(view).getAttribute("aria-checked")).toBe("true");
-    agreesWithTheStore(view);
-  });
-
-  it("re-bullets an ordered task item that arrives by paste", async () => {
-    const view = await mountEditor("intro\n");
-    const pasted = view.state.schema.nodeFromJSON({
-      type: "ordered_list",
-      attrs: { order: 1, spread: false },
-      content: [
-        {
-          type: "list_item",
-          attrs: { checked: false, label: "1.", listType: "ordered", spread: false },
-          content: [{ type: "paragraph", content: [{ type: "text", text: "b" }] }],
-        },
-      ],
-    });
-    view.dispatch(view.state.tr.replaceWith(view.state.doc.content.size, view.state.doc.content.size, pasted));
-
-    expect(serialize(view)).toBe("intro\n\n* [ ] b\n");
-    expect(boxes(view)).toHaveLength(1);
     agreesWithTheStore(view);
   });
 
@@ -579,15 +484,13 @@ describe("the Task command", () => {
     expect(serialize(view)).toBe("/task\n");
   });
 
-  it("keeps the count going in the tail of a split ordered list", async () => {
+  it("keeps the count going through an ordered task", async () => {
     const view = await mountEditor("3. a\n4. b\n5. c\n");
     caretInLine(view, 1);
 
     press(view, ensureTaskCommand);
 
-    // Two numbered lines are left and they read as two, rather than the tail
-    // restarting at the number the head began with.
-    expect(serialize(view)).toBe("3. a\n\n* [ ] b\n\n4. c\n");
+    expect(serialize(view)).toBe("3. a\n4. [ ] b\n5. c\n");
     agreesWithTheStore(view);
   });
 

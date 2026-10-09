@@ -11611,6 +11611,28 @@ describe("task records", () => {
     expect((await s.readPage(meta.id)).markdown).toContain("- [x] Buy milk");
   });
 
+  it("completes a numbered task line, the one the index also reads", async () => {
+    const { s } = await tmpStore();
+    const meta = await s.createPage(null, "Groceries");
+    const written = await s.writePage(meta.id, "1. [ ] Buy milk\n2) [ ] Buy eggs", undefined, "me");
+    const lines = parseTaskLines(written.markdown);
+    expect(lines).toHaveLength(2);
+    const created = await s.createTask({
+      title: lines[1].normalized,
+      page: meta.id,
+      anchor: {
+        text: lines[1].normalized,
+        hash: lines[1].hash,
+        ordinal: lines[1].ordinal,
+        line: lines[1].index,
+      },
+    });
+
+    const done = await s.updateTask(created.id, { done: true });
+    expect(done.done).toBe(true);
+    expect((await s.readPage(meta.id)).markdown).toBe("1. [ ] Buy milk\n2) [x] Buy eggs");
+  });
+
   it("refuses a task linked to a page with no anchor, at both ends", async () => {
     const { s, root } = await tmpStore();
     const meta = await s.createPage(null, "Groceries");

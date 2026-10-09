@@ -35,8 +35,8 @@ async function installDomGlobals() {
 }
 
 const PLUGIN_FILES = [
-  "normalize", "table-cell", "color-mark", "columns", "empty-block", "callout", "toggle", "image", "math", "page-ref",
-  "load-guard",
+  "normalize", "table-cell", "color-mark", "columns", "empty-block", "callout", "toggle", "image", "math",
+  "markdown-fidelity", "page-ref", "load-guard",
 ];
 
 async function importPlugins() {
@@ -152,10 +152,18 @@ async function main() {
     m["toggle"].toggle,
     m["image"].images,
     m["math"].math,
+    m["markdown-fidelity"].markdownFidelity,
     m["page-ref"].pageRef,
   ];
 
   const cases = [...FIXTURES];
+  // The fidelity gate's shapes must be fixed points too: a form the serializer
+  // keeps on the first pass and changes on the second is the drift this gate
+  // exists to catch.
+  const fixtureDir = join(scriptDir, "fixtures", "fidelity");
+  for (const name of (await readdir(fixtureDir)).filter((n) => n.endsWith(".md")).sort()) {
+    cases.push({ name: `fixture ${name}`, md: (await readFile(join(fixtureDir, name), "utf8")).trim() });
+  }
   if (process.env.NOTES_DIR) {
     const real = [];
     await collectNotes(process.env.NOTES_DIR, real);

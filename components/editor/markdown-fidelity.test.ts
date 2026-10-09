@@ -1,0 +1,468 @@
+// @vitest-environment jsdom
+
+import { readFileSync, readdirSync } from "node:fs";
+import path from "node:path";
+
+import { Editor, defaultValueCtx, editorViewCtx, rootCtx, serializerCtx } from "@milkdown/kit/core";
+import { commonmark, syncHeadingIdPlugin } from "@milkdown/kit/preset/commonmark";
+import { gfm } from "@milkdown/kit/preset/gfm";
+import { listener } from "@milkdown/kit/plugin/listener";
+import type { Node as ProseNode } from "@milkdown/kit/prose/model";
+import { sinkListItem } from "@milkdown/kit/prose/schema-list";
+import { Selection, TextSelection } from "@milkdown/kit/prose/state";
+import type { EditorView } from "@milkdown/kit/prose/view";
+import { afterEach, describe, expect, it } from "vitest";
+import { attachmentRefs } from "./attachment-refs";
+import { callout } from "./callout";
+import { colorMarks } from "./color-mark";
+import { columns } from "./columns";
+import { editingCore } from "./editing-core";
+import { emptyBlocks } from "./empty-block";
+import { images } from "./image";
+import { markdownFidelity } from "./markdown-fidelity";
+import { math } from "./math";
+import { normalizeLegacy } from "./normalize";
+import { pageRef, setPageRefOrigin } from "./page-ref";
+import { tableCells } from "./table-cell";
+import { noNestedTables } from "./table-guard";
+import { taskCheckboxMarkdown } from "./task-checkbox";
+import { toggle } from "./toggle";
+
+const editors: Editor[] = [];
+
+afterEach(async () => {
+  for (const editor of editors.splice(0)) await editor.destroy();
+  document.body.replaceChildren();
+});
+
+/** The editor's own stack, in the order `milkdown-editor.tsx` applies it, so
+ *  what serializes here is what a save writes. */
+async function mount(markdown: string) {
+  const root = document.createElement("div");
+  document.body.append(root);
+  setPageRefOrigin("http://brain.local");
+  const editor = await Editor.make()
+    .config((ctx) => {
+      ctx.set(rootCtx, root);
+      ctx.set(defaultValueCtx, markdown);
+    })
+    .use(commonmark.filter((plugin) => plugin !== syncHeadingIdPlugin))
+    .use(gfm)
+    .use(taskCheckboxMarkdown)
+    .use(attachmentRefs)
+    .use(noNestedTables)
+    .use(tableCells)
+    .use(normalizeLegacy)
+    .use(editingCore)
+    .use(colorMarks)
+    .use(columns)
+    .use(emptyBlocks)
+    .use(callout)
+    .use(toggle)
+    .use(images)
+    .use(math)
+    .use(markdownFidelity)
+    .use(pageRef)
+    .use(listener)
+    .create();
+  editors.push(editor);
+  const view = editor.ctx.get(editorViewCtx) as EditorView;
+  const serialize = () => editor.ctx.get(serializerCtx)(view.state.doc).trimEnd();
+  return { editor, view, serialize };
+}
+
+function type(view: EditorView, text: string) {
+  for (const char of text) {
+    const { from, to } = view.state.selection;
+    const handled = view.someProp("handleTextInput", (f) =>
+      f(view, from, to, char, () => view.state.tr.insertText(char, from, to)),
+    );
+    if (!handled) view.dispatch(view.state.tr.insertText(char));
+  }
+}
+
+function press(view: EditorView, key: string) {
+  const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+  return view.someProp("handleKeyDown", (f) => f(view, event)) ?? false;
+}
+
+function caretAtEnd(view: EditorView) {
+  view.dispatch(view.state.tr.setSelection(Selection.atEnd(view.state.doc)));
+}
+
+/** The caret right after the given words, wherever the textblock is. */
+function caretAfter(view: EditorView, words: string) {
+  let at = -1;
+  view.state.doc.descendants((node, pos) => {
+    if (at < 0 && node.isText && node.text?.includes(words)) {
+      at = pos + node.text.indexOf(words) + words.length;
+    }
+  });
+  if (at < 0) throw new Error(`no text ${JSON.stringify(words)}`);
+  view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, at)));
+}
+
+const fixtureDir = path.join(process.cwd(), "scripts", "fixtures", "fidelity");
+
+describe("the first serialize of a hand-written file is the file", () => {
+  // One fixture per shape, the same files the gate runs: a shape that
+  // regresses fails here with its name.
+  for (const name of readdirSync(fixtureDir).filter((n) => n.endsWith(".md")).sort()) {
+    it(`keeps ${name.replace(/\.md$/, "")}`, async () => {
+      // CRLF folded, as the store folds it before the editor sees a body.
+      const input = readFileSync(path.join(fixtureDir, name), "utf8").replace(/\r\n?/g, "\n").trimEnd();
+      const first = await mount(input);
+      const once = first.serialize();
+      expect(once).toBe(input);
+      // and the serializer stays a fixed point on what it wrote
+      const second = await mount(once);
+      expect(second.serialize()).toBe(once);
+    });
+  }
+});
+
+describe("the schema is the preset's schema, with attributes added", () => {
+  it("keeps paragraph the default block, so an empty page mounts and fills", async () => {
+    const { view } = await mount("a");
+    const { nodes } = view.state.schema;
+    expect(nodes.doc!.contentMatch.defaultType?.name).toBe("paragraph");
+    for (const name of ["doc", "blockquote", "callout", "toggle", "list_item", "table_cell"]) {
+      expect(() => nodes[name]!.createAndFill(), name).not.toThrow();
+    }
+  });
+
+  it("mounts an empty page, a whitespace page and a definition-only page", async () => {
+    const empty = await mount("");
+    type(empty.view, "typed");
+    expect(empty.view.state.doc.firstChild?.type.name).toBe("paragraph");
+    expect(empty.serialize()).toBe("typed");
+
+    const blank = await mount("   \n\n");
+    expect(blank.serialize()).toBe("");
+
+    const definition = await mount("[ref]: https://x.io");
+    expect(definition.serialize()).toBe("");
+  });
+
+  it("gives Enter a paragraph, in a blockquote and in a callout", async () => {
+    const quote = await mount("> quote");
+    caretAfter(quote.view, "quote");
+    press(quote.view, "Enter");
+    type(quote.view, "typed");
+    expect(quote.view.state.doc.firstChild?.lastChild?.type.name).toBe("paragraph");
+    expect(quote.serialize()).toBe("> quote\n>\n> typed");
+
+    const callout = await mount(':::callout{icon="💡"}\ntext\n:::');
+    caretAfter(callout.view, "text");
+    press(callout.view, "Enter");
+    type(callout.view, "typed");
+    expect(callout.view.state.doc.firstChild?.lastChild?.type.name).toBe("paragraph");
+  });
+});
+
+describe("round three: links under one mark, empty items, cells, trailing spaces", () => {
+  it("keeps two links to one address under one mark as two, across two saves", async () => {
+    for (const input of [
+      "**[a](https://x.io) [b](https://x.io)**",
+      "**[Page](/p/abc123) [Page](/p/abc123)**",
+    ]) {
+      const first = await mount(input);
+      const once = first.serialize();
+      expect(once, input).toBe(input);
+      const second = await mount(once);
+      expect(second.serialize(), input).toBe(once);
+      let links = 0;
+      second.view.state.doc.descendants((node) => {
+        if (node.type.name === "page_ref" || (node.isText && node.marks.some((m) => m.type.name === "link"))) links += 1;
+      });
+      expect(links, input).toBe(2);
+    }
+  });
+
+  it("writes an empty item that holds a nested list as - on its own line", async () => {
+    const nested = await mount("-\n  - a");
+    expect(nested.serialize()).toBe("-\n  - a");
+    const deep = await mount("-\n  -\n    -");
+    expect(deep.serialize()).toBe("-\n  -\n    -");
+  });
+
+  it("does not count a cell that is only a break as a changed table", async () => {
+    const { serialize } = await mount("| a |\n| --- |\n| <br> |\n\n| b |\n| --- |\n| <br><br> |");
+    expect(serialize()).toBe("| a |\n| --- |\n| <br> |\n\n| b |\n| --- |\n| <br><br> |");
+  });
+
+  it("trims trailing spaces of a block's last text instead of writing &#x20;", async () => {
+    const { view, serialize } = await mount("see");
+    caretAtEnd(view);
+    type(view, " https://x.io/a. ");
+    expect(serialize()).toBe("see https://x.io/a.");
+    const heading = await mount("# Title");
+    caretAtEnd(heading.view);
+    type(heading.view, "   ");
+    expect(heading.serialize()).toBe("# Title");
+  });
+
+  it("drops a hard break at the end of a heading (M17)", async () => {
+    const { view, serialize } = await mount("# Title");
+    const hardbreak = view.state.schema.nodes.hardbreak!.create();
+    view.dispatch(view.state.tr.insert(view.state.doc.firstChild!.nodeSize - 1, hardbreak));
+    expect(serialize()).toBe("# Title");
+  });
+
+  it("writes a rule inside a * item with a character that is not the bullet (M18)", async () => {
+    const { view, serialize } = await mount("* a\n* b\n\n---");
+    let hr = -1;
+    let itemEnd = -1;
+    view.state.doc.descendants((node, pos) => {
+      if (node.type.name === "hr") hr = pos;
+      if (itemEnd < 0 && node.type.name === "paragraph" && node.textContent === "a") itemEnd = pos + node.nodeSize;
+    });
+    const rule = view.state.doc.nodeAt(hr)!;
+    view.dispatch(view.state.tr.delete(hr, hr + rule.nodeSize).insert(itemEnd, rule));
+    const written = serialize();
+    expect(written).toBe("* a\n  ___\n* b");
+    const reopened = await mount(written);
+    expect(reopened.view.state.doc.firstChild?.type.name).toBe("bullet_list");
+    expect(reopened.view.state.doc.firstChild?.childCount).toBe(2);
+    expect(reopened.view.state.doc.firstChild?.firstChild?.lastChild?.type.name).toBe("hr");
+
+    // With the item's words gone the rule takes the item's line, where the
+    // bullet's own character (`* ***`) would read as one rule, not a list.
+    let words = -1;
+    view.state.doc.descendants((node, pos) => {
+      if (words < 0 && node.isText && node.text === "a") words = pos;
+    });
+    view.dispatch(view.state.tr.delete(words, words + 1));
+    const ruleFirst = serialize();
+    expect(ruleFirst).toBe("* ___\n* b");
+    const again = await mount(ruleFirst);
+    expect(again.view.state.doc.firstChild?.type.name).toBe("bullet_list");
+    expect(again.view.state.doc.firstChild?.childCount).toBe(2);
+
+    // A writer's own `***` under the words stays, until it takes the line.
+    const starred = await mount("* a\n  ***\n* b");
+    expect(starred.serialize()).toBe("* a\n  ***\n* b");
+    let starredWords = -1;
+    starred.view.state.doc.descendants((node, pos) => {
+      if (starredWords < 0 && node.isText && node.text === "a") starredWords = pos;
+    });
+    starred.view.dispatch(starred.view.state.tr.delete(starredWords, starredWords + 1));
+    expect(starred.serialize()).toBe("* ___\n* b");
+  });
+
+  it("writes items created with default attributes tight (M19)", async () => {
+    const { view, serialize } = await mount("x");
+    const { schema } = view.state;
+    const text = (s: string) => schema.nodes.paragraph!.create(null, schema.text(s));
+    const inner = schema.nodes.bullet_list!.create(null, schema.nodes.list_item!.create(null, text("b")));
+    const outer = schema.nodes.bullet_list!.create(null, [
+      schema.nodes.list_item!.create(null, [text("a"), inner]),
+      schema.nodes.list_item!.create(null, text("c")),
+    ]);
+    view.dispatch(view.state.tr.replaceWith(0, view.state.doc.content.size, outer));
+    expect(serialize()).toBe("- a\n  - b\n- c");
+  });
+});
+
+describe("round four: tables in items, page refs, empty marks", () => {
+  it("keeps a table inside a list item in place across four saves", async () => {
+    for (const input of [
+      "- x\n\n  | a |\n  | --- |\n  | b |",
+      "1. x\n\n   | a |\n   | --- |\n   | b |",
+      "- x\n  | a |\n  | --- |\n  | b |",
+      "-\n  | a |\n  | --- |\n  | b |",
+    ]) {
+      let md = input;
+      const saves: string[] = [];
+      for (let save = 0; save < 4; save += 1) {
+        const { view, serialize } = await mount(md);
+        let tables = 0;
+        view.state.doc.descendants((node) => {
+          if (node.type.name === "table") tables += 1;
+        });
+        expect(tables, `${input} save ${save}`).toBe(1);
+        md = serialize();
+        saves.push(md);
+      }
+      // The first save may settle the shape; every save after it is the same.
+      expect(new Set(saves.slice(1)).size, input).toBe(1);
+      expect(saves[1], input).toBe(saves[0]);
+    }
+  });
+
+  it("writes no empty mark between two marked words under one bold", async () => {
+    // The preset nests italic outside bold, so the first save writes an
+    // equivalent spelling; the fidelity fixtures need byte identity and
+    // cannot hold these. What must not happen is `****` between the words.
+    const cases: [string, string][] = [
+      ["**_a_ _b_**", "_**a**_ _**b**_"],
+      ["***a* *b***", "***a*** ***b***"],
+    ];
+    for (const [input, want] of cases) {
+      const first = await mount(input);
+      const once = first.serialize();
+      expect(once, input).toBe(want);
+      const second = await mount(once);
+      expect(second.serialize(), input).toBe(once);
+      expect(second.view.state.doc.textContent, input).toBe("a b");
+    }
+  });
+
+  it("writes no empty mark for a marked space at the end of a line", async () => {
+    const cases: [string, (schema: EditorView["state"]["schema"]) => ProseNode[], string][] = [
+      ["x then bold space", (s) => [s.text("x"), s.text(" ", [s.marks.strong!.create()])], "x"],
+      ["a space then italic space", (s) => [s.text("a "), s.text(" ", [s.marks.emphasis!.create()])], "a"],
+      [
+        "x then bold italic space",
+        (s) => [s.text("x"), s.text(" ", [s.marks.emphasis!.create(), s.marks.strong!.create()])],
+        "x",
+      ],
+    ];
+    for (const [label, make, want] of cases) {
+      const { view, serialize } = await mount("x");
+      const { schema } = view.state;
+      const paragraph = schema.nodes.paragraph!.create(null, make(schema));
+      view.dispatch(view.state.tr.replaceWith(0, view.state.doc.content.size, paragraph));
+      const once = serialize();
+      expect(once, label).toBe(want);
+      expect((await mount(once)).serialize(), label).toBe(once);
+    }
+  });
+});
+
+describe("what an edit does to a kept shape", () => {
+  it("writes an emptied setext heading as ATX, not an underline alone", async () => {
+    const { view, serialize } = await mount("Title\n=====\n\nbody");
+    const heading = view.state.doc.firstChild!;
+    view.dispatch(view.state.tr.delete(1, 1 + heading.content.size));
+    expect(serialize()).toBe("#\n\nbody");
+  });
+
+  it("writes a --- moved into a tight item as ***, which is not an underline", async () => {
+    const { view, serialize } = await mount("- item\n- two\n\n---\n\nafter");
+    let hr = -1;
+    let itemEnd = -1;
+    view.state.doc.descendants((node, pos) => {
+      if (node.type.name === "hr") hr = pos;
+      if (itemEnd < 0 && node.type.name === "paragraph" && node.textContent === "item") itemEnd = pos + node.nodeSize;
+    });
+    const rule = view.state.doc.nodeAt(hr)!;
+    const tr = view.state.tr.delete(hr, hr + rule.nodeSize);
+    tr.insert(itemEnd, rule);
+    view.dispatch(tr);
+    expect(serialize()).toBe("- item\n  ***\n- two\n\nafter");
+  });
+
+  it("writes a CRLF file's untouched table with the line endings folded", async () => {
+    const { serialize } = await mount("a\r\n\r\n| a | b |\r\n| --- | --- |\r\n| 1 | 2 |\r\n\r\nb");
+    expect(serialize()).toBe("a\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nb");
+  });
+
+  it("keeps two links to one address as two, page refs included", async () => {
+    const { serialize } = await mount("[a](https://x.io) [b](https://x.io)");
+    expect(serialize()).toBe("[a](https://x.io) [b](https://x.io)");
+    const refs = await mount("[Page](/p/abc123) [Page](/p/abc123)");
+    expect(refs.serialize()).toBe("[Page](/p/abc123) [Page](/p/abc123)");
+    expect(refs.view.state.doc.firstChild?.childCount).toBe(3);
+  });
+
+  it("keeps a bare address bare only where GFM would read it as one", async () => {
+    const cases: [string, string][] = [
+      ["word[https://x.io/a](https://x.io/a)", "word[https://x.io/a](https://x.io/a)"],
+      ["[https://x.io/a.](https://x.io/a.)", "[https://x.io/a.](https://x.io/a.)"],
+      ["[https://x.io/a](https://x.io/a)b", "[https://x.io/a](https://x.io/a)b"],
+      ["*[https://x.io/a](https://x.io/a)*", "*https://x.io/a*"],
+      ["see [https://x.io/a](https://x.io/a) now", "see https://x.io/a now"],
+    ];
+    for (const [input, want] of cases) {
+      const { serialize } = await mount(input);
+      expect(serialize(), input).toBe(want);
+    }
+  });
+
+  it("keeps a leaf-directive lookalike escaped at a line start", async () => {
+    const { serialize } = await mount("\\::name alone\n\n\\:::callout **a**");
+    expect(serialize()).toBe("\\::name alone\n\n\\:::callout **a**");
+  });
+});
+
+describe("what the editor writes for what was typed here", () => {
+  it("writes a typed list with - and keeps it tight, its nested list too", async () => {
+    const { view, serialize } = await mount("- one");
+    caretAfter(view, "one");
+    press(view, "Enter");
+    type(view, "two");
+    press(view, "Enter");
+    sinkListItem(view.state.schema.nodes.list_item!)(view.state, view.dispatch);
+    type(view, "nested");
+
+    expect(serialize()).toBe("- one\n- two\n  - nested");
+  });
+
+  it("writes an empty plain item as - and an empty cell as nothing", async () => {
+    const { serialize } = await mount("-\n- item\n\n| a | b |\n| --- | --- |\n|  | 2 |");
+    expect(serialize()).toBe("-\n- item\n\n| a | b |\n| --- | --- |\n|  | 2 |");
+  });
+
+  it("keeps <br /> on an empty task item, which GFM needs to see a task", async () => {
+    const { serialize } = await mount("- [ ] <br />");
+    expect(serialize()).toBe("- [ ] <br />");
+  });
+
+  it("keeps an empty line the writer made between blocks as <br />, typed or loaded", async () => {
+    // Enter twice is an empty paragraph, which the preset writes as `<br />`
+    // and reads back as one; arrived as `<br />`, it stays `<br />`.
+    // Neither is invented for an empty item or cell.
+    const { view, serialize } = await mount("a");
+    caretAtEnd(view);
+    press(view, "Enter");
+    press(view, "Enter");
+    type(view, "b");
+    expect(serialize()).toBe("a\n\n<br />\n\nb");
+
+    const loaded = await mount("a\n\n<br />\n\nb");
+    expect(loaded.serialize()).toBe("a\n\n<br />\n\nb");
+  });
+
+  it("keeps an escaped fence lookalike a paragraph through a save", async () => {
+    // The bytes may gain escapes (`\~\~\~`), the reading may not change: a
+    // `~~~` that reopened as a fence swallowed the rest of the note.
+    for (const input of ["\\~~~ **a**\n\nrest of note", "\\``` **a**\n\nrest of note"]) {
+      const first = await mount(input);
+      const written = first.serialize();
+      const reopened = await mount(written);
+      expect(reopened.view.state.doc.childCount, input).toBe(2);
+      expect(reopened.view.state.doc.firstChild?.type.name, input).toBe("paragraph");
+      expect(reopened.view.state.doc.textContent, input).toBe(input.replace(/\\/g, "").replace(/\*\*/g, "").replace("\n\n", ""));
+      expect(reopened.serialize(), input).toBe(written);
+    }
+  });
+
+  it("writes an edited table in the padded form and keeps an untouched one", async () => {
+    const { view, serialize } = await mount("| a | b |\n| --- | --- |\n| 1 | 2 |\n\n| c | d |\n| --- | --- |\n| 3 | 4 |");
+    let cell = -1;
+    view.state.doc.descendants((node, pos) => {
+      if (cell < 0 && node.type.name === "table_cell" && node.textContent === "1") cell = pos;
+    });
+    view.dispatch(view.state.tr.insertText("one", cell + 2, cell + 3));
+
+    expect(serialize()).toBe("| a   | b |\n| --- | - |\n| one | 2 |\n\n| c | d |\n| --- | --- |\n| 3 | 4 |");
+  });
+
+  it("writes a new divider as ---, and *** inside a list item", async () => {
+    const { serialize } = await mount("a\n\n---\n\nb");
+    expect(serialize()).toBe("a\n\n---\n\nb");
+    const inList = await mount("- a\n\n  ***\n\n  b");
+    expect(inList.serialize()).toBe("- a\n\n  ***\n\n  b");
+  });
+
+  it("keeps a page ref's spacer rule under the new text handler", async () => {
+    const { serialize } = await mount("- [Page](/p/abc123) ");
+    expect(serialize()).toBe("- [Page](/p/abc123)");
+  });
+
+  it("still escapes what would read as syntax", async () => {
+    const { serialize } = await mount("a \\* b and \\_x\\_ and a \\<b\n\n\\# not a heading\n\n\\- not an item");
+    expect(serialize()).toBe("a \\* b and \\_x\\_ and a \\<b\n\n\\# not a heading\n\n\\- not an item");
+  });
+});

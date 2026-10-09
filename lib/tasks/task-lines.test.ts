@@ -3,11 +3,31 @@ import { describe, expect, it } from "vitest";
 
 import {
   MAX_TASK_TEXT,
+  TASK_TOKEN_RE,
   hashTaskText,
   normalizeTaskText,
   parseTaskLines,
   type TaskLine,
 } from "./task-lines";
+
+describe("TASK_TOKEN_RE, the store's half of the same reading", () => {
+  const flip = (line: string) =>
+    line.replace(TASK_TOKEN_RE, (_m, head: string, _tok: string, tail: string) => `${head}x${tail}`);
+
+  it.each([
+    ["- [ ] one", "- [x] one"],
+    ["1. [ ] one", "1. [x] one"],
+    ["2) [ ] two", "2) [x] two"],
+    ["  10. [ ] ten", "  10. [x] ten"],
+  ])("flips the box of %j", (line, want) => {
+    expect(flip(line)).toBe(want);
+  });
+
+  it("leaves a line parseTaskLines does not read", () => {
+    expect(flip("1. one")).toBe("1. one");
+    expect(flip("[ ] one")).toBe("[ ] one");
+  });
+});
 
 type Expectation = Partial<Omit<TaskLine, "hash">>;
 
@@ -26,6 +46,24 @@ const table: { name: string; markdown: string; lines: Expectation[] }[] = [
     name: "a plus bullet parses",
     markdown: "+ [ ] alpha",
     lines: [{ index: 0, checked: false, text: "alpha" }],
+  },
+  {
+    name: "a numbered item with a dot is a task line, and stays numbered",
+    markdown: "1. [ ] alpha\n2. [x] beta",
+    lines: [
+      { index: 0, checked: false, text: "alpha" },
+      { index: 1, checked: true, text: "beta" },
+    ],
+  },
+  {
+    name: "a numbered item with a parenthesis is a task line",
+    markdown: "1) [ ] alpha",
+    lines: [{ index: 0, checked: false, text: "alpha" }],
+  },
+  {
+    name: "a number without a box is not a task line",
+    markdown: "1. alpha",
+    lines: [],
   },
   {
     name: "a lowercase x is checked",

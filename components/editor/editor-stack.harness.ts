@@ -14,6 +14,7 @@ import { gfm } from "@milkdown/kit/preset/gfm";
 import { Fragment, Node as ProseNode } from "@milkdown/kit/prose/model";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import { attachmentRefs } from "./attachment-refs";
+import { autolink } from "./autolink";
 import { callout } from "./callout";
 import { colorMarks } from "./color-mark";
 import { columnDrop } from "./column-drop";
@@ -25,6 +26,7 @@ import { images } from "./image";
 import { imageUploadPlugin } from "./image-upload";
 import { linkPreviewPlugin } from "./link-preview";
 import { loadGuard } from "./load-guard";
+import { markdownFidelity } from "./markdown-fidelity";
 import { math } from "./math";
 import { normalizeLegacy } from "./normalize";
 import { pageFiling } from "./page-filing";
@@ -185,6 +187,8 @@ export async function mountFullStack(markdown: string): Promise<MountedStack> {
     .use(images)
     .use(imageUploadPlugin(null))
     .use(math)
+    .use(markdownFidelity)
+    .use(autolink)
     .use(pageRef)
     .use(linkPreviewPlugin(true))
     .use(tableBlock)

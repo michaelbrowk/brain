@@ -65,6 +65,8 @@ import { toggle, toggleMemoryCtx } from "./toggle";
 import { images } from "./image";
 import { handleWrapperImageDrop, imageUploadPlugin } from "./image-upload";
 import { math } from "./math";
+import { markdownFidelity } from "./markdown-fidelity";
+import { autolink } from "./autolink";
 import { linkPreviewPlugin } from "./link-preview";
 import { webHref, webLinks } from "./web-link";
 import { typedUrls } from "./typed-url";
@@ -577,6 +579,11 @@ function Inner({
       .use(images)
       .use(imageUploadPlugin(capabilities.upload ?? null))
       .use(math)
+      // before pageRef: the serializer configuration, whose text handler the
+      // page-ref spacer wraps
+      .use(markdownFidelity)
+      // a typed address becomes a link on the space that ends it
+      .use(autolink)
       .use(pageRef)
       .use(linkPreviewPlugin(!!capabilities.unfurl))
       .use(tableBlock)

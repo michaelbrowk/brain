@@ -4,11 +4,12 @@
 // The .md file is the source of truth, so the checkbox NodeView is only safe
 // if ticking one changes nothing but the one bracket. Two invariants here:
 //
-//  1. Fidelity. Every case is parsed with the real preset stack plus the
-//     NodeView and serialized back. The expected text is the serializer's
-//     canonical form (`* [ ] text`, `[X]` folded to `[x]`, `-` and `+` folded
-//     to `*`), which is what the editor has always written; the NodeView must
-//     not move a single byte of it.
+//  1. Fidelity. Every case is parsed with the real preset stack, Brain's
+//     serializer configuration and the NodeView, and serialized back. The
+//     expected text is the writer's own form (`- [ ] text` stays `- [ ]`,
+//     `* [ ]` stays `* [ ]`, a tight list stays tight) with only the box
+//     normalised (`[X]` folded to `[x]`); the NodeView must not move a
+//     single byte of it.
 //  2. Idempotency. Feeding that output back through parse+serialize has to
 //     return the identical bytes. `rev` is the sha1 of the raw file, so a
 //     serializer that is not a fixed point mints a new rev on every open.
@@ -50,42 +51,41 @@ async function installDomGlobals() {
 const out = (...rows) => rows.join("\n") + "\n";
 
 // Left column is what a writer, Notion or another editor can hand us. Right
-// column is the one canonical form the editor writes back.
+// column is what the editor writes back: the writer's form, box normalised.
 const CASES = [
-  { name: "unchecked", md: "- [ ] plain", want: out("* [ ] plain"), boxes: 1 },
+  { name: "unchecked", md: "- [ ] plain", want: out("- [ ] plain"), boxes: 1 },
   { name: "checked, star bullet", md: "* [x] star bullet", want: out("* [x] star bullet"), boxes: 1 },
-  { name: "plus bullet", md: "+ [ ] plus bullet", want: out("* [ ] plus bullet"), boxes: 1 },
-  { name: "capital X", md: "- [X] capital X", want: out("* [x] capital X"), boxes: 1 },
+  { name: "plus bullet", md: "+ [ ] plus bullet", want: out("+ [ ] plus bullet"), boxes: 1 },
+  { name: "capital X", md: "- [X] capital X", want: out("- [x] capital X"), boxes: 1 },
   {
     name: "nested",
     md: out("- [ ] nested parent", "  - [x] nested child"),
-    want: out("* [ ] nested parent", "  * [x] nested child"),
+    want: out("- [ ] nested parent", "  - [x] nested child"),
     boxes: 2,
   },
-  { name: "empty item", md: "- [ ] <br />", want: out("* [ ] <br />"), boxes: 1 },
-  { name: "notion double space", md: "-  [x] notion double space", want: out("* [x] notion double space"), boxes: 1 },
-  { name: "trailing whitespace", md: "- [ ] trailing whitespace   ", want: out("* [ ] trailing whitespace"), boxes: 1 },
+  { name: "empty item", md: "- [ ] <br />", want: out("- [ ] <br />"), boxes: 1 },
+  { name: "notion double space", md: "-  [x] notion double space", want: out("- [x] notion double space"), boxes: 1 },
+  { name: "trailing whitespace", md: "- [ ] trailing whitespace   ", want: out("- [ ] trailing whitespace"), boxes: 1 },
   {
     name: "spread siblings",
     md: out("- [ ] item one", "", "- [ ] item two after a blank line (spread)"),
-    want: out("* [ ] item one", "", "* [ ] item two after a blank line (spread)"),
+    want: out("- [ ] item one", "", "- [ ] item two after a blank line (spread)"),
     boxes: 2,
   },
-  { name: "plain bullet", md: "- plain bullet, not a task", want: out("* plain bullet, not a task"), boxes: 0 },
+  { name: "plain bullet", md: "- plain bullet, not a task", want: out("- plain bullet, not a task"), boxes: 0 },
   {
     name: "mixed list",
     md: out("- [ ] task", "- plain", "- [x] done"),
-    want: out("* [ ] task", "", "* plain", "", "* [x] done"),
+    want: out("- [ ] task", "- plain", "- [x] done"),
     boxes: 2,
   },
   {
-    // `TASK_LINE_RE` reads `- [ ]` and nothing else, so a numbered task line
-    // is a checkbox the editor draws and the store cannot see. The editor
-    // re-bullets one on the way in rather than writing a line back that
-    // makes every + Task on the page answer "This note could not be read".
+    // `TASK_LINE_RE` reads `1. [ ]` as it reads `- [ ]`, so a numbered task
+    // line is a checkbox the editor draws and the store sees, and the list
+    // stays the writer's.
     name: "ordered task",
     md: out("1. [ ] ordered one", "2. [x] ordered two"),
-    want: out("* [ ] ordered one", "", "* [x] ordered two"),
+    want: out("1. [ ] ordered one", "2. [x] ordered two"),
     boxes: 2,
   },
   {
@@ -97,13 +97,13 @@ const CASES = [
   {
     name: "CRLF normalises to LF",
     md: "- [ ] one\r\n- [x] two\r\n",
-    want: out("* [ ] one", "", "* [x] two"),
+    want: out("- [ ] one", "- [x] two"),
     boxes: 2,
   },
   {
     name: "multi-block item",
     md: out("- [ ] first para", "", "  second para in the same item"),
-    want: out("* [ ] first para", "", "  second para in the same item"),
+    want: out("- [ ] first para", "", "  second para in the same item"),
     boxes: 1,
   },
 ];
@@ -114,19 +114,19 @@ const TOGGLES = [
     name: "toggle: tick the first of two",
     md: out("- [ ] one", "- [x] two"),
     press: 0,
-    want: out("* [x] one", "", "* [x] two"),
+    want: out("- [x] one", "- [x] two"),
   },
   {
     name: "toggle: untick a nested child",
     md: out("- [ ] parent", "  - [x] child"),
     press: 1,
-    want: out("* [ ] parent", "  * [ ] child"),
+    want: out("- [ ] parent", "  - [ ] child"),
   },
   {
     name: "toggle: an empty item keeps its placeholder",
     md: "- [ ] <br />",
     press: 0,
-    want: out("* [x] <br />"),
+    want: out("- [x] <br />"),
   },
 ];
 
@@ -149,6 +149,10 @@ async function main() {
   const { taskCheckbox, taskCheckboxMarkdown } = await loader.load(
     "components/editor/task-checkbox.ts",
     "task-checkbox.mjs",
+  );
+  const { markdownFidelity } = await loader.load(
+    "components/editor/markdown-fidelity.ts",
+    "markdown-fidelity.mjs",
   );
 
   const [{ Editor, defaultValueCtx, rootCtx }, { commonmark }, { gfm }, { getMarkdown }] =
@@ -177,6 +181,7 @@ async function main() {
         .use(commonmark)
         .use(gfm)
         .use(bundle)
+        .use(markdownFidelity)
         .create();
       const controls = root.querySelectorAll("button[role='checkbox']");
       if (press !== undefined) {

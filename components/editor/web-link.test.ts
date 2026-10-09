@@ -15,6 +15,8 @@ import { editingCore } from "./editing-core";
 import { linkPreviewPlugin } from "./link-preview";
 import { pageRef, setPageRefOrigin } from "./page-ref";
 import { typedUrls } from "./typed-url";
+import { autolink } from "./autolink";
+import { markdownFidelity } from "./markdown-fidelity";
 import {
   hrefForWords,
   linkRangeAt,
@@ -48,6 +50,8 @@ async function mount(markdown: string, unfurl = true): Promise<Mounted> {
     .use(editingCore)
     .use(webLinks)
     .use(typedUrls)
+    .use(markdownFidelity)
+    .use(autolink)
     .use(pageRef)
     .use(linkPreviewPlugin(unfurl))
     .use(history)

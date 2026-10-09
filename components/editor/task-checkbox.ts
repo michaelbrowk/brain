@@ -227,7 +227,8 @@ const MENU_EXIT_MS = DUR.fast * 1000;
 const MENU_GAP = 6;
 const EDGE_GUTTER = 8;
 
-const promoteKey = new PluginKey<PromoteState>("brainTaskPromote");
+/** Exported for the tests that compare the mapped marks with a rebuild. */
+export const promoteKey = new PluginKey<PromoteState>("brainTaskPromote");
 
 /** What joins one task line's text to the next when the plugin asks whether
  *  the list it is looking at is the list it looked at last.

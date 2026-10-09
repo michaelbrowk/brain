@@ -106,6 +106,13 @@ describe("removedContentHas", () => {
     expect(removedContentHas(state.tr.insertText("x", 2), isRef)).toBe(false);
   });
 
+  it("reads an attribute step as a rewrite of the node it changes", () => {
+    const state = EditorState.create({ doc: doc(p("one"), ref("a")) });
+    expect(removedContentHas(state.tr.setNodeAttribute(6, "id", "b"), isRef)).toBe(true);
+    const titled = EditorState.create({ doc: doc(h("Title"), ref("a")) });
+    expect(removedContentHas(titled.tr.setNodeAttribute(0, "level", 3), isRef)).toBe(false);
+  });
+
   it("ignores a deletion that stops at the ref's edge", () => {
     const state = EditorState.create({ doc: doc(p("one"), ref("a"), p("two")) });
     const tr = state.tr.setSelection(TextSelection.create(state.doc, 9, 12)).deleteSelection();

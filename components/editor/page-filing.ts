@@ -240,7 +240,9 @@ function headingsOf(doc: ProseNode): readonly DocumentHeading[] {
  *  changed it: one that wrote inside a heading, or changed the shape of the
  *  document. A keystroke inside a paragraph keeps the list it had, so typing
  *  on a long page does not recount every section per key. The view publishes
- *  the state when its identity changes. */
+ *  the state when its identity changes. A heading that is one page reference
+ *  takes the page's live title, so a rename of that page shows in the menu
+ *  after the next structural edit rather than at once. */
 export function documentHeadingsPlugin(): Plugin<readonly DocumentHeading[]> {
   return new Plugin<readonly DocumentHeading[]>({
     key: documentHeadingsKey,

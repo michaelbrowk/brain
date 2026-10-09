@@ -115,15 +115,23 @@ function insideOneTextblock(
 /** Whether any content the transaction removed or replaced holds a node
  *  `matches` names. Only the replaced ranges of each step are read, in the
  *  document that step started from: a step cannot take out what it did not
- *  cover. A pure insertion removes nothing and is never a match. */
+ *  cover. A pure insertion removes nothing and is never a match. An attribute
+ *  step's map is empty, but it does rewrite the node at its position, so that
+ *  node is read as replaced. */
 export function removedContentHas(
   tr: Transaction,
   matches: (node: ProseNode) => boolean,
 ): boolean {
   for (let index = 0; index < tr.steps.length; index += 1) {
     const before = tr.docs[index];
+    const step = tr.steps[index];
+    if (step instanceof AttrStep) {
+      const node = before.nodeAt(step.pos);
+      if (node && matches(node)) return true;
+      continue;
+    }
     let found = false;
-    tr.steps[index].getMap().forEach((oldStart, oldEnd) => {
+    step.getMap().forEach((oldStart, oldEnd) => {
       if (found || oldEnd <= oldStart) return;
       before.nodesBetween(oldStart, oldEnd, (node) => {
         if (found) return false;

@@ -531,6 +531,15 @@ describe("the removal guard on a transaction", () => {
     expect(next.doc.eq(state.doc)).toBe(true);
   });
 
+  it("asks when a row's id is rewritten in place, which also takes the page out", () => {
+    const onRequestRemove = vi.fn();
+    const state = guarded(onRequestRemove);
+    // The ref atom sits at 4, inside the row paragraph that opens at 3.
+    const next = state.apply(state.tr.setNodeAttribute(4, "id", "other"));
+    expect(onRequestRemove).toHaveBeenCalledWith({ id: "target", occurrence: 0, label: "T" });
+    expect(next.doc.eq(state.doc)).toBe(true);
+  });
+
   it("counts nothing while a paragraph is typed into", () => {
     const onRequestRemove = vi.fn();
     const state = guarded(onRequestRemove);

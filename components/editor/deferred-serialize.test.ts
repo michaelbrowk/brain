@@ -74,7 +74,9 @@ describe("createDeferredSerializer", () => {
   it("postpones while the idle moment is shorter than the last run needed", () => {
     const browser = fakeIdle();
     const serializer = createDeferredSerializer();
-    const slow = vi.fn(() => vi.advanceTimersByTime(120));
+    const slow = vi.fn(() => {
+      vi.advanceTimersByTime(120);
+    });
     serializer.schedule(slow);
     vi.advanceTimersByTime(200);
     browser.idle(50);
@@ -90,29 +92,93 @@ describe("createDeferredSerializer", () => {
     expect(slow).toHaveBeenCalledTimes(2);
   });
 
-  it("runs at the cap even when no idle moment is long enough", () => {
+  it("runs within a second of the last change even when no idle moment is long enough", () => {
     const browser = fakeIdle();
-    const serializer = createDeferredSerializer({ capMs: 1000 });
-    const slow = vi.fn(() => vi.advanceTimersByTime(120));
+    const serializer = createDeferredSerializer();
+    const slow = vi.fn(() => {
+      vi.advanceTimersByTime(120);
+    });
     serializer.schedule(slow);
     vi.advanceTimersByTime(200);
     browser.idle(50);
     serializer.schedule(slow);
+    const lastChange = performance.now();
     vi.advanceTimersByTime(360);
-    for (let i = 0; i < 5; i += 1) {
-      vi.advanceTimersByTime(150);
+    // Frames that leave 5 ms each, every 16 ms, up to the cap: none is taken.
+    while (performance.now() - lastChange + 16 < 1000) {
+      vi.advanceTimersByTime(16);
       browser.idle(5);
     }
     expect(slow).toHaveBeenCalledOnce();
-    vi.advanceTimersByTime(300);
+    // The first frame past the cap is.
+    vi.advanceTimersByTime(16);
     browser.idle(5);
     expect(slow).toHaveBeenCalledTimes(2);
+  });
+
+  it("a costly page in a busy tab: quiet 500 ms, then the idle wait ends at one second", () => {
+    // The reviewer's S5a shape: a 400 ms serialize used to earn a second of
+    // quiet and then a second of idle wait, so the draft sat 2 s behind.
+    const browser = fakeIdle();
+    const serializer = createDeferredSerializer();
+    const slow = vi.fn(() => {
+      vi.advanceTimersByTime(400);
+    });
+    serializer.schedule(slow);
+    vi.advanceTimersByTime(200);
+    browser.idle(50);
+    serializer.schedule(slow);
+    const lastChange = performance.now();
+    vi.advanceTimersByTime(499);
+    expect(browser.pending()).toBe(0);
+    vi.advanceTimersByTime(1);
+    expect(browser.pending()).toBe(1);
+    let started = 0;
+    slow.mockImplementation(() => {
+      started = performance.now();
+      vi.advanceTimersByTime(400);
+    });
+    while (slow.mock.calls.length < 2) {
+      vi.advanceTimersByTime(16);
+      browser.idle(5);
+    }
+    // The fake browser offers a frame every 16 ms; a real one fires the
+    // request's own timeout at the cap.
+    expect(started - lastChange).toBeLessThanOrEqual(1000 + 16);
+  });
+
+  it("a small page in a busy tab: the idle wait ends at one second, where it used to run on", () => {
+    // The reviewer's S5b shape: frames that leave 1 ms idle each.
+    const browser = fakeIdle();
+    const serializer = createDeferredSerializer();
+    const quick = vi.fn(() => {
+      vi.advanceTimersByTime(2);
+    });
+    serializer.schedule(quick);
+    vi.advanceTimersByTime(200);
+    browser.idle(50);
+    serializer.schedule(quick);
+    const lastChange = performance.now();
+    vi.advanceTimersByTime(200);
+    let started = 0;
+    quick.mockImplementation(() => {
+      started = performance.now();
+      vi.advanceTimersByTime(2);
+    });
+    while (quick.mock.calls.length < 2) {
+      vi.advanceTimersByTime(16);
+      browser.idle(1);
+    }
+    expect(started - lastChange).toBeLessThanOrEqual(1000 + 16);
+    expect(started - lastChange).toBeGreaterThan(200);
   });
 
   it("waits longer after a costly run, so a long page is not serialized between every two words", () => {
     const browser = fakeIdle();
     const serializer = createDeferredSerializer();
-    const slow = vi.fn(() => vi.advanceTimersByTime(120));
+    const slow = vi.fn(() => {
+      vi.advanceTimersByTime(120);
+    });
     serializer.schedule(slow);
     vi.advanceTimersByTime(200);
     browser.idle(50);
@@ -129,15 +195,19 @@ describe("createDeferredSerializer", () => {
     expect(browser.pending()).toBe(1);
   });
 
-  it("caps the earned quiet at a second", () => {
+  it("caps the earned quiet at half a second", () => {
     const browser = fakeIdle();
     const serializer = createDeferredSerializer();
-    const slow = vi.fn(() => vi.advanceTimersByTime(900));
+    const slow = vi.fn(() => {
+      vi.advanceTimersByTime(900);
+    });
     serializer.schedule(slow);
     vi.advanceTimersByTime(200);
     browser.idle(50);
     serializer.schedule(slow);
-    vi.advanceTimersByTime(1000);
+    vi.advanceTimersByTime(499);
+    expect(browser.pending()).toBe(0);
+    vi.advanceTimersByTime(1);
     expect(browser.pending()).toBe(1);
   });
 
@@ -220,6 +290,15 @@ describe("deferredSerialize in an editor", () => {
       view.setProps({});
     }
     vi.advanceTimersByTime(100);
+    expect(serialize).toHaveBeenCalledOnce();
+  });
+
+  it("serializes at once on blur, with the text typed a moment before", async () => {
+    const serialize = vi.fn();
+    const { view } = await mount(serialize);
+    view.dispatch(view.state.tr.insertText("q", 1));
+    vi.advanceTimersByTime(50);
+    view.dom.dispatchEvent(new FocusEvent("blur"));
     expect(serialize).toHaveBeenCalledOnce();
   });
 

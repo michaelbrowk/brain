@@ -11,7 +11,7 @@ import { cursor } from "@milkdown/kit/plugin/cursor";
 import { history } from "@milkdown/kit/plugin/history";
 import { commonmark, syncHeadingIdPlugin } from "@milkdown/kit/preset/commonmark";
 import { gfm } from "@milkdown/kit/preset/gfm";
-import { Node as ProseNode } from "@milkdown/kit/prose/model";
+import { Fragment, Node as ProseNode } from "@milkdown/kit/prose/model";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import { attachmentRefs } from "./attachment-refs";
 import { callout } from "./callout";
@@ -39,25 +39,85 @@ import { toggle } from "./toggle";
 export const HARNESS_ORIGIN = "http://localhost:3000";
 
 /** How many times `run` walked a whole document. `Node.descendants` is
- *  `nodesBetween(0, size)` on the node, so one count covers both spellings,
- *  and only a walk that starts at a `doc` node and spans all of it counts: a
- *  plugin that reads the block under the caret is what this is meant to
- *  allow. The count is what makes "independent of page size" a test and not
- *  a timing. */
-export function wholeDocumentWalks(run: () => void): number {
-  const prototype = ProseNode.prototype as unknown as {
+ *  `nodesBetween(0, size)` on the node, so one count covers both spellings;
+ *  `Node.forEach` over a `doc` counts too, as does iterating a doc's
+ *  `content` fragment directly, which is how a lane walk reads the top
+ *  level without ever calling the node. Only a walk that starts at the
+ *  document and spans all of it counts: a plugin that reads the block under
+ *  the caret is what this is meant to allow. The count is what makes
+ *  "independent of page size" a test and not a timing.
+ *
+ *  A fragment is the document's content when it has as many children as
+ *  `topLevelChildren` says, which the caller reads off its document; a
+ *  nested fragment that happened to match would count too, so the pages
+ *  this is used on keep their lists short. Without it only the node
+ *  spellings count. */
+export function wholeDocumentWalks(
+  run: () => void,
+  options: { topLevelChildren?: number } = {},
+): number {
+  const nodes = ProseNode.prototype as unknown as {
     nodesBetween: (this: ProseNode, from: number, to: number, ...rest: unknown[]) => void;
+    forEach: (this: ProseNode, ...rest: unknown[]) => void;
   };
-  const original = prototype.nodesBetween;
+  const fragments = Fragment.prototype as unknown as {
+    nodesBetween: (this: Fragment, from: number, to: number, ...rest: unknown[]) => void;
+    forEach: (this: Fragment, ...rest: unknown[]) => void;
+  };
+  const original = {
+    nodesBetween: nodes.nodesBetween,
+    forEach: nodes.forEach,
+    fragmentNodesBetween: fragments.nodesBetween,
+    fragmentForEach: fragments.forEach,
+  };
   let walks = 0;
-  prototype.nodesBetween = function (this: ProseNode, from, to, ...rest) {
+  /** The node spellings delegate to the fragment ones; count each walk once. */
+  let viaNode = 0;
+  const isDocContent = (fragment: Fragment) =>
+    options.topLevelChildren !== undefined && fragment.childCount === options.topLevelChildren;
+  nodes.nodesBetween = function (this: ProseNode, from, to, ...rest) {
     if (this.type.name === "doc" && from === 0 && to === this.content.size) walks += 1;
-    return original.call(this, from, to, ...rest);
+    viaNode += 1;
+    try {
+      return original.nodesBetween.call(this, from, to, ...rest);
+    } finally {
+      viaNode -= 1;
+    }
+  };
+  nodes.forEach = function (this: ProseNode, ...rest) {
+    if (this.type.name === "doc") walks += 1;
+    viaNode += 1;
+    try {
+      return original.forEach.call(this, ...rest);
+    } finally {
+      viaNode -= 1;
+    }
+  };
+  fragments.nodesBetween = function (this: Fragment, from, to, ...rest) {
+    if (viaNode === 0 && isDocContent(this) && from === 0 && to === this.size) walks += 1;
+    viaNode += 1;
+    try {
+      return original.fragmentNodesBetween.call(this, from, to, ...rest);
+    } finally {
+      viaNode -= 1;
+    }
+  };
+  fragments.forEach = function (this: Fragment, ...rest) {
+    if (viaNode === 0 && isDocContent(this)) walks += 1;
+    viaNode += 1;
+    try {
+      return original.fragmentForEach.call(this, ...rest);
+    } finally {
+      viaNode -= 1;
+    }
   };
   try {
     run();
   } finally {
-    prototype.nodesBetween = original;
+    nodes.nodesBetween = original.nodesBetween;
+    nodes.forEach = original.forEach;
+    fragments.nodesBetween = original.fragmentNodesBetween;
+    fragments.forEach = original.fragmentForEach;
   }
   return walks;
 }

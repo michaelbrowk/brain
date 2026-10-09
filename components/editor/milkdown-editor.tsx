@@ -849,10 +849,11 @@ function Inner({
         return "refused";
       }
       if (result !== "refused") {
-        // The editor now holds the server's body. A serialize still waiting
-        // from earlier typing would hand it back as an edit, and the next
-        // flush compares against this body, not the last one emitted.
-        serializeLater.drop();
+        // The editor now holds the server's body (the serialize scheduled
+        // from earlier typing went above). A change flag left by an edit
+        // taken back would hand that body over as an edit on the next
+        // flush, and the next flush compares against this body, not the
+        // last one emitted.
         editorSession.takeDocumentChanged();
         lastEmitted.current = markdown;
       }

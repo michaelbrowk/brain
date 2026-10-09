@@ -12,13 +12,15 @@ import { commonmark } from "@milkdown/kit/preset/commonmark";
 import { gfm } from "@milkdown/kit/preset/gfm";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import { Plugin } from "@milkdown/kit/prose/state";
-import { $prose } from "@milkdown/kit/utils";
+import type { MarkdownNode, Root } from "@milkdown/kit/transformer";
+import { $prose, $remark } from "@milkdown/kit/utils";
 import { undo, undoDepth } from "@milkdown/kit/prose/history";
 import { TextSelection, type Transaction } from "@milkdown/kit/prose/state";
 import { ReplaceStep } from "@milkdown/kit/prose/transform";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mountFullStack, type MountedStack } from "./editor-stack.harness";
 import { applyExternalMarkdown, EXTERNAL_WRITE_META } from "./external-write";
+import { images } from "./image";
 import { loadGuard } from "./load-guard";
 import { pageRef, setPageRefOrigin, syncLivePageInfo } from "./page-ref";
 import { createPageRefNesting } from "./page-ref-nesting";
@@ -194,6 +196,7 @@ describe("an external write that drops a page row", () => {
 
 describe("an external write the editor cannot take", () => {
   afterEach(() => {
+    vi.restoreAllMocks();
     document.body.replaceChildren();
   });
 
@@ -214,6 +217,28 @@ describe("an external write the editor cannot take", () => {
     const parse = (next: string) => editor.ctx.get(parserCtx)(next);
     return { editor, view, parse };
   }
+
+  it("refuses a body whose parse would drop content", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    // The remark pass that once made every image a block: a heading holding
+    // one cannot be built, and a load of that body would open read-only.
+    const blockEveryImage = $remark("zzBlockEveryImageExternal", () => () => (tree: Root) => {
+      const walk = (node: MarkdownNode) => {
+        node.children = node.children?.map((child) => {
+          if (child.type === "image") return { ...child, type: "brainImage" };
+          walk(child);
+          return child;
+        });
+      };
+      walk(tree as unknown as MarkdownNode);
+    });
+    const { editor, view, parse } = await mini("Plain.", [images, blockEveryImage]);
+    expect(applyExternalMarkdown(view, parse, "# Title ![i](/a.png) end\n\nafter")).toBe(
+      "refused",
+    );
+    expect(view.state.doc.textContent).toBe("Plain.");
+    await editor.destroy();
+  });
 
   it("answers refused when a plugin refuses the transaction", async () => {
     const refuseAll = $prose(

@@ -138,4 +138,25 @@ describe("MilkdownEditor's registered external write", () => {
     expect(changes).toEqual([]);
     expect(dirty).toBe(0);
   });
+
+  it("a key typed and taken back is not handed over as an edit after an apply", async () => {
+    const view = await mount("Alpha line.\n\nOmega line.");
+    await typeAtEnd(view, "X");
+    // ⌘Z / Ctrl+Z: the document is the loaded one again, but it was changed.
+    await act(async () => {
+      view.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "z", ctrlKey: true, bubbles: true }),
+      );
+    });
+    expect(view.textContent).not.toContain("X");
+
+    let result: ExternalWriteResult | undefined;
+    await act(async () => {
+      result = apply!("Alpha line, from the phone.\n\nOmega line.");
+    });
+    expect(result).toBe("applied");
+    await act(async () => flush!());
+    expect(changes).toEqual([]);
+  });
 });
+

@@ -548,4 +548,41 @@ describe("a write to the open page from somewhere else", () => {
     expect(puts).toHaveLength(0);
     expect(server.markdown).toBe("Base, theirs");
   });
+
+  it("Save a copy keeps text typed while the copy was being made", async () => {
+    await inConflict();
+    holdPosts = true;
+    const target = button("Save a copy");
+    if (!target) throw new Error("no button Save a copy");
+    await act(async () => target.click());
+    await settle();
+    expect(heldPosts).toHaveLength(1);
+    await type("Base, mine and typed during the copy");
+    await act(async () => heldPosts.shift()!());
+    await settle();
+    await flushFrames();
+    await advance(0);
+
+    expect(posts.map((post) => post.markdown)).toEqual(["Base, mine"]);
+    expect(editorHarness.applied).toEqual([]);
+    expect(conflictShown()).toBe(true);
+    expect(drafts().join("")).toContain("Base, mine and typed during the copy");
+  });
+
+  it("after Take theirs, a closing tab sends nothing of the text let go of", async () => {
+    await inConflict();
+    await press("Take theirs");
+    const before = puts.length;
+    await act(async () => {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => "hidden",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new Event("pagehide"));
+    });
+    await advance(2_000);
+    expect(puts.slice(before)).toEqual([]);
+    expect(server.markdown).toBe("Base, theirs");
+  });
 });

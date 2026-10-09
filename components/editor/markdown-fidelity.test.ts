@@ -201,6 +201,13 @@ describe("round three: links under one mark, empty items, cells, trailing spaces
     expect(heading.serialize()).toBe("# Title");
   });
 
+  it("drops a hard break at the end of a heading (M17)", async () => {
+    const { view, serialize } = await mount("# Title");
+    const hardbreak = view.state.schema.nodes.hardbreak!.create();
+    view.dispatch(view.state.tr.insert(view.state.doc.firstChild!.nodeSize - 1, hardbreak));
+    expect(serialize()).toBe("# Title");
+  });
+
   it("writes a rule inside a * item with a character that is not the bullet (M18)", async () => {
     const { view, serialize } = await mount("* a\n* b\n\n---");
     let hr = -1;
@@ -240,6 +247,19 @@ describe("round three: links under one mark, empty items, cells, trailing spaces
     });
     starred.view.dispatch(starred.view.state.tr.delete(starredWords, starredWords + 1));
     expect(starred.serialize()).toBe("* ___\n* b");
+  });
+
+  it("writes items created with default attributes tight (M19)", async () => {
+    const { view, serialize } = await mount("x");
+    const { schema } = view.state;
+    const text = (s: string) => schema.nodes.paragraph!.create(null, schema.text(s));
+    const inner = schema.nodes.bullet_list!.create(null, schema.nodes.list_item!.create(null, text("b")));
+    const outer = schema.nodes.bullet_list!.create(null, [
+      schema.nodes.list_item!.create(null, [text("a"), inner]),
+      schema.nodes.list_item!.create(null, text("c")),
+    ]);
+    view.dispatch(view.state.tr.replaceWith(0, view.state.doc.content.size, outer));
+    expect(serialize()).toBe("- a\n  - b\n- c");
   });
 });
 

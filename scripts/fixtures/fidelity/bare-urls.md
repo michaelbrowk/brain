@@ -5,3 +5,5 @@ https://example.com
 mail me@example.com or visit www.example.org today
 
 <https://example.com> stays angled
+
+ping me@localhost or user@host, not addresses

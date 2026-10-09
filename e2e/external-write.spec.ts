@@ -290,3 +290,68 @@ test("@mobile the conflict's three answers fit a phone and Take theirs works the
     await device.close();
   }
 });
+
+/** Every local draft this tab keeps for the page. */
+async function draftBodies(page: Page, id: string) {
+  return page.evaluate((pageId) => {
+    const bodies: string[] = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (!key?.startsWith("brain-draft") || !key.includes(encodeURIComponent(pageId))) continue;
+      bodies.push(localStorage.getItem(key) ?? "");
+    }
+    return bodies;
+  }, id);
+}
+
+test("a key typed while the previous save is out survives a write from elsewhere", async ({
+  page,
+  browser,
+}) => {
+  await login(page);
+  const id = await makePage(page, "Key in flight", "Alpha line.\n\nOmega line.");
+  const content = await openPage(page, id);
+  const device = await otherDevice(browser);
+  try {
+    await caretAfter(content, "Alpha line.");
+    // This tab's next save is held on the wire while one more key is typed.
+    let releasePut!: () => void;
+    const held = new Promise<void>((resolve) => {
+      releasePut = resolve;
+    });
+    let holding = true;
+    await page.route(`**/api/page/${id}`, async (route) => {
+      if (route.request().method() === "PUT" && holding) {
+        holding = false;
+        await held;
+      }
+      await route.continue();
+    });
+    const putOut = page.waitForRequest(
+      (request) => request.method() === "PUT" && request.url().endsWith(`/api/page/${id}`),
+    );
+    await page.keyboard.type(" one");
+    await putOut;
+    await page.keyboard.type(" KEY");
+    const landed = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PUT" && response.url().endsWith(`/api/page/${id}`),
+    );
+    releasePut();
+    await landed;
+    // Inside the deferred serialize's window, the other device writes.
+    await writeFrom(device.page, id, "Alpha line. one\n\nOmega line, edited elsewhere.");
+
+    // The key is never lost: the page is in conflict with the key in the
+    // editor and in the local draft.
+    await expect(page.getByText("Page changed elsewhere")).toBeVisible({ timeout: 12_000 });
+    await expect(content).toContainText("Alpha line. one KEY");
+    await expect
+      .poll(async () => (await draftBodies(page, id)).join("\n"))
+      .toContain("Alpha line. one KEY");
+    expect(await serverBody(page, id)).toBe("Alpha line. one\n\nOmega line, edited elsewhere.");
+    await sameEditor(content);
+  } finally {
+    await device.close();
+  }
+});

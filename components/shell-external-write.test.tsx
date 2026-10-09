@@ -24,7 +24,9 @@ import { canonicalPageMarkdown } from "@/lib/page-markdown";
 import { resetTasksStore } from "./tasks-client";
 import { Shell } from "./shell";
 
-type ExternalWrite = (markdown: string) => "applied" | "unchanged" | "refused";
+type ExternalWrite = (
+  markdown: string,
+) => "applied" | "unchanged" | "refused" | "dirty";
 type EditorProps = {
   value: string;
   onChange: (markdown: string) => void;
@@ -39,6 +41,11 @@ const editorHarness = vi.hoisted(() => ({
   applied: [] as string[],
   /** What the stand-in holds: its mount value, then each applied body. */
   holds: "",
+  /** A keystroke the stand-in holds and has not serialized yet. The real
+   *  editor hands it over before it applies anything. */
+  unserialized: null as string | null,
+  /** The editor cannot take a write in place (read-only, lossy parse). */
+  refuse: false,
 }));
 
 vi.mock("@/lib/client", () => ({
@@ -60,6 +67,14 @@ vi.mock("next/dynamic", () => ({
       useEffect(
         () =>
           props.registerExternalWrite?.((markdown) => {
+            if (editorHarness.unserialized !== null) {
+              const typed = editorHarness.unserialized;
+              editorHarness.unserialized = null;
+              editorHarness.holds = typed;
+              props.onChange(typed);
+              return "dirty";
+            }
+            if (editorHarness.refuse) return "refused";
             if (markdown === editorHarness.holds) return "unchanged";
             editorHarness.applied.push(markdown);
             editorHarness.holds = markdown;
@@ -122,6 +137,20 @@ describe("a write to the open page from somewhere else", () => {
   let posts: Array<{ title?: string; markdown?: string; parentId?: unknown }>;
   const apiFetchMock = vi.mocked(apiFetch);
 
+  let heldPuts: Array<() => void>;
+  let holdPuts: boolean;
+
+  /** The store's rule: the rev or the base body is current, or a 409. */
+  function writePut(body: { markdown?: string; rev?: string; baseMarkdown?: string }) {
+    const base =
+      body.baseMarkdown === undefined ? undefined : canonicalPageMarkdown(body.baseMarkdown);
+    if (body.rev !== `rev-${server.rev}` && base !== server.markdown) {
+      return response({ error: "conflict", currentRev: `rev-${server.rev}` }, 409);
+    }
+    commit(canonicalPageMarkdown(body.markdown ?? ""));
+    return response({ markdown: server.markdown, rev: `rev-${server.rev}` });
+  }
+
   function commit(markdown: string) {
     if (markdown === server.markdown) return;
     server = { markdown, rev: server.rev + 1 };
@@ -137,6 +166,10 @@ describe("a write to the open page from somewhere else", () => {
     editorHarness.mounts = 0;
     editorHarness.applied = [];
     editorHarness.holds = "";
+    editorHarness.unserialized = null;
+    editorHarness.refuse = false;
+    heldPuts = [];
+    holdPuts = false;
     apiFetchMock.mockReset();
     resetTasksStore();
     window.history.replaceState({}, "", "/p/note");
@@ -174,19 +207,14 @@ describe("a write to the open page from somewhere else", () => {
         if (init?.method === "PUT") {
           const body = JSON.parse(String(init.body)) as (typeof puts)[number];
           puts.push(body);
-          const base =
-            body.baseMarkdown === undefined
-              ? undefined
-              : canonicalPageMarkdown(body.baseMarkdown);
-          if (body.rev !== `rev-${server.rev}` && base !== server.markdown) {
-            return Promise.resolve(
-              response({ error: "conflict", currentRev: `rev-${server.rev}` }, 409),
+          if (holdPuts) {
+            holdPuts = false;
+            // Answered with what the server holds when it is let through.
+            return new Promise<Response>((resolve) =>
+              heldPuts.push(() => resolve(writePut(body))),
             );
           }
-          commit(canonicalPageMarkdown(body.markdown ?? ""));
-          return Promise.resolve(
-            response({ markdown: server.markdown, rev: `rev-${server.rev}` }),
-          );
+          return Promise.resolve(writePut(body));
         }
         return Promise.resolve(
           response({
@@ -345,6 +373,37 @@ describe("a write to the open page from somewhere else", () => {
     await advance(800);
     expect(server.markdown).toBe("Base, theirs");
     expect(conflictShown()).toBe(true);
+  });
+
+  it("hands over a keystroke typed while the previous save was out, then conflicts", async () => {
+    await open("Base");
+    await type("Base, one");
+    holdPuts = true;
+    await advance(800);
+    expect(heldPuts).toHaveLength(1);
+    // A key while that save is on the wire: the editor marks the page dirty
+    // and holds the key until its next serialize.
+    await act(async () => editorHarness.props?.onDirty?.());
+    editorHarness.unserialized = "Base, one KEY";
+    // The save lands, and with it the shell's dirty mark for the page goes.
+    await act(async () => heldPuts.shift()!());
+    await settle();
+    expect(server.markdown).toBe("Base, one");
+
+    await writeElsewhere("Base, one, theirs");
+    expect(editorHarness.applied).toEqual([]);
+    expect(editorHarness.mounts).toBe(1);
+    expect(editorHarness.holds).toBe("Base, one KEY");
+
+    await advance(800);
+    expect(server.markdown).toBe("Base, one, theirs");
+    expect(conflictShown()).toBe(true);
+    expect(
+      Object.keys(localStorage)
+        .filter((key) => key.startsWith("brain-draft"))
+        .map((key) => localStorage.getItem(key))
+        .join(""),
+    ).toContain("Base, one KEY");
   });
 
   async function inConflict() {

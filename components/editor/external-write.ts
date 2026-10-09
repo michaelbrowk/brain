@@ -31,7 +31,11 @@ export type ExternalWriteResult =
   /** Nothing changed: a view that takes no edits (a page opened read-only,
    *  a nesting move in flight), or a body whose parse would drop content.
    *  The caller remounts, which runs the load's own guard on it. */
-  | "refused";
+  | "refused"
+  /** Nothing changed: the editor held an edit the shell had not been handed
+   *  yet, and handed it over instead (the registered apply in
+   *  `milkdown-editor.tsx`). The caller treats the page as unsaved. */
+  | "dirty";
 
 /** One replace from `doc` to `next`, over the range that differs. Null when
  *  the two are the same document. */

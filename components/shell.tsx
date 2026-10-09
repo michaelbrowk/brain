@@ -1230,14 +1230,21 @@ export function Shell({
   );
 
   /** Put a body written elsewhere into the open editor in place: the caret,
-   *  the scroll and the undo history stay (C9). False when the editor could
-   *  not take it (not mounted yet, opened read-only, a parse that would drop
-   *  content), and the caller remounts the editor on the body instead. */
-  const applyToLiveEditor = useCallback((id: string, markdown: string) => {
-    const live = editorExternalWriteRef.current;
-    if (!live || live.pageId !== id) return false;
-    return live.apply(markdown) !== "refused";
-  }, []);
+   *  the scroll and the undo history stay (C9). "refused" when the editor
+   *  could not take it (not mounted yet, opened read-only, a parse that would
+   *  drop content), and the caller remounts the editor on the body instead.
+   *  "dirty" when the editor held a keystroke the shell had not been handed:
+   *  it has been handed over now (`onChange` ran), nothing was applied, and
+   *  the caller must leave the page's base alone so that edit's save meets
+   *  the other version as a conflict. */
+  const applyToLiveEditor = useCallback(
+    (id: string, markdown: string): ExternalWriteResult => {
+      const live = editorExternalWriteRef.current;
+      if (!live || live.pageId !== id) return "refused";
+      return live.apply(markdown);
+    },
+    [],
+  );
 
   // ── page cache (instant re-navigation + hover prefetch) ──────
   const pageCache = useRef<Map<string, LoadedPage>>(
@@ -1411,14 +1418,23 @@ export function Shell({
         coverQueueRef.current.has(id)
       )
         return;
-      revisionsRef.current.set(id, p.rev);
-      baseMarkdownRef.current.set(id, p.markdown);
-      if (selectedIdRef.current !== id) return;
-      setPage(loaded);
+      if (selectedIdRef.current !== id) {
+        revisionsRef.current.set(id, p.rev);
+        baseMarkdownRef.current.set(id, p.markdown);
+        return;
+      }
       // Silent: an external change just refreshes the page, no toast. It
       // lands in the live editor where it differs, and a new editor is
-      // built only when that one cannot take it.
-      if (!applyToLiveEditor(id, loaded.markdown)) setEditorEpoch((e) => e + 1);
+      // built only when that one cannot take it. The editor answers first,
+      // before the base moves: a keystroke it had not handed over yet keeps
+      // the old base, and its save becomes a conflict instead of vanishing
+      // under the other version.
+      const applied = applyToLiveEditor(id, loaded.markdown);
+      if (applied === "dirty") return;
+      revisionsRef.current.set(id, p.rev);
+      baseMarkdownRef.current.set(id, p.markdown);
+      setPage(loaded);
+      if (applied === "refused") setEditorEpoch((e) => e + 1);
     },
     [applyToLiveEditor, cachePut],
   );
@@ -4044,7 +4060,7 @@ export function Shell({
           ? { ...current, markdown: latest.markdown, rev: latest.rev }
           : current,
       );
-      if (!applyToLiveEditor(id, latest.markdown)) setEditorEpoch((e) => e + 1);
+      if (applyToLiveEditor(id, latest.markdown) === "refused") setEditorEpoch((e) => e + 1);
       setSave("idle");
     },
     [applyToLiveEditor, cachePut, clearDraftOperation, clearLocalRecoveryUnavailable],

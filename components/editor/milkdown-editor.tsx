@@ -418,6 +418,9 @@ function Inner({
   // the surface has.
   const refDirectory = pages ?? pageDirectory;
   const lastEmitted = useRef(value);
+  // How many edits this editor has handed to `onChange`, so the external
+  // write below can tell whether its own serialize just handed one over.
+  const emittedEdits = useRef(0);
   // The phone's writing bar, standing on the keyboard: its height while it
   // is up, which the selection toolbar and the caret menus keep clear of.
   const [dockOffset, setDockOffset] = useState(0);
@@ -453,7 +456,10 @@ function Inner({
       // Initial serialization can normalize live page labels (for example by
       // adding the current icon) without any editor transaction. It is display
       // state, not a user edit, and must not materialize synthesized children.
-      if (documentChanged) onChange(markdown);
+      if (documentChanged) {
+        emittedEdits.current += 1;
+        onChange(markdown);
+      }
     }
     onSerialized?.();
   }, [editorSession, onChange, onSerialized]);
@@ -816,6 +822,20 @@ function Inner({
       // behind a nesting move, is remounted on the new body instead: the load
       // guard and the move's own path decide what it shows then.
       if (lossyLoad.current || editorSession.isSerializationBlocked()) return "refused";
+      // A keystroke can be in the document and not yet in the shell: the
+      // serialize waits for an idle moment (`deferred-serialize.ts`), and the
+      // shell forgets the page is dirty when an earlier save lands. Hand it
+      // over first. If it was there, nothing is applied: the shell keeps its
+      // base, the save meets the other version and the page is in conflict,
+      // which is where text typed against a body that changed belongs.
+      serializeLater.drop();
+      const emittedBefore = emittedEdits.current;
+      try {
+        get()?.action(notifyFromContext);
+      } catch {
+        return "refused";
+      }
+      if (emittedEdits.current !== emittedBefore) return "dirty";
       let result: ExternalWriteResult = "refused";
       try {
         get()?.action((ctx) => {
@@ -838,7 +858,7 @@ function Inner({
       }
       return result;
     });
-  }, [editorSession, get, registerExternalWrite, serializeLater]);
+  }, [editorSession, get, notifyFromContext, registerExternalWrite, serializeLater]);
 
   // prosemirror-dropcursor removes its line when drop/dragend reach the editor
   // DOM. Our capture handlers stopPropagation for image/file uploads, and a

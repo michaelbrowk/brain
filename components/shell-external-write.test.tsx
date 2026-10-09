@@ -141,6 +141,8 @@ describe("a write to the open page from somewhere else", () => {
   let holdPuts: boolean;
   let heldGets: Array<() => void>;
   let holdGets: boolean;
+  let heldPosts: Array<() => void>;
+  let holdPosts: boolean;
 
   /** The store's rule: the rev or the base body is current, or a 409. */
   function writePut(body: { markdown?: string; rev?: string; baseMarkdown?: string }) {
@@ -174,6 +176,8 @@ describe("a write to the open page from somewhere else", () => {
     holdPuts = false;
     heldGets = [];
     holdGets = false;
+    heldPosts = [];
+    holdPosts = false;
     apiFetchMock.mockReset();
     resetTasksStore();
     window.history.replaceState({}, "", "/p/note");
@@ -244,6 +248,12 @@ describe("a write to the open page from somewhere else", () => {
       }
       if (url === "/api/page" && init?.method === "POST") {
         posts.push(JSON.parse(String(init.body)) as (typeof posts)[number]);
+        if (holdPosts) {
+          holdPosts = false;
+          return new Promise<Response>((resolve) =>
+            heldPosts.push(() => resolve(response({ id: "copy" }))),
+          );
+        }
         return Promise.resolve(response({ id: "copy" }));
       }
       if (url === "/api/page/copy") {
@@ -271,6 +281,7 @@ describe("a write to the open page from somewhere else", () => {
     resetTasksStore();
     vi.useRealTimers();
     vi.unstubAllGlobals();
+    Reflect.deleteProperty(document, "visibilityState");
   });
 
   async function settle() {
@@ -523,5 +534,18 @@ describe("a write to the open page from somewhere else", () => {
     expect(editorHarness.applied).toEqual([]);
     expect(conflictShown()).toBe(true);
     expect(drafts().join("")).toContain("Base, mine plus typed after the copy");
+  });
+
+  it("remounts on the body when the editor refuses it, and saves nothing of the old", async () => {
+    await open("Base");
+    editorHarness.refuse = true;
+    await writeElsewhere("Base, theirs");
+
+    expect(editorHarness.applied).toEqual([]);
+    expect(editorHarness.mounts).toBe(2);
+    expect(editorHarness.holds).toBe("Base, theirs");
+    await advance(2_000);
+    expect(puts).toHaveLength(0);
+    expect(server.markdown).toBe("Base, theirs");
   });
 });

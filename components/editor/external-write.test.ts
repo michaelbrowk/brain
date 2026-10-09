@@ -11,12 +11,15 @@ import { Editor, defaultValueCtx, editorViewCtx, parserCtx, rootCtx } from "@mil
 import { commonmark } from "@milkdown/kit/preset/commonmark";
 import { gfm } from "@milkdown/kit/preset/gfm";
 import type { EditorView } from "@milkdown/kit/prose/view";
+import { Plugin } from "@milkdown/kit/prose/state";
+import { $prose } from "@milkdown/kit/utils";
 import { undo, undoDepth } from "@milkdown/kit/prose/history";
 import { TextSelection, type Transaction } from "@milkdown/kit/prose/state";
 import { ReplaceStep } from "@milkdown/kit/prose/transform";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mountFullStack, type MountedStack } from "./editor-stack.harness";
 import { applyExternalMarkdown, EXTERNAL_WRITE_META } from "./external-write";
+import { loadGuard } from "./load-guard";
 import { pageRef, setPageRefOrigin, syncLivePageInfo } from "./page-ref";
 import { createPageRefNesting } from "./page-ref-nesting";
 
@@ -185,6 +188,40 @@ describe("an external write that drops a page row", () => {
     expect(asked).toEqual([]);
     expect(result).toBe("applied");
     expect(view.state.doc.textContent).toBe("AB");
+    await editor.destroy();
+  });
+});
+
+describe("an external write the editor cannot take", () => {
+  afterEach(() => {
+    document.body.replaceChildren();
+  });
+
+  async function mini(markdown: string, extra: unknown[] = []) {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const editor = await Editor.make()
+      .config((ctx) => {
+        ctx.set(rootCtx, root);
+        ctx.set(defaultValueCtx, markdown);
+      })
+      .use(commonmark)
+      .use(gfm)
+      .use(extra.flat() as never)
+      .use(loadGuard(() => {}))
+      .create();
+    const view = editor.ctx.get(editorViewCtx) as EditorView;
+    const parse = (next: string) => editor.ctx.get(parserCtx)(next);
+    return { editor, view, parse };
+  }
+
+  it("answers refused when a plugin refuses the transaction", async () => {
+    const refuseAll = $prose(
+      () => new Plugin({ filterTransaction: (tr) => !tr.docChanged }),
+    );
+    const { editor, view, parse } = await mini("Plain.", [refuseAll]);
+    expect(applyExternalMarkdown(view, parse, "Other.")).toBe("refused");
+    expect(view.state.doc.textContent).toBe("Plain.");
     await editor.destroy();
   });
 });

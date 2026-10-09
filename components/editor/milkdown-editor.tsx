@@ -90,8 +90,10 @@ function parseTsv(t: string): string[][] | null {
 }
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FloatingToolbar, type PageRef } from "./floating-toolbar";
+import { scrollBand } from "./scroll-band";
 import { SlashMenu } from "./slash-menu";
 import { WikiLinkMenu } from "./wikilink-menu";
+import { WritingBar } from "./writing-bar";
 import {
   attachmentLink,
   isSpreadsheetFile,
@@ -399,6 +401,9 @@ function Inner({
   // the surface has.
   const refDirectory = pages ?? pageDirectory;
   const lastEmitted = useRef(value);
+  // The phone's writing bar, standing on the keyboard: its height while it
+  // is up, which the selection toolbar and the caret menus keep clear of.
+  const [dockOffset, setDockOffset] = useState(0);
   const [editorSession] = useState(
     () => new EditorSerializationSession(pageRefNestingPending),
   );
@@ -504,9 +509,10 @@ function Inner({
             !lossyLoad.current && !pageRefNestingPending && !mutationsFrozen,
           // B6: the toolbar pills float over the top of the canvas (36 +
           // inset 12); the caret and a typed line must never scroll up
-          // under them — start scrolling inside the band and land below it
-          scrollThreshold: { top: 64, right: 0, bottom: 24, left: 0 },
-          scrollMargin: { top: 76, right: 0, bottom: 32, left: 0 },
+          // under them — start scrolling inside the band and land below it.
+          // The band itself is the scrollBand plugin's (scroll-band.ts), so
+          // the phone's writing bar can widen its bottom while the keyboard
+          // is up without a setProps.
           // A function so the lossy-load state, known only once the page
           // has been parsed, reaches the element it describes.
           attributes: () => ({
@@ -567,6 +573,7 @@ function Inner({
       .use(linkPreviewPlugin(!!capabilities.unfurl))
       .use(tableBlock)
       .use(history)
+      .use(scrollBand)
       // markdown-aware copy/paste: pasted markdown text becomes real blocks
       // (headings, lists, quotes…) instead of literal text, pasted HTML from
       // Notion/Docs converts through the schema, and copy yields clean markdown
@@ -1015,7 +1022,9 @@ function Inner({
         pages={pages}
         ai={!!capabilities.ai}
         tasks={tasksEnabled}
+        dockOffset={dockOffset}
       />
+      <WritingBar container={wrap} tasks={tasksEnabled} onHeight={setDockOffset} />
       <SlashMenu
         container={wrap}
         tasks={tasksEnabled}
@@ -1023,8 +1032,9 @@ function Inner({
         ai={!!capabilities.ai}
         upload={capabilities.upload}
         createPage={!!capabilities.createPage}
+        dockOffset={dockOffset}
       />
-      <WikiLinkMenu container={wrap} pages={pages ?? []} />
+      <WikiLinkMenu container={wrap} pages={pages ?? []} dockOffset={dockOffset} />
       {calloutEmoji && (
         <EmojiPicker
           key={calloutEmoji.id}

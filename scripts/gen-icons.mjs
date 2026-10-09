@@ -107,6 +107,14 @@ const WANT = [
   "user-check-rounded-linear",
   "user-block-rounded-linear",
   "users-group-rounded-linear",
+  // The phone's writing bar: Outdent and Indent as a level stepped left and
+  // right, Undo and Redo, and the keyboard the last button dismisses. Slash
+  // is a text glyph, like the toolbar's H1 and the pilcrow.
+  "double-alt-arrow-left-linear",
+  "double-alt-arrow-right-linear",
+  "undo-left-round-linear",
+  "undo-right-round-linear",
+  "keyboard-linear",
 ];
 
 /**

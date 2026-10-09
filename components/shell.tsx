@@ -86,6 +86,7 @@ const TasksSurface = dynamic(
 import type { ShareEnableResult } from "./share-popover";
 import { Hub } from "./hub";
 import { MobileTabBar } from "./mobile-tab-bar";
+import { KEYBOARD_MIN } from "./editor/touch-dock";
 import { MobilePagesView } from "./mobile-pages-view";
 import { MOVE_BLOCKED_MESSAGE } from "./page-move-dialog";
 import {
@@ -649,7 +650,7 @@ export function Shell({
     const updateKeyboard = () => {
       const covered =
         window.innerHeight - (viewport.offsetTop + viewport.height);
-      setMobileKeyboardOpen(covered > 120);
+      setMobileKeyboardOpen(covered > KEYBOARD_MIN);
     };
     updateKeyboard();
     viewport.addEventListener("resize", updateKeyboard);

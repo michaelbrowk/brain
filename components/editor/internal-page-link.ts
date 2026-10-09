@@ -1,8 +1,4 @@
-import {
-  classifyInternalPageLink,
-  INTERNAL_PAGE_LINK_CLASS,
-  linkedWordsPageId,
-} from "@/lib/internal-page-link";
+import { classifyInternalPageLink, linkedWordsPageId } from "@/lib/internal-page-link";
 import { hasPageRefHrefResolver } from "./page-ref";
 
 export {
@@ -139,50 +135,4 @@ export function followEditorAnchor(
     return true;
   }
   return followEditorLink(href, currentOrigin, navigateInternal, openExternal);
-}
-
-function syncMarker(anchor: HTMLAnchorElement, currentOrigin: string) {
-  const href = anchor.getAttribute("href");
-  const internal =
-    !anchor.classList.contains("brain-page-ref") &&
-    (classifyInternalPageLink(href, currentOrigin) !== null ||
-      linkedWordsPageId(href, currentOrigin) !== null);
-  anchor.classList.toggle(INTERNAL_PAGE_LINK_CLASS, internal);
-}
-
-function syncNode(node: Node, currentOrigin: string) {
-  if (!(node instanceof Element)) return;
-  if (node instanceof HTMLAnchorElement) syncMarker(node, currentOrigin);
-  node
-    .querySelectorAll<HTMLAnchorElement>("a")
-    .forEach((anchor) => syncMarker(anchor, currentOrigin));
-}
-
-/**
- * Keep internal-link styling in sync with ProseMirror's live DOM. Milkdown can
- * reuse an anchor node and change its href, so a one-time scan is insufficient.
- */
-export function observeInternalPageLinks(
-  root: Element,
-  currentOrigin: string,
-): () => void {
-  syncNode(root, currentOrigin);
-  const observer = new MutationObserver((records) => {
-    for (const record of records) {
-      if (record.type === "attributes") {
-        if (record.target instanceof HTMLAnchorElement) {
-          syncMarker(record.target, currentOrigin);
-        }
-        continue;
-      }
-      record.addedNodes.forEach((node) => syncNode(node, currentOrigin));
-    }
-  });
-  observer.observe(root, {
-    subtree: true,
-    childList: true,
-    attributes: true,
-    attributeFilter: ["href", "class"],
-  });
-  return () => observer.disconnect();
 }

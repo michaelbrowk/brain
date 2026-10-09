@@ -4,6 +4,11 @@ import { imageSchema, linkSchema } from "@milkdown/kit/preset/commonmark";
 import type { Mark, Node as ProseNode } from "@milkdown/kit/prose/model";
 import type { MarkViewConstructor, NodeViewConstructor } from "@milkdown/kit/prose/view";
 import { $view } from "@milkdown/kit/utils";
+import {
+  classifyInternalPageLink,
+  INTERNAL_PAGE_LINK_CLASS,
+  linkedWordsPageId,
+} from "@/lib/internal-page-link";
 import { attachmentSrc, bareAttachmentSrc, noteAttachmentLoadFailure } from "./attachment-src";
 
 /**
@@ -72,10 +77,24 @@ export const attachmentLinkSchema = linkSchema.extendSchema((prev) => (ctx) => (
   ],
 }));
 
+/** A link mark that goes to a page, words linked to one above all, carries
+ *  the marker class its styling reads. The view draws it and nothing else may: ProseMirror reads a write
+ *  to a mark's DOM as an edit of the range the mark covers, and two such
+ *  writes in one flush made it redraw both anchors, which is the loop a
+ *  MutationObserver writing this class kept a page in. A mark never changes
+ *  its attrs in place, so a new href is a new view and the class follows. */
+function marksInternalPageLink(href: string): boolean {
+  const origin = typeof window === "undefined" ? null : window.location.origin;
+  return (
+    classifyInternalPageLink(href, origin) !== null || linkedWordsPageId(href, origin) !== null
+  );
+}
+
 export const attachmentLinkView = $view(linkSchema.mark, () => ((mark: Mark) => {
   const anchor = document.createElement("a");
   const href = typeof mark.attrs.href === "string" ? mark.attrs.href : "";
   anchor.setAttribute("href", attachmentSrc(href));
+  if (marksInternalPageLink(href)) anchor.className = INTERNAL_PAGE_LINK_CLASS;
   if (typeof mark.attrs.title === "string" && mark.attrs.title) {
     anchor.title = mark.attrs.title;
   }

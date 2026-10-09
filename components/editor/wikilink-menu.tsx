@@ -6,16 +6,20 @@ import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { DEFAULT_PAGE_ICON } from "@/lib/constants";
 import { DUR, EASE_OUT } from "@/lib/motion";
+import { EDITOR_DOC_CHANGED_EVENT } from "@/lib/editor-events";
 import { caretMenuTakesKey } from "./caret-menu-keys";
 import type { PageRef } from "./floating-toolbar";
 import { insertInline } from "./insert-inline";
 import { createPageRef } from "./page-ref";
-import { clampMenuLeft, shouldFlipAbove } from "./menu-position";
+import { clampMenuLeft, MENU_GAP, placeCaretMenu } from "./menu-position";
+import { usableViewport } from "./touch-dock";
 
 interface State {
   top?: number; // when placed below the caret
   bottom?: number; // when flipped above the caret (caret near the viewport bottom)
   left: number;
+  /** The menu's own 280, or the room the viewport has for it. */
+  maxHeight: number;
   query: string;
 }
 
@@ -28,9 +32,13 @@ const MENU_H = 280;
 export function WikiLinkMenu({
   container,
   pages,
+  dockOffset = 0,
 }: {
   container: React.RefObject<HTMLDivElement | null>;
   pages: PageRef[];
+  /** What stands on the viewport's bottom edge (the phone's writing bar):
+   *  the menu keeps above it as it keeps above the keyboard. */
+  dockOffset?: number;
 }) {
   const [, getEditor] = useInstance();
   const [state, setState] = useState<State | null>(null);
@@ -65,25 +73,41 @@ export function WikiLinkMenu({
         setState(null);
         return;
       }
-      const rect = sel.getRangeAt(0).getBoundingClientRect();
       const r = root.getBoundingClientRect();
-      const vh = window.visualViewport?.height ?? window.innerHeight;
-      const flip = shouldFlipAbove(rect, vh, MENU_H);
+      // The caret's box, asked of the editor (the slash menu's reason: a
+      // collapsed DOM range measures 0×0 at (0,0) in WebKit once the editor
+      // has set the selection itself).
+      const rect =
+        getEditor()?.action((ctx) => {
+          const view = ctx.get(editorViewCtx);
+          return view.coordsAtPos(view.state.selection.from);
+        }) ?? sel.getRangeAt(0).getBoundingClientRect();
+      const placed = placeCaretMenu(rect, usableViewport(dockOffset), MENU_H);
       setState({
         left: clampMenuLeft(rect.left - r.left, r.width, MENU_W),
+        maxHeight: placed.maxHeight,
         query: m[1],
-        ...(flip
-          ? { bottom: r.bottom - rect.top + 6 }
-          : { top: rect.bottom - r.top + 6 }),
+        ...(placed.side === "above"
+          ? { bottom: r.bottom - rect.top + MENU_GAP }
+          : { top: rect.bottom - r.top + MENU_GAP }),
       });
       setActive(0);
     });
-  }, [container]);
+  }, [container, dockOffset, getEditor]);
 
   useEffect(() => {
     document.addEventListener("selectionchange", update);
+    // The slash menu's reason: an Undo from the writing bar can put `[[`
+    // back or take it away with no `selectionchange` from WebKit.
+    window.addEventListener(EDITOR_DOC_CHANGED_EVENT, update);
+    const vv = window.visualViewport;
+    vv?.addEventListener("resize", update);
+    vv?.addEventListener("scroll", update);
     return () => {
       document.removeEventListener("selectionchange", update);
+      window.removeEventListener(EDITOR_DOC_CHANGED_EVENT, update);
+      vv?.removeEventListener("resize", update);
+      vv?.removeEventListener("scroll", update);
       cancelAnimationFrame(raf.current);
     };
   }, [update]);
@@ -163,8 +187,13 @@ export function WikiLinkMenu({
           animate={reduce ? { opacity: 1 } : { opacity: 1, y: 0 }}
           exit={{ opacity: 0, transition: { duration: 0.08 } }}
           transition={reduce ? { duration: DUR.base } : { duration: DUR.base, ease: EASE_OUT }}
-          style={{ top: state.top, bottom: state.bottom, left: state.left }}
-          className="absolute z-[calc(var(--z-drawer)_-_10)] max-h-[280px] w-[260px] overflow-y-auto rounded-lg border border-line bg-paper p-1 shadow-[var(--shadow-overlay)]"
+          style={{
+            top: state.top,
+            bottom: state.bottom,
+            left: state.left,
+            maxHeight: state.maxHeight,
+          }}
+          className="absolute z-[calc(var(--z-drawer)_-_10)] w-[260px] overflow-y-auto rounded-lg border border-line bg-paper p-1 shadow-[var(--shadow-overlay)]"
         >
           {results.map((pg, i) => (
             <button
@@ -172,7 +201,7 @@ export function WikiLinkMenu({
               onMouseDown={(e) => e.preventDefault()}
               onMouseEnter={() => setActive(i)}
               onClick={() => run(pg)}
-              className={`flex h-8 w-full items-center gap-2.5 rounded-sm px-2 text-left text-[13px] transition-colors ${
+              className={`flex h-8 w-full items-center gap-2.5 rounded-sm px-2 text-left text-[13px] transition-colors [@media(hover:none)]:h-11 ${
                 i === active ? "bg-fill-active text-ink" : "text-ink-2"
               }`}
             >

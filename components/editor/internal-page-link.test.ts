@@ -6,17 +6,10 @@ import {
   classifyInternalPageLink,
   followEditorAnchor,
   followEditorLink,
-  INTERNAL_PAGE_LINK_CLASS,
-  observeInternalPageLinks,
 } from "./internal-page-link";
 import { setPageRefHrefResolver } from "./page-ref";
 
 const ORIGIN = "https://brain.example";
-
-async function mutationsDelivered() {
-  await Promise.resolve();
-  await Promise.resolve();
-}
 
 describe("classifyInternalPageLink", () => {
   it.each([
@@ -103,50 +96,6 @@ describe("editor link navigation", () => {
     "//foreign.example/path",
   ])("does not follow unsafe or ambiguous href %s", (href) => {
     expect(followEditorLink(href, ORIGIN, vi.fn(), vi.fn())).toBe(false);
-  });
-});
-
-describe("observeInternalPageLinks", () => {
-  it("adds and removes markers as hrefs change while ignoring page refs", async () => {
-    const root = document.createElement("div");
-    root.innerHTML = `
-      <a id="relative" href="/p/abc123">Relative</a>
-      <a id="absolute" href="${ORIGIN}/p/def456">Absolute</a>
-      <a id="foreign" href="https://foreign.example/p/ghi789">Foreign</a>
-      <a id="page-ref" class="brain-page-ref" href="/p/ref123">Page ref</a>
-    `;
-    const stop = observeInternalPageLinks(root, ORIGIN);
-    const relative = root.querySelector<HTMLAnchorElement>("#relative")!;
-    const absolute = root.querySelector<HTMLAnchorElement>("#absolute")!;
-    const foreign = root.querySelector<HTMLAnchorElement>("#foreign")!;
-    const pageRef = root.querySelector<HTMLAnchorElement>("#page-ref")!;
-
-    expect(relative.classList.contains(INTERNAL_PAGE_LINK_CLASS)).toBe(true);
-    expect(absolute.classList.contains(INTERNAL_PAGE_LINK_CLASS)).toBe(true);
-    expect(foreign.classList.contains(INTERNAL_PAGE_LINK_CLASS)).toBe(false);
-    expect(pageRef.classList.contains(INTERNAL_PAGE_LINK_CLASS)).toBe(false);
-
-    relative.setAttribute("href", "https://foreign.example/p/abc123");
-    foreign.setAttribute("href", `${ORIGIN}/p/ghi789`);
-    absolute.classList.add("brain-page-ref");
-    await mutationsDelivered();
-
-    expect(relative.classList.contains(INTERNAL_PAGE_LINK_CLASS)).toBe(false);
-    expect(foreign.classList.contains(INTERNAL_PAGE_LINK_CLASS)).toBe(true);
-    expect(absolute.classList.contains(INTERNAL_PAGE_LINK_CLASS)).toBe(false);
-
-    const added = document.createElement("a");
-    added.href = "/p/new_page";
-    root.append(added);
-    await mutationsDelivered();
-    expect(added.classList.contains(INTERNAL_PAGE_LINK_CLASS)).toBe(true);
-
-    stop();
-    const afterStop = document.createElement("a");
-    afterStop.href = "/p/after_stop";
-    root.append(afterStop);
-    await mutationsDelivered();
-    expect(afterStop.classList.contains(INTERNAL_PAGE_LINK_CLASS)).toBe(false);
   });
 });
 

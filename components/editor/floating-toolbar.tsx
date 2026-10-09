@@ -21,7 +21,7 @@ import {
 } from "@milkdown/kit/preset/commonmark";
 import { toggleStrikethroughCommand, insertTableCommand } from "@milkdown/kit/preset/gfm";
 import { setTextColorCommand, setHighlightCommand } from "./color-mark";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { DEFAULT_PAGE_ICON } from "@/lib/constants";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -44,6 +44,15 @@ import {
   setLinkHref,
   webHref,
 } from "./web-link";
+import { setDockedInset } from "./scroll-band";
+import { useTouchDock } from "./touch-dock";
+
+/** The material of a bar docked above the keyboard on a phone: this toolbar
+ *  and the writing bar wear the same one. The safe-area padding is separate
+ *  because only the lowest of two stacked bars reaches the window's edge. */
+export const DOCK_CLASS =
+  "fixed z-[calc(var(--z-drawer)_-_10)] border-t border-line bg-paper py-1 pl-[max(0.25rem,env(safe-area-inset-left))] pr-[max(0.25rem,env(safe-area-inset-right))] shadow-[0_-4px_16px_-8px_rgba(0,0,0,0.25)]";
+export const DOCK_SAFE_BOTTOM = "[padding-bottom:max(0.25rem,env(safe-area-inset-bottom))]";
 
 const COLORS = [
   "red",
@@ -207,6 +216,7 @@ export function FloatingToolbar({
   pages = [],
   ai = false,
   tasks = true,
+  dockOffset = 0,
 }: {
   container: React.RefObject<HTMLDivElement | null>;
   pages?: PageRef[];
@@ -216,6 +226,9 @@ export function FloatingToolbar({
   /** The Tasks module. Off and the Task button is absent, because the
    *  command it runs is not registered with the editor at all. */
   tasks?: boolean;
+  /** On touch, the height of the writing bar standing on the keyboard: this
+   *  toolbar docks on top of it rather than over it. */
+  dockOffset?: number;
 }) {
   const [linkOpen, setLinkOpen] = useState(false);
   const [colorOpen, setColorOpen] = useState(false);
@@ -237,28 +250,10 @@ export function FloatingToolbar({
   const raf = useRef<number>(0);
   const barRef = useRef<HTMLDivElement | null>(null);
   const savedRange = useRef<Range | null>(null);
-  // touch = dock the bar above the keyboard; kbInset tracks the keyboard height
-  // via visualViewport (a fixed element sits below the keyboard otherwise)
-  const [isMobile, setIsMobile] = useState(false);
-  const [kbInset, setKbInset] = useState(0);
-  useEffect(() => {
-    const mq = window.matchMedia("(hover: none) and (pointer: coarse)");
-    const onMq = () => setIsMobile(mq.matches);
-    onMq();
-    mq.addEventListener("change", onMq);
-    const vv = window.visualViewport;
-    const onVv = () => {
-      if (vv) setKbInset(Math.max(0, window.innerHeight - (vv.offsetTop + vv.height)));
-    };
-    onVv();
-    vv?.addEventListener("resize", onVv);
-    vv?.addEventListener("scroll", onVv);
-    return () => {
-      mq.removeEventListener("change", onMq);
-      vv?.removeEventListener("resize", onVv);
-      vv?.removeEventListener("scroll", onVv);
-    };
-  }, []);
+  // touch = dock the bar above the keyboard; kbInset is the keyboard's height
+  // (a fixed element sits below the keyboard otherwise)
+  const { isTouch: isMobile, kbInset } = useTouchDock();
+  const reduce = useReducedMotion();
 
   const submenuOpen = linkOpen || colorOpen || aiOpen;
 
@@ -417,6 +412,24 @@ export function FloatingToolbar({
     // coordinates would turn the measurement correction into a render loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [Boolean(pos), linkOpen, colorOpen, aiOpen, aiLoading, update]);
+
+  // Docked on a phone it stands on the writing bar, so the band the caret
+  // keeps out of (scroll-band.ts) grows by its height while it is up, and
+  // the selection it belongs to comes up above it at once. The submenus
+  // change its height, so they re-measure.
+  const docked = Boolean(pos?.mobile);
+  useLayoutEffect(() => {
+    if (!docked) {
+      setDockedInset("selection-toolbar", 0);
+      return;
+    }
+    setDockedInset("selection-toolbar", barRef.current?.getBoundingClientRect().height ?? 0);
+    getEditor()?.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      view.dispatch(view.state.tr.scrollIntoView());
+    });
+    return () => setDockedInset("selection-toolbar", 0);
+  }, [docked, getEditor, linkOpen, colorOpen, aiOpen]);
 
   const closeAiAndRestoreSelection = useCallback(() => {
     setAiOpen(false);
@@ -731,21 +744,34 @@ export function FloatingToolbar({
     <AnimatePresence>
       {pos && (
         <motion.div
-          initial={pos.mobile ? { opacity: 0, y: 8 } : { opacity: 0, y: 4, scale: 0.98 }}
-          animate={pos.mobile ? { opacity: 1, y: 0 } : { opacity: 1, y: 0, scale: 1 }}
-          exit={{ opacity: 0, y: pos.mobile ? 8 : 2, transition: { duration: 0.08 } }}
+          initial={
+            reduce
+              ? { opacity: 0 }
+              : pos.mobile
+                ? { opacity: 0, y: 8 }
+                : { opacity: 0, y: 4, scale: 0.98 }
+          }
+          animate={
+            reduce ? { opacity: 1 } : pos.mobile ? { opacity: 1, y: 0 } : { opacity: 1, y: 0, scale: 1 }
+          }
+          exit={
+            reduce
+              ? { opacity: 0, transition: { duration: DUR.exit } }
+              : { opacity: 0, y: pos.mobile ? 8 : 2, transition: { duration: DUR.exit } }
+          }
           transition={{ duration: DUR.base, ease: EASE_OUT }}
           ref={barRef}
           role="toolbar"
           aria-label="Text formatting"
+          data-editor-dock=""
           style={
             pos.mobile
-              ? { position: "fixed", left: 0, right: 0, bottom: kbInset }
+              ? { position: "fixed", left: 0, right: 0, bottom: kbInset + dockOffset }
               : { position: "fixed", top: pos.top, left: pos.left }
           }
           className={
             pos.mobile
-              ? "fixed z-[calc(var(--z-drawer)_-_10)] border-t border-line bg-paper py-1 pl-[max(0.25rem,env(safe-area-inset-left))] pr-[max(0.25rem,env(safe-area-inset-right))] shadow-[0_-4px_16px_-8px_rgba(0,0,0,0.25)] [padding-bottom:max(0.25rem,env(safe-area-inset-bottom))]"
+              ? `${DOCK_CLASS} ${dockOffset ? "pb-1" : DOCK_SAFE_BOTTOM}`
               : "fixed z-[calc(var(--z-drawer)_-_10)] max-w-[calc(100vw-1rem)] -translate-x-1/2 rounded-md border border-line bg-paper p-1 shadow-[var(--shadow-overlay)]"
           }
         >
@@ -998,7 +1024,10 @@ export function FloatingToolbar({
   );
 }
 
-function TB({
+/** One toolbar button, 28 on a pointer and 36 under a finger. The writing
+ *  bar is built from the same three pieces, so the two bars docked on the
+ *  keyboard are one set of controls. */
+export function TB({
   label,
   onRun,
   children,
@@ -1064,10 +1093,10 @@ function Row({
   );
 }
 
-function Tt({ children }: { children: React.ReactNode }) {
+export function Tt({ children }: { children: React.ReactNode }) {
   return <span className="text-[12px] font-semibold">{children}</span>;
 }
 
-function Sep() {
+export function Sep() {
   return <span role="separator" className="mx-0.5 h-4 w-px bg-line" />;
 }

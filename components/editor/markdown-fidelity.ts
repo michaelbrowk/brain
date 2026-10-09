@@ -57,6 +57,7 @@ import type {
 } from "@milkdown/kit/transformer";
 import { $remark } from "@milkdown/kit/utils";
 import { Fragment } from "@milkdown/kit/prose/model";
+import { internalPageLinkId } from "@/lib/internal-page-link";
 import { attachmentLinkSchema } from "./attachment-refs";
 
 /* ------------------------------------------------------------------------ */
@@ -969,7 +970,9 @@ function joinSplitLinks(node: MarkdownNode) {
   let index = 0;
   while (index < children.length) {
     const head = linkInside(children[index]!);
-    if (!head) {
+    // A page ref is an atom: the serializer never splits one, so two refs to
+    // one page side by side are two chips, whatever marks either carries.
+    if (!head || internalPageLinkId(str(head.url)) !== null) {
       joined.push(children[index]!);
       index += 1;
       continue;

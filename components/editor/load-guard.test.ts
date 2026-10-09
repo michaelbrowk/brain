@@ -7,7 +7,7 @@ import type { MarkdownNode, Root } from "@milkdown/kit/transformer";
 import { $remark } from "@milkdown/kit/utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { images } from "./image";
-import { loadGuard } from "./load-guard";
+import { loadGuard, parseDropCount } from "./load-guard";
 
 /** The remark pass `image.ts` used to run: every image child of anything
  *  becomes the block image. Kept here as the one known shape that loses
@@ -77,6 +77,16 @@ describe("loadGuard", () => {
     const { editor, onLoss } = await load("plain", [blockEveryImage]);
     editor.action((ctx) => ctx.get(parserCtx)("# Title ![i](/a.png) end"));
     expect(onLoss).not.toHaveBeenCalled();
+    await editor.destroy();
+  });
+
+  it("marks a later parse that dropped content, for an external write to refuse", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { editor } = await load("plain", [blockEveryImage]);
+    const lossy = editor.action((ctx) => ctx.get(parserCtx)("# Title ![i](/a.png) end"));
+    const whole = editor.action((ctx) => ctx.get(parserCtx)("# Title end"));
+    expect(parseDropCount(lossy!)).toBeGreaterThan(0);
+    expect(parseDropCount(whole!)).toBe(0);
     await editor.destroy();
   });
 });

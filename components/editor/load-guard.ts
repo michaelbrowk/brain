@@ -51,6 +51,16 @@ class CountingParserState extends ParserState {
   }
 }
 
+/** How many nodes the parse that built `doc` dropped, for a parse after the
+ *  load: an external write applied in place (`external-write.ts`) must not
+ *  put a shortened document under the writer when a load of the same body
+ *  would have opened read-only. Zero for a document this parser did not
+ *  build. */
+const droppedByDocument = new WeakMap<ProseNode, number>();
+export function parseDropCount(doc: ProseNode): number {
+  return droppedByDocument.get(doc) ?? 0;
+}
+
 export function loadGuard(onLoss: (dropped: number) => void): MilkdownPlugin[] {
   const ready = createTimer("BrainLoadGuardReady");
   let lossy = false;
@@ -81,6 +91,7 @@ export function loadGuard(onLoss: (dropped: number) => void): MilkdownPlugin[] {
         const state = new CountingParserState(schema);
         state.run(remark, text);
         const doc = state.toDoc();
+        if (state.dropped > 0) droppedByDocument.set(doc, state.dropped);
         if (!loaded) {
           loaded = true;
           if (state.dropped > 0) {

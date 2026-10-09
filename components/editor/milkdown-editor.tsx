@@ -6,6 +6,7 @@ import {
   defaultValueCtx,
   editorViewCtx,
   editorViewOptionsCtx,
+  parserCtx,
   serializerCtx,
 } from "@milkdown/kit/core";
 import {
@@ -33,6 +34,11 @@ import { columns } from "./columns";
 import { emptyBlocks } from "./empty-block";
 import { columnDrop } from "./column-drop";
 import { createDeferredSerializer, deferredSerialize } from "./deferred-serialize";
+import {
+  applyExternalMarkdown,
+  EXTERNAL_WRITE_META,
+  type ExternalWriteResult,
+} from "./external-write";
 import {
   editingCore,
   focusDocumentEnd,
@@ -145,6 +151,12 @@ interface EditorProps {
   onDirty?: () => void;
   onSerialized?: () => void;
   registerFlush?: (flush: () => void) => () => void;
+  /** Hands the shell a way to put a body written elsewhere (another device,
+   *  an agent) into this editor in place, instead of remounting it on the
+   *  new body: `external-write.ts`. "refused" asks the caller to remount. */
+  registerExternalWrite?: (
+    apply: (markdown: string) => ExternalWriteResult,
+  ) => () => void;
   pages?: PageRef[];
   /** Live titles and icons for the page refs in this body, for a surface
    *  that has a directory but offers no page list. `pages` is both at once —
@@ -385,6 +397,7 @@ function Inner({
   onDirty,
   onSerialized,
   registerFlush,
+  registerExternalWrite,
   pages,
   pageDirectory,
   onNavigate,
@@ -465,7 +478,15 @@ function Inner({
             filterTransaction: (transaction) => {
               const isSyntheticTrailingParagraph =
                 transaction.getMeta(TRAILING_PARAGRAPH_TRANSACTION_META) === true;
-              if (transaction.docChanged && !isSyntheticTrailingParagraph) {
+              // A body written elsewhere is the server's, not the writer's:
+              // nothing in it is unsaved.
+              const isExternalWrite =
+                transaction.getMeta(EXTERNAL_WRITE_META) === true;
+              if (
+                transaction.docChanged &&
+                !isSyntheticTrailingParagraph &&
+                !isExternalWrite
+              ) {
                 editorSession.markDocumentChanged();
               }
               if (
@@ -787,6 +808,37 @@ function Inner({
       get()?.action(notifyFromContext);
     });
   }, [editorSession, get, notifyFromContext, onSerialized, registerFlush, serializeLater]);
+
+  useEffect(() => {
+    if (!registerExternalWrite) return;
+    return registerExternalWrite((markdown) => {
+      // A page opened read-only, or one whose document is a frozen snapshot
+      // behind a nesting move, is remounted on the new body instead: the load
+      // guard and the move's own path decide what it shows then.
+      if (lossyLoad.current || editorSession.isSerializationBlocked()) return "refused";
+      let result: ExternalWriteResult = "refused";
+      try {
+        get()?.action((ctx) => {
+          result = applyExternalMarkdown(
+            ctx.get(editorViewCtx),
+            ctx.get(parserCtx),
+            markdown,
+          );
+        });
+      } catch {
+        return "refused";
+      }
+      if (result !== "refused") {
+        // The editor now holds the server's body. A serialize still waiting
+        // from earlier typing would hand it back as an edit, and the next
+        // flush compares against this body, not the last one emitted.
+        serializeLater.drop();
+        editorSession.takeDocumentChanged();
+        lastEmitted.current = markdown;
+      }
+      return result;
+    });
+  }, [editorSession, get, registerExternalWrite, serializeLater]);
 
   // prosemirror-dropcursor removes its line when drop/dragend reach the editor
   // DOM. Our capture handlers stopPropagation for image/file uploads, and a

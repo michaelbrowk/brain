@@ -53,6 +53,7 @@ import type { SmartSortResult } from "./smart-sort-preview";
 import dynamic from "next/dynamic";
 import { useTheme } from "next-themes";
 import type { PageMenuHandlers } from "./tree/row-menu";
+import type { ExternalWriteResult } from "./editor/external-write";
 import {
   CommandPalette,
   type CommandPaletteSelection,
@@ -790,6 +791,12 @@ export function Shell({
     Promise.resolve(true),
   );
   const editorFlushRef = useRef<() => void>(() => {});
+  // The live editor's in-place apply of a body written elsewhere, filed under
+  // the page it shows: a late answer for another page must never reach it.
+  const editorExternalWriteRef = useRef<{
+    pageId: string;
+    apply: (markdown: string) => ExternalWriteResult;
+  } | null>(null);
   const editorDirtyRef = useRef<string | null>(null);
   const coverQueueRef = useRef(createKeyedQueue());
   const coverConfirmedRef = useRef<Map<string, string | undefined>>(new Map());
@@ -1201,6 +1208,29 @@ export function Shell({
     };
   }, []);
 
+  const registerEditorExternalWrite = useCallback(
+    (pageId: string, apply: (markdown: string) => ExternalWriteResult) => {
+      const entry = { pageId, apply };
+      editorExternalWriteRef.current = entry;
+      return () => {
+        if (editorExternalWriteRef.current === entry) {
+          editorExternalWriteRef.current = null;
+        }
+      };
+    },
+    [],
+  );
+
+  /** Put a body written elsewhere into the open editor in place: the caret,
+   *  the scroll and the undo history stay (C9). False when the editor could
+   *  not take it (not mounted yet, opened read-only, a parse that would drop
+   *  content), and the caller remounts the editor on the body instead. */
+  const applyToLiveEditor = useCallback((id: string, markdown: string) => {
+    const live = editorExternalWriteRef.current;
+    if (!live || live.pageId !== id) return false;
+    return live.apply(markdown) !== "refused";
+  }, []);
+
   // ── page cache (instant re-navigation + hover prefetch) ──────
   const pageCache = useRef<Map<string, LoadedPage>>(
     new Map(seededPage ? [[seededPage.id, seededPage]] : []),
@@ -1377,10 +1407,12 @@ export function Shell({
       baseMarkdownRef.current.set(id, p.markdown);
       if (selectedIdRef.current !== id) return;
       setPage(loaded);
-      setEditorEpoch((e) => e + 1);
-      // silent — an external change just refreshes the page, no toast
+      // Silent: an external change just refreshes the page, no toast. It
+      // lands in the live editor where it differs, and a new editor is
+      // built only when that one cannot take it.
+      if (!applyToLiveEditor(id, loaded.markdown)) setEditorEpoch((e) => e + 1);
     },
-    [cachePut],
+    [applyToLiveEditor, cachePut],
   );
 
   const mutate = useCallback(
@@ -6437,6 +6469,7 @@ export function Shell({
                   onEditorDirty={onEditorDirty}
                   onEditorSerialized={onEditorSerialized}
                   registerFlush={registerEditorFlush}
+                  registerExternalWrite={registerEditorExternalWrite}
                   pages={allPages}
                   searchHighlight={searchHighlight}
                   onSearchHighlightStatus={onSearchHighlightStatus}

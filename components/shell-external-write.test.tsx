@@ -332,6 +332,21 @@ describe("a write to the open page from somewhere else", () => {
     expect(button("Save a copy")).toBeDefined();
   });
 
+  it("never applies a write while a keystroke still waits for its serialize", async () => {
+    await open("Base");
+    // The editor marks the page dirty on the keystroke; the Markdown follows
+    // at the next idle moment (editor/deferred-serialize.ts).
+    await act(async () => editorHarness.props?.onDirty?.());
+    await writeElsewhere("Base, theirs");
+    expect(editorHarness.applied).toEqual([]);
+    expect(editorHarness.mounts).toBe(1);
+
+    await act(async () => editorHarness.props?.onChange("Base, mine"));
+    await advance(800);
+    expect(server.markdown).toBe("Base, theirs");
+    expect(conflictShown()).toBe(true);
+  });
+
   async function inConflict() {
     await open("Base");
     await type("Base, mine");

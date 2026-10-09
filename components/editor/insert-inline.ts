@@ -206,6 +206,9 @@ export function linkSelection(state: EditorState, href: string): Transaction | n
   const tr = state.tr;
   state.doc.nodesBetween(from, to, (node, pos, parent) => {
     if (!node.isText || !parent?.type.allowsMarkType(link)) return;
+    // A run that is only whitespace (the space a ref's spacer leaves, the
+    // gap between two bold words) wrote an empty-label link to the file.
+    if (!node.text?.trim()) return;
     tr.addMark(Math.max(from, pos), Math.min(to, pos + node.nodeSize), mark);
   });
   return tr.docChanged ? tr.scrollIntoView() : null;

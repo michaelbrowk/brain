@@ -213,8 +213,8 @@ test("Link to page over selected words keeps the words as the link", async ({ pa
     selection.removeAllRanges();
     selection.addRange(range);
   });
-  await page.getByRole("button", { name: "Link to page" }).click();
-  await page.getByRole("textbox", { name: "Link to page" }).fill("Target Toolbar");
+  await page.getByRole("button", { name: "Link", exact: true }).click();
+  await page.getByRole("textbox", { name: "Link" }).fill("Target Toolbar");
   await page.keyboard.press("Enter");
 
   await expect

@@ -185,6 +185,11 @@ describe("round three: links under one mark, empty items, cells, trailing spaces
     expect(deep.serialize()).toBe("-\n  -\n    -");
   });
 
+  it("does not count a cell that is only a break as a changed table", async () => {
+    const { serialize } = await mount("| a |\n| --- |\n| <br> |\n\n| b |\n| --- |\n| <br><br> |");
+    expect(serialize()).toBe("| a |\n| --- |\n| <br> |\n\n| b |\n| --- |\n| <br><br> |");
+  });
+
   it("writes a rule inside a * item with a character that is not the bullet (M18)", async () => {
     const { view, serialize } = await mount("* a\n* b\n\n---");
     let hr = -1;

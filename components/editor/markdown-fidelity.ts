@@ -1061,7 +1061,11 @@ function tableUnchanged(table: MarkdownNode, state: State): boolean {
             now: { line: 1, column: 1 },
             lineShift: 0,
           });
-          return value.trim() === written[c];
+          // A cell that is only breaks is an empty cell on both sides: the
+          // preset reads `<br>` as the empty placeholder and writes
+          // `<br />` back for it.
+          const bare = (cell: string) => cell.replace(/^(?:<br\s*\/?>)+$/i, "");
+          return bare(value.trim()) === bare(written[c]!);
         });
       } finally {
         exitRow();

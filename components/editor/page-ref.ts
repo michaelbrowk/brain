@@ -4,12 +4,12 @@ import type {
   NodeType,
   Schema,
 } from "@milkdown/kit/prose/model";
-import { Plugin, PluginKey } from "@milkdown/kit/prose/state";
+import { DOMSerializer } from "@milkdown/kit/prose/model";
 import type { NodeView, NodeViewConstructor } from "@milkdown/kit/prose/view";
-import { Decoration, DecorationSet } from "@milkdown/kit/prose/view";
 import type { MarkdownNode, ParserState, Root, SerializerState } from "@milkdown/kit/transformer";
-import { $nodeSchema, $remark, $prose, $view } from "@milkdown/kit/utils";
+import { $nodeSchema, $remark, $view } from "@milkdown/kit/utils";
 import { remarkStringifyOptionsCtx } from "@milkdown/kit/core";
+import { paragraphSchema } from "@milkdown/kit/preset/commonmark";
 import type { MilkdownPlugin } from "@milkdown/kit/ctx";
 import { classifyInternalPageLink } from "@/lib/internal-page-link";
 
@@ -373,35 +373,45 @@ export const pageRefView = $view(pageRefSchema.node, () => ((initial: ProseNode)
   };
 }) satisfies NodeViewConstructor);
 
+/** Whether a paragraph is one page row: its whole content is one page-ref
+ *  atom. `page-filing.ts` files that shape, and the tail's menu names it. */
+function isPageRefOnly(node: ProseNode): boolean {
+  return node.childCount === 1 && node.firstChild?.type.name === "page_ref";
+}
+
 /** Mark only paragraphs whose entire document content is one page-ref atom.
  * CSS cannot distinguish adjacent text nodes with :has(), while this semantic
  * class keeps compact child-page lists from tightening ordinary prose that
- * happens to contain an inline page mention. */
-export const pageRefParagraphs = $prose(
-  () =>
-    new Plugin({
-      key: new PluginKey("brainPageRefParagraphs"),
-      props: {
-        decorations(state) {
-          const found: Decoration[] = [];
-          state.doc.descendants((node, pos) => {
-            if (
-              node.type.name === "paragraph" &&
-              node.childCount === 1 &&
-              node.firstChild?.type.name === "page_ref"
-            ) {
-              found.push(
-                Decoration.node(pos, pos + node.nodeSize, {
-                  class: "brain-page-ref-only",
-                }),
-              );
-            }
-          });
-          return DecorationSet.create(state.doc, found);
-        },
-      },
-    }),
-);
+ * happens to contain an inline page mention.
+ *
+ * A NodeView for every paragraph, which toggles the class when its own node
+ * changes, and nothing else: the element and its attributes are what the
+ * preset's own `toDOM` renders. This used to be a node decoration on every
+ * row, and ProseMirror prices a decoration at the top level against every
+ * top-level block, on every transaction, twice (once to map the set, once to
+ * update the view): a page of 600 rows paid eight milliseconds per keystroke
+ * for a class name. A view costs a keystroke nothing. */
+export const pageRefParagraphs = $view(paragraphSchema.node, () => ((initial: ProseNode): NodeView => {
+  const spec = initial.type.spec.toDOM?.(initial) ?? ["p", 0];
+  const { dom, contentDOM } = DOMSerializer.renderSpec(document, spec);
+  const element = dom as HTMLElement;
+  let current = initial;
+  const sync = (node: ProseNode) => {
+    element.classList.toggle("brain-page-ref-only", isPageRefOnly(node));
+  };
+  sync(initial);
+  return {
+    dom: element,
+    contentDOM,
+    update: (node: ProseNode) => {
+      // Another type, or other attributes, is the preset's markup to redraw.
+      if (!node.sameMarkup(current)) return false;
+      current = node;
+      sync(node);
+      return true;
+    },
+  };
+}) satisfies NodeViewConstructor);
 
 export const pageRef = [
   remarkPageRef,

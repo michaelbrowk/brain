@@ -11,6 +11,7 @@ import { DOMParser, DOMSerializer } from "@milkdown/kit/prose/model";
 import { gfm } from "@milkdown/kit/preset/gfm";
 import { getMarkdown } from "@milkdown/kit/utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { wholeDocumentWalks } from "./editor-stack.harness";
 import {
   hasPageRefHrefResolver,
   pageRef,
@@ -390,6 +391,69 @@ describe("page references", () => {
       setPageRefHrefResolver(null);
       expect(outside.getAttribute("href")).toBe("/p/outside");
       expect(inside.hasAttribute("href")).toBe(false);
+    } finally {
+      await editor.destroy();
+    }
+  });
+
+  it("marks a paragraph that is one page row, follows edits, and walks nothing while typing elsewhere", async () => {
+    setPageRefOrigin(ORIGIN);
+    const bare = await Editor.make()
+      .config((ctx) => {
+        ctx.set(rootCtx, document.body.appendChild(document.createElement("div")));
+        ctx.set(defaultValueCtx, "one\n\nprose\n\ntwo tail");
+      })
+      .use(commonmark)
+      .use(gfm)
+      .create();
+    const bareView = bare.ctx.get(editorViewCtx);
+    const presetWalks = wholeDocumentWalks(() => {
+      bareView.dispatch(bareView.state.tr.insertText("x", 8));
+    });
+    await bare.destroy();
+    const root = document.createElement("div");
+    document.body.append(root);
+    const editor = await Editor.make()
+      .config((ctx) => {
+        ctx.set(rootCtx, root);
+        ctx.set(defaultValueCtx, "[Page](/p/one)\n\nprose\n\n[Page](/p/two) tail");
+      })
+      .use(commonmark)
+      .use(gfm)
+      .use(pageRef)
+      .create();
+    try {
+      const view = editor.ctx.get(editorViewCtx);
+      const rows = () =>
+        [...root.querySelectorAll("p.brain-page-ref-only")].map(
+          (paragraph) => paragraph.querySelector("a")?.getAttribute("data-page-ref"),
+        );
+      const textPos = (needle: string) => {
+        let found = -1;
+        view.state.doc.descendants((node, pos) => {
+          if (found < 0 && node.isText && node.text === needle) found = pos;
+          return found < 0;
+        });
+        expect(found).toBeGreaterThanOrEqual(0);
+        return found;
+      };
+      expect(rows()).toEqual(["one"]);
+
+      // Milkdown's own presets walk the document on a keystroke (list
+      // order, table alignment, heading ids); the rows must add no walk.
+      const inProse = textPos("prose") + 2;
+      const walks = wholeDocumentWalks(() => {
+        view.dispatch(view.state.tr.insertText("x", inProse));
+      });
+      expect(walks).toBe(presetWalks);
+      expect(rows()).toEqual(["one"]);
+
+      const tail = textPos(" tail");
+      view.dispatch(view.state.tr.delete(tail, tail + " tail".length));
+      expect(rows()).toEqual(["one", "two"]);
+
+      view.dispatch(view.state.tr.insertText("see ", 1));
+      expect(rows()).toEqual(["two"]);
     } finally {
       await editor.destroy();
     }

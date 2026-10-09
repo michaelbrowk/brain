@@ -596,28 +596,12 @@ const list: Handler = (node, parent, state, info) => {
   const bulletCurrent = state.bulletCurrent;
   let bullet = node.ordered ? str(node.delimiter, ".") : str(node.marker, "-");
   const other = node.ordered ? (bullet === "." ? ")" : ".") : bullet === "-" ? "*" : "-";
-  let useOther = Boolean(parent && state.bulletLastUsed && bullet === state.bulletLastUsed);
-  if (!node.ordered) {
-    const items = (node.children ?? []) as MarkdownNode[];
-    const first = items[0];
-    // `- - -` is a rule, not three empty items in a row: the innermost of
-    // three nested empty first items takes the other bullet.
-    if (
-      (bullet === "-" || bullet === "*") &&
-      first &&
-      !(first.children && first.children[0]) &&
-      state.stack.at(-1) === "list" &&
-      state.stack.at(-2) === "listItem" &&
-      state.stack.at(-3) === "list" &&
-      state.stack.at(-4) === "listItem"
-    ) {
-      useOther = true;
-    }
-    if (bullet === "-" && items.some((item) => item.children?.[0]?.type === "thematicBreak")) {
-      useOther = true;
-    }
-  }
-  if (useOther) bullet = other;
+  // Two lists back to back read as one unless their markers differ. The
+  // other two guards remark-stringify keeps are not needed here: an item
+  // always holds a paragraph, so an empty one is `-` on its own line and
+  // `- - -` cannot form, and a rule inside an item is written with a
+  // character that is not the bullet (`thematicBreak` below).
+  if (parent && state.bulletLastUsed && bullet === state.bulletLastUsed) bullet = other;
   state.bulletCurrent = bullet;
   const increment = state.options.incrementListMarker;
   state.options.incrementListMarker = node.increment !== false;
@@ -743,13 +727,22 @@ const code: Handler = (node, _parent, state, info) => {
 
 /* --- rules and breaks ----------------------------------------------------- */
 
-const thematicBreak: Handler = (node, _parent, state) => {
+const thematicBreak: Handler = (node, parent, state) => {
   const rule = str(node.rule);
-  // Dashes right under the line of a tight item would be a setext underline,
-  // wherever the rule came from.
+  // Inside an item, dashes right under the item's line would be a setext
+  // underline, and the bullet's own character on the first line of an item
+  // (`* ***`) would be a rule: the rule takes a character that is neither.
   const inItem = state.stack.includes("listItem");
-  if (/^(?:[-*_][ \t]*){3,}$/.test(rule) && !(inItem && rule.includes("-"))) return rule;
-  return inItem ? "***" : "---";
+  const bullet = state.bulletCurrent ?? "-";
+  const onBulletLine = parent?.type === "listItem" && parent.children?.[0] === node;
+  if (
+    /^(?:[-*_][ \t]*){3,}$/.test(rule) &&
+    !(inItem && (rule.includes("-") || (onBulletLine && rule.includes(bullet))))
+  ) {
+    return rule;
+  }
+  if (!inItem) return "---";
+  return bullet === "*" ? "___" : "***";
 };
 
 const hardBreak: Handler = (node, _parent, state, info) => {
@@ -1111,10 +1104,16 @@ function stripBareBreaks(node: MarkdownNode) {
     }
     return;
   }
-  if (node.type === "listItem" && node.checked == null && children.length === 1) {
-    const only = children[0]!;
-    if (only.type === "paragraph" && only.children?.length === 1 && isBreakHtml(only.children[0]!)) {
-      node.children = [];
+  // The first paragraph of a plain item, when it is only a break, is the
+  // paragraph the schema demands and the writer never typed. Before a
+  // nested list it stays, empty, so the item is `-` on its own line and the
+  // nested marker does not move up onto it (`- - a`); before anything else
+  // (a rule, a heading) it goes, and that block takes the item's line.
+  if (node.type === "listItem" && node.checked == null && children.length > 0) {
+    const first = children[0]!;
+    if (first.type === "paragraph" && first.children?.length && first.children.every(isBreakHtml)) {
+      if (children.length > 1 && children[1]!.type !== "list") children.shift();
+      else children[0] = { type: "paragraph", children: [] } as MarkdownNode;
     }
   }
 }

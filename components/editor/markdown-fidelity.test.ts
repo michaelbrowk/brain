@@ -177,6 +177,54 @@ describe("round three: links under one mark, empty items, cells, trailing spaces
       expect(links, input).toBe(2);
     }
   });
+
+  it("writes an empty item that holds a nested list as - on its own line", async () => {
+    const nested = await mount("-\n  - a");
+    expect(nested.serialize()).toBe("-\n  - a");
+    const deep = await mount("-\n  -\n    -");
+    expect(deep.serialize()).toBe("-\n  -\n    -");
+  });
+
+  it("writes a rule inside a * item with a character that is not the bullet (M18)", async () => {
+    const { view, serialize } = await mount("* a\n* b\n\n---");
+    let hr = -1;
+    let itemEnd = -1;
+    view.state.doc.descendants((node, pos) => {
+      if (node.type.name === "hr") hr = pos;
+      if (itemEnd < 0 && node.type.name === "paragraph" && node.textContent === "a") itemEnd = pos + node.nodeSize;
+    });
+    const rule = view.state.doc.nodeAt(hr)!;
+    view.dispatch(view.state.tr.delete(hr, hr + rule.nodeSize).insert(itemEnd, rule));
+    const written = serialize();
+    expect(written).toBe("* a\n  ___\n* b");
+    const reopened = await mount(written);
+    expect(reopened.view.state.doc.firstChild?.type.name).toBe("bullet_list");
+    expect(reopened.view.state.doc.firstChild?.childCount).toBe(2);
+    expect(reopened.view.state.doc.firstChild?.firstChild?.lastChild?.type.name).toBe("hr");
+
+    // With the item's words gone the rule takes the item's line, where the
+    // bullet's own character (`* ***`) would read as one rule, not a list.
+    let words = -1;
+    view.state.doc.descendants((node, pos) => {
+      if (words < 0 && node.isText && node.text === "a") words = pos;
+    });
+    view.dispatch(view.state.tr.delete(words, words + 1));
+    const ruleFirst = serialize();
+    expect(ruleFirst).toBe("* ___\n* b");
+    const again = await mount(ruleFirst);
+    expect(again.view.state.doc.firstChild?.type.name).toBe("bullet_list");
+    expect(again.view.state.doc.firstChild?.childCount).toBe(2);
+
+    // A writer's own `***` under the words stays, until it takes the line.
+    const starred = await mount("* a\n  ***\n* b");
+    expect(starred.serialize()).toBe("* a\n  ***\n* b");
+    let starredWords = -1;
+    starred.view.state.doc.descendants((node, pos) => {
+      if (starredWords < 0 && node.isText && node.text === "a") starredWords = pos;
+    });
+    starred.view.dispatch(starred.view.state.tr.delete(starredWords, starredWords + 1));
+    expect(starred.serialize()).toBe("* ___\n* b");
+  });
 });
 
 describe("what an edit does to a kept shape", () => {

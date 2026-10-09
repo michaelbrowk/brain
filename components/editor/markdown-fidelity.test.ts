@@ -159,6 +159,26 @@ describe("the schema is the preset's schema, with attributes added", () => {
   });
 });
 
+describe("round three: links under one mark, empty items, cells, trailing spaces", () => {
+  it("keeps two links to one address under one mark as two, across two saves", async () => {
+    for (const input of [
+      "**[a](https://x.io) [b](https://x.io)**",
+      "**[Page](/p/abc123) [Page](/p/abc123)**",
+    ]) {
+      const first = await mount(input);
+      const once = first.serialize();
+      expect(once, input).toBe(input);
+      const second = await mount(once);
+      expect(second.serialize(), input).toBe(once);
+      let links = 0;
+      second.view.state.doc.descendants((node) => {
+        if (node.type.name === "page_ref" || (node.isText && node.marks.some((m) => m.type.name === "link"))) links += 1;
+      });
+      expect(links, input).toBe(2);
+    }
+  });
+});
+
 describe("what an edit does to a kept shape", () => {
   it("writes an emptied setext heading as ATX, not an underline alone", async () => {
     const { view, serialize } = await mount("Title\n=====\n\nbody");

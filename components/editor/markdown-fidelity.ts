@@ -885,6 +885,68 @@ function withoutLink(node: MarkdownNode): MarkdownNode[] {
 
 const isSpace = (node: MarkdownNode) => node.type === "text" && /^[ \t]+$/.test(str(node.value));
 
+const isEmptyText = (node: MarkdownNode) => node.type === "text" && !str(node.value);
+
+const lastDescendant = (node: MarkdownNode): MarkdownNode => {
+  const last = node.children?.at(-1);
+  return last ? lastDescendant(last) : node;
+};
+
+/** The preset moves a mark's edge spaces out of the mark and leaves an
+ *  empty text node behind, so `**[a](u) [b](u)**` left ProseMirror as
+ *  `strong(link a, "")`, a space, `strong(link b)` and was written as two
+ *  bolds. The empty text is the signature: a mark ending in one, a bare
+ *  space, and the same mark again are one mark around the space. A writer's
+ *  own `**a** **b**` carries no empty text and stays two. */
+function rejoinSplitMarks(node: MarkdownNode) {
+  const children = node.children;
+  if (!children) return;
+  // This level first, while the empty text is still there to read; the
+  // children's own passes, and the sweep of empty texts, come after.
+  let index = 0;
+  while (index < children.length) {
+    const current = children[index]!;
+    const space = children[index + 1];
+    const next = children[index + 2];
+    if (
+      MARK_TYPES.has(current.type) &&
+      current.children?.length &&
+      isEmptyText(lastDescendant(current)) &&
+      space &&
+      isSpace(space) &&
+      next &&
+      next.type === current.type &&
+      sameMarkProps(current, next)
+    ) {
+      const { children: _a, ...rest } = current;
+      const merged: MarkdownNode = {
+        ...rest,
+        children: [...withoutTrailingEmptyText(current.children), space, ...(next.children ?? [])],
+      };
+      children.splice(index, 3, merged);
+      continue;
+    }
+    index += 1;
+  }
+  for (const child of children) rejoinSplitMarks(child);
+  node.children = children.filter((c) => !isEmptyText(c));
+}
+
+/** The children with the empty text the preset left at the deepest end
+ *  taken out, so the joined mark does not carry it. */
+function withoutTrailingEmptyText(children: MarkdownNode[]): MarkdownNode[] {
+  const last = children.at(-1);
+  if (!last) return children;
+  if (isEmptyText(last)) return children.slice(0, -1);
+  if (last.children) return [...children.slice(0, -1), { ...last, children: withoutTrailingEmptyText(last.children) }];
+  return children;
+}
+
+function sameMarkProps(a: MarkdownNode, b: MarkdownNode) {
+  const strip = ({ children: _c, position: _p, ...rest }: MarkdownNode) => JSON.stringify(rest);
+  return strip(a) === strip(b);
+}
+
 /** `[a **b** c](u)` leaves ProseMirror as three text runs, and the preset's
  *  serializer closes the link mark after each, so the file got three links
  *  with a space between. Adjacent pieces of one address are joined back into
@@ -911,9 +973,21 @@ function joinSplitLinks(node: MarkdownNode) {
         cursor += 1;
         continue;
       }
+      // Across a bare space only when exactly one neighbour is the link
+      // under a mark: that is the split's signature (`link`, space,
+      // `strong(link)`). Two plain links, or two links under the same mark
+      // (`**[a](u) [b](u)**`), are two links the writer made.
       const after = children[cursor + 1] ? linkInside(children[cursor + 1]!) : null;
-      if (isSpace(children[cursor]!) && after && sameLink(after, head)) {
-        pieces.push(children[cursor]!, children[cursor + 1]!);
+      const previous = pieces.at(-1)!;
+      const next = children[cursor + 1];
+      if (
+        isSpace(children[cursor]!) &&
+        after &&
+        next &&
+        sameLink(after, head) &&
+        (previous.type === "link") !== (next.type === "link")
+      ) {
+        pieces.push(children[cursor]!, next);
         cursor += 2;
         continue;
       }
@@ -1046,6 +1120,7 @@ function stripBareBreaks(node: MarkdownNode) {
 }
 
 const root: Handler = (node, _parent, state, info) => {
+  rejoinSplitMarks(node);
   joinSplitLinks(node);
   stripBareBreaks(node);
   keepUnchangedTables(node, state);

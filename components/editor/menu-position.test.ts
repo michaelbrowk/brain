@@ -51,4 +51,21 @@ describe("caret menu placement", () => {
       maxHeight: 174,
     });
   });
+
+  // The boundaries, exactly: room equal to the menu is room enough, and
+  // equal room on both sides stays below, where the eye already is.
+  it("takes a side whose room equals the menu, and stays below on equal room", () => {
+    expect(placeCaretMenu({ top: 100, bottom: 120 }, { top: 0, bottom: 406 }, 280)).toEqual({
+      side: "below",
+      maxHeight: 280,
+    });
+    expect(placeCaretMenu({ top: 286, bottom: 300 }, { top: 0, bottom: 400 }, 280)).toEqual({
+      side: "above",
+      maxHeight: 280,
+    });
+    expect(placeCaretMenu({ top: 106, bottom: 120 }, { top: 0, bottom: 226 }, 280)).toEqual({
+      side: "below",
+      maxHeight: 100,
+    });
+  });
 });

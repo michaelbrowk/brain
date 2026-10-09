@@ -7,17 +7,17 @@ import { liftListItem, sinkListItem } from "@milkdown/kit/prose/schema-list";
 import { redo, redoDepth, undo, undoDepth } from "@milkdown/kit/prose/history";
 import type { Command, EditorState } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "../ui/icon";
 import { DUR, EASE_OUT } from "@/lib/motion";
 import { EDITOR_DOC_CHANGED_EVENT, notifyEditorDocChanged } from "@/lib/editor-events";
 import { indentCode, outdentCode } from "./editing-core";
-import { DOCK_CLASS, DOCK_SAFE_BOTTOM, Sep, TB, Tt } from "./floating-toolbar";
+import { DOCK_CLASS, DOCK_SAFE_BOTTOM, selectionIsInTable, Sep, TB, Tt } from "./floating-toolbar";
 import { setDockedInset } from "./scroll-band";
 import { selectionIsInQuote, selectionIsTask, toggleTaskCommand } from "./task-checkbox";
-import { useTouchDock } from "./touch-dock";
+import { KEYBOARD_MIN, useTouchDock } from "./touch-dock";
 
 /** Tab and Shift-Tab, which a phone keyboard has not got: the code block's
  *  own indent inside one, the list's nest and lift anywhere else. A dry run
@@ -46,6 +46,10 @@ interface BarState {
   canOutdent: boolean;
   taskActive: boolean;
   inQuote: boolean;
+  /** A task is a paragraph line: a heading, a code block or a table cell
+   *  refuses the command, so the button says so instead of pressing for
+   *  nothing. */
+  taskLine: boolean;
   canUndo: boolean;
   canRedo: boolean;
 }
@@ -71,11 +75,15 @@ export function WritingBar({
   onHeight: (height: number) => void;
 }) {
   const [, getEditor] = useInstance();
-  const { isTouch, kbInset } = useTouchDock();
+  const { isTouch, kbInset, kbHeight } = useTouchDock();
+  const reduce = useReducedMotion();
   const [state, setState] = useState<BarState | null>(null);
   const [height, setHeight] = useState(0);
   const raf = useRef<number>(0);
   const barRef = useRef<HTMLDivElement | null>(null);
+  // Below the threshold the lost height is a URL bar or a rounding, not a
+  // keyboard: the band does not move for it and nothing scrolls.
+  const keyboardUp = kbHeight > KEYBOARD_MIN;
 
   const withView = useCallback(
     (read: (view: EditorView) => void) => {
@@ -104,6 +112,8 @@ export function WritingBar({
           canOutdent: outdentFor(s)(s),
           taskActive: selectionIsTask(s),
           inQuote: selectionIsInQuote(s),
+          taskLine:
+            s.selection.$from.parent.type.name === "paragraph" && !selectionIsInTable(s),
           canUndo: undoDepth(s) > 0,
           canRedo: redoDepth(s) > 0,
         };
@@ -130,30 +140,49 @@ export function WritingBar({
   const shown = state !== null;
 
   // Measured after paint, so the selection toolbar stacks on the real edge
-  // and not on an estimate. 0 the moment the bar leaves.
+  // and not on an estimate. 0 the moment the bar leaves, and when the
+  // editor goes away with the bar still standing.
   useLayoutEffect(() => {
     const next = shown ? (barRef.current?.getBoundingClientRect().height ?? 0) : 0;
     setHeight(next);
     onHeight(next);
   }, [shown, kbInset, onHeight]);
+  useEffect(() => () => onHeight(0), [onHeight]);
 
-  // The bar owns the keyboard inset on this surface, so it owns the scroll
-  // band too: while it stands the caret is kept above the keyboard and the
-  // bar. The page's last lines can only come up if there is page below them
-  // to scroll into, so the editor's root takes the same inset as padding
-  // while the bar is up: the scroller is the shell's and keeps its height
-  // under the keyboard.
+  // The bar owns the keyboard on this surface, so it owns the scroll band
+  // too (scroll-band.ts): while it stands the caret is kept above the
+  // keyboard and the bar. The band takes the keyboard's HEIGHT, not the
+  // dock inset: a pan over the page moves the inset to 0 with the keyboard
+  // still there. The page's last lines can only come up if there is page
+  // below them to scroll into, so the editor's root takes the same inset
+  // as padding: the scroller is the shell's and keeps its height under the
+  // keyboard. Both go back when the bar leaves or the editor unmounts.
   useEffect(() => {
-    const inset = shown ? kbInset + height : 0;
+    const inset = shown ? (keyboardUp ? kbHeight : 0) + height : 0;
     padEditorRoot(container.current, inset);
     setDockedInset("writing-bar", inset);
-    // A caret already under the keyboard comes up at once. Only when the
-    // keyboard is there: the keyboard arrives after the tap and before the
-    // first key, where a state update cannot land on a keystroke.
-    if (shown && kbInset > 0) {
+  }, [shown, keyboardUp, kbHeight, height, container]);
+  useEffect(
+    () => () => {
+      padEditorRoot(container.current, 0);
+      setDockedInset("writing-bar", 0);
+    },
+    [container],
+  );
+
+  // A caret already under the keyboard comes up once, when the keyboard
+  // arrives under a standing bar (or the bar appears under a keyboard that
+  // is up). Not on every inset change: the keyboard's own animation fires
+  // several resizes (one a frame on Android), and a pan fires scrolls that
+  // would yank the caret back on each.
+  const docked = shown && keyboardUp;
+  const wasDocked = useRef(false);
+  useEffect(() => {
+    if (docked && !wasDocked.current) {
       withView((view) => view.dispatch(view.state.tr.scrollIntoView()));
     }
-  }, [shown, kbInset, height, withView, container]);
+    wasDocked.current = docked;
+  }, [docked, withView]);
 
   // A press moves the caret without the browser's `selectionchange`: WebKit
   // fires none for a selection the editor sets itself, so the caret menus
@@ -174,9 +203,13 @@ export function WritingBar({
     <AnimatePresence>
       {state && (
         <motion.div
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: 8, transition: { duration: 0.08 } }}
+          initial={reduce ? { opacity: 0 } : { opacity: 0, y: 8 }}
+          animate={reduce ? { opacity: 1 } : { opacity: 1, y: 0 }}
+          exit={
+            reduce
+              ? { opacity: 0, transition: { duration: DUR.exit } }
+              : { opacity: 0, y: 8, transition: { duration: DUR.exit } }
+          }
           transition={{ duration: DUR.base, ease: EASE_OUT }}
           ref={barRef}
           role="toolbar"
@@ -197,9 +230,15 @@ export function WritingBar({
                 <Sep />
                 <TB
                   label="Task"
-                  title={state.inQuote ? "A task cannot live inside a quote" : "Task line"}
+                  title={
+                    state.inQuote
+                      ? "A task cannot live inside a quote"
+                      : !state.taskLine
+                        ? "A task is a paragraph line"
+                        : "Task line"
+                  }
                   active={state.taskActive}
-                  disabled={state.inQuote}
+                  disabled={state.inQuote || !state.taskLine}
                   pressed={state.taskActive}
                   onRun={() => {
                     getEditor()?.action(callCommand(toggleTaskCommand.key));
@@ -222,8 +261,9 @@ export function WritingBar({
               label="Slash"
               // On an empty line this opens the slash menu; on a line with
               // words it types the character the phone keyboard keeps
-              // behind a mode switch. No block semantics of its own.
-              title="Insert a block"
+              // behind a mode switch. No block semantics of its own, and
+              // the title says which of the two it is.
+              title="Slash: the block menu on an empty line"
               onRun={() =>
                 run(
                   () => (s, dispatch) => {

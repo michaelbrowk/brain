@@ -940,8 +940,15 @@ function rejoinSplitMarks(node: MarkdownNode) {
     index += 1;
   }
   for (const child of children) rejoinSplitMarks(child);
-  node.children = children.filter((c) => !isEmptyText(c));
+  node.children = children.filter((c) => !isEmptyText(c) && !isEmptyEmphasis(c));
 }
+
+/** A strong, emphasis or delete with nothing left inside: the preset moved a
+ *  marked space out and left the mark around nothing, and it was written as
+ *  `****` or `**`, which reads back as literal asterisks. Children are swept
+ *  first, so a mark holding only empty marks is empty too. */
+const isEmptyEmphasis = (node: MarkdownNode) =>
+  (node.type === "strong" || node.type === "emphasis" || node.type === "delete") && !node.children?.length;
 
 /** The children with the empty text the preset left at the deepest end
  *  taken out, so the joined mark does not carry it. */

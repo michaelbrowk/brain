@@ -7,6 +7,7 @@ import { Editor, defaultValueCtx, editorViewCtx, rootCtx, serializerCtx } from "
 import { commonmark, syncHeadingIdPlugin } from "@milkdown/kit/preset/commonmark";
 import { gfm } from "@milkdown/kit/preset/gfm";
 import { listener } from "@milkdown/kit/plugin/listener";
+import type { Node as ProseNode } from "@milkdown/kit/prose/model";
 import { sinkListItem } from "@milkdown/kit/prose/schema-list";
 import { Selection, TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
@@ -286,6 +287,45 @@ describe("round four: tables in items, page refs, empty marks", () => {
       // The first save may settle the shape; every save after it is the same.
       expect(new Set(saves.slice(1)).size, input).toBe(1);
       expect(saves[1], input).toBe(saves[0]);
+    }
+  });
+
+  it("writes no empty mark between two marked words under one bold", async () => {
+    // The preset nests italic outside bold, so the first save writes an
+    // equivalent spelling; the fidelity fixtures need byte identity and
+    // cannot hold these. What must not happen is `****` between the words.
+    const cases: [string, string][] = [
+      ["**_a_ _b_**", "_**a**_ _**b**_"],
+      ["***a* *b***", "***a*** ***b***"],
+    ];
+    for (const [input, want] of cases) {
+      const first = await mount(input);
+      const once = first.serialize();
+      expect(once, input).toBe(want);
+      const second = await mount(once);
+      expect(second.serialize(), input).toBe(once);
+      expect(second.view.state.doc.textContent, input).toBe("a b");
+    }
+  });
+
+  it("writes no empty mark for a marked space at the end of a line", async () => {
+    const cases: [string, (schema: EditorView["state"]["schema"]) => ProseNode[], string][] = [
+      ["x then bold space", (s) => [s.text("x"), s.text(" ", [s.marks.strong!.create()])], "x"],
+      ["a space then italic space", (s) => [s.text("a "), s.text(" ", [s.marks.emphasis!.create()])], "a"],
+      [
+        "x then bold italic space",
+        (s) => [s.text("x"), s.text(" ", [s.marks.emphasis!.create(), s.marks.strong!.create()])],
+        "x",
+      ],
+    ];
+    for (const [label, make, want] of cases) {
+      const { view, serialize } = await mount("x");
+      const { schema } = view.state;
+      const paragraph = schema.nodes.paragraph!.create(null, make(schema));
+      view.dispatch(view.state.tr.replaceWith(0, view.state.doc.content.size, paragraph));
+      const once = serialize();
+      expect(once, label).toBe(want);
+      expect((await mount(once)).serialize(), label).toBe(once);
     }
   });
 });

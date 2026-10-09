@@ -44,3 +44,38 @@ describe("SnackbarSlot", () => {
     host.remove();
   });
 });
+
+describe("Snackbar choices", () => {
+  it("offers each answer as its own button, and a spent one is out of reach", async () => {
+    (
+      globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
+    ).IS_REACT_ACT_ENVIRONMENT = true;
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const keep = vi.fn();
+    const take = vi.fn();
+    await act(async () =>
+      root.render(
+        <Snackbar
+          open
+          title="Page changed elsewhere"
+          choices={[
+            { label: "Keep mine", onAction: keep },
+            { label: "Take theirs", onAction: take, disabled: true },
+          ]}
+        />,
+      ),
+    );
+    const pill = host.querySelector(".brain-toast");
+    expect(pill?.classList.contains("brain-toast-choices")).toBe(true);
+    const buttons = [...host.querySelectorAll("button")];
+    expect(buttons.map((button) => button.textContent)).toEqual(["Keep mine", "Take theirs"]);
+    await act(async () => buttons[0].click());
+    await act(async () => buttons[1].click());
+    expect(keep).toHaveBeenCalledTimes(1);
+    expect(take).not.toHaveBeenCalled();
+    await act(async () => root.unmount());
+    host.remove();
+  });
+});

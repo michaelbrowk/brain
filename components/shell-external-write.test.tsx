@@ -6,7 +6,9 @@
 // unsaved here, the new body goes into the live editor in place: no new
 // editor, so the caret and the undo history stay (the editor half is
 // `editor/external-write.test.ts`). With unsaved text here, the save meets
-// the other version and the page is in conflict.
+// the other version and the page is in conflict, and the conflict offers
+// three ways out — Keep mine, Take theirs, Save a copy — after each of which
+// the page saves again.
 //
 // The editor is a stand-in that counts its mounts, hands the shell the
 // markdown it would have serialized and records what the shell applies to
@@ -277,6 +279,21 @@ describe("a write to the open page from somewhere else", () => {
     await settle();
   }
 
+  function button(name: string) {
+    return [...document.querySelectorAll<HTMLButtonElement>("button")].find(
+      (candidate) => candidate.textContent?.trim() === name,
+    );
+  }
+
+  async function press(name: string) {
+    const target = button(name);
+    if (!target) throw new Error(`no button ${name}`);
+    await act(async () => target.click());
+    await settle();
+    await flushFrames();
+    await advance(0);
+  }
+
   function conflictShown() {
     return document.body.textContent?.includes("Page changed elsewhere") ?? false;
   }
@@ -310,5 +327,67 @@ describe("a write to the open page from somewhere else", () => {
     await advance(800);
     expect(server.markdown).toBe("Base, theirs");
     expect(conflictShown()).toBe(true);
+    expect(button("Keep mine")).toBeDefined();
+    expect(button("Take theirs")).toBeDefined();
+    expect(button("Save a copy")).toBeDefined();
+  });
+
+  async function inConflict() {
+    await open("Base");
+    await type("Base, mine");
+    await writeElsewhere("Base, theirs");
+    await advance(800);
+    expect(conflictShown()).toBe(true);
+  }
+
+  /** After the way out, the page saves an ordinary edit again. */
+  async function savesAgain(from: string) {
+    const before = puts.length;
+    await type(`${from} and more`);
+    await advance(800);
+    expect(puts.length).toBeGreaterThan(before);
+    expect(server.markdown).toBe(`${from} and more`);
+    expect(conflictShown()).toBe(false);
+  }
+
+  it("Keep mine writes the local text over the other version and saves again", async () => {
+    await inConflict();
+    await press("Keep mine");
+
+    expect(server.markdown).toBe("Base, mine");
+    expect(editorHarness.applied).toEqual([]);
+    expect(editorHarness.mounts).toBe(1);
+    expect(conflictShown()).toBe(false);
+    await savesAgain("Base, mine");
+  });
+
+  it("Take theirs puts the other version into the editor in place and saves again", async () => {
+    await inConflict();
+    const putsBefore = puts.length;
+    await press("Take theirs");
+
+    expect(editorHarness.applied).toEqual(["Base, theirs"]);
+    expect(editorHarness.mounts).toBe(1);
+    expect(server.markdown).toBe("Base, theirs");
+    expect(puts.length).toBe(putsBefore);
+    expect(conflictShown()).toBe(false);
+    expect(Object.keys(localStorage).filter((key) => key.startsWith("brain-draft"))).toEqual(
+      [],
+    );
+    await savesAgain("Base, theirs");
+  });
+
+  it("Save a copy keeps the local text as a new page, takes theirs and saves again", async () => {
+    await inConflict();
+    await press("Save a copy");
+
+    expect(posts).toHaveLength(1);
+    expect(posts[0].markdown).toBe("Base, mine");
+    expect(editorHarness.applied).toEqual(["Base, theirs"]);
+    expect(editorHarness.mounts).toBe(1);
+    expect(server.markdown).toBe("Base, theirs");
+    expect(window.location.pathname).toBe("/p/note");
+    expect(conflictShown()).toBe(false);
+    await savesAgain("Base, theirs");
   });
 });

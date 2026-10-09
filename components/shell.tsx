@@ -438,6 +438,14 @@ export function Shell({
   }, []);
   const [save, setSave] = useState<SaveState>("idle");
   const [recoveryCopyId, setRecoveryCopyId] = useState<string | null>(null);
+  // The way out of a conflict that is running ("Keep mine" or "Take
+  // theirs"; "Save a copy" is `recoveryCopyId`). The ref refuses a second
+  // press in the same frame, the state draws the pill.
+  const [conflictChoice, setConflictChoice] = useState<{
+    id: string;
+    kind: "mine" | "theirs";
+  } | null>(null);
+  const conflictChoiceRef = useRef<string | null>(null);
   const [recoveryMessage, setRecoveryMessage] = useState<{
     id: string;
     text: string;
@@ -3992,6 +4000,153 @@ export function Shell({
     !!inheritedShareRoot ||
     !!expiredInheritedShareRoot;
   const shareScopeRevision = useMemo(() => shareTreeRevision(tree), [tree]);
+  // ── a page in conflict: the ways out (H13) ─────────────────
+  // A conflict used to end only in a copy, and until then the page took no
+  // save at all. Each way out below ends it in place, on the page, and the
+  // page saves again afterwards.
+
+  /** The page as the server holds it now, or null when it cannot be read. */
+  const readServerPage = useCallback(async (id: string) => {
+    try {
+      const response = await apiFetch(`/api/page/${id}`);
+      if (!response.ok) return null;
+      return loadedPageFromResponse(id, await response.json());
+    } catch {
+      return null;
+    }
+  }, []);
+
+  /** The other version wins: it becomes this tab's base and goes into the
+   *  live editor in place, and the local text is let go of, draft and latch
+   *  together, because the writer chose that. */
+  const takeServerBody = useCallback(
+    (id: string, latest: LoadedPage) => {
+      const pending = pendingRef.current?.id === id ? pendingRef.current : null;
+      if (pending) clearDraftOperation(id, pending.operationId);
+      try {
+        const key = draftStorageKey(id);
+        const raw = localStorage.getItem(key);
+        if (raw !== null && decodeDraft(raw).conflicted) localStorage.removeItem(key);
+      } catch {}
+      if (pendingRef.current?.id === id) pendingRef.current = null;
+      if (editorDirtyRef.current === id) editorDirtyRef.current = null;
+      conflictedPagesRef.current.delete(id);
+      revisionsRef.current.set(id, latest.rev);
+      baseMarkdownRef.current.set(id, latest.markdown);
+      cachePut(latest);
+      clearLocalRecoveryUnavailable(id);
+      setRecoveryMessage((current) => (current?.id === id ? null : current));
+      if (selectedIdRef.current !== id) return;
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = null;
+      setPage((current) =>
+        current?.id === id
+          ? { ...current, markdown: latest.markdown, rev: latest.rev }
+          : current,
+      );
+      if (!applyToLiveEditor(id, latest.markdown)) setEditorEpoch((e) => e + 1);
+      setSave("idle");
+    },
+    [applyToLiveEditor, cachePut, clearDraftOperation, clearLocalRecoveryUnavailable],
+  );
+
+  const takeTheirs = useCallback(async () => {
+    const id = selectedIdRef.current;
+    if (
+      !id ||
+      !conflictedPagesRef.current.has(id) ||
+      conflictChoiceRef.current === id ||
+      recoveryCopyId === id
+    )
+      return;
+    conflictChoiceRef.current = id;
+    setConflictChoice({ id, kind: "theirs" });
+    try {
+      const latest = await readServerPage(id);
+      if (!conflictedPagesRef.current.has(id)) return;
+      if (!latest) {
+        setRecoveryMessage({
+          id,
+          text: "Couldn't read the other version. Your local draft is still safe.",
+        });
+        return;
+      }
+      takeServerBody(id, latest);
+    } finally {
+      if (conflictChoiceRef.current === id) conflictChoiceRef.current = null;
+      setConflictChoice((current) => (current?.id === id ? null : current));
+    }
+  }, [readServerPage, recoveryCopyId, takeServerBody]);
+
+  const keepMine = useCallback(async () => {
+    const id = selectedIdRef.current;
+    if (
+      !id ||
+      !conflictedPagesRef.current.has(id) ||
+      conflictChoiceRef.current === id ||
+      recoveryCopyId === id
+    )
+      return;
+    conflictChoiceRef.current = id;
+    setConflictChoice({ id, kind: "mine" });
+    try {
+      // The text visible at the press, not what the deferred serialize last
+      // handed over.
+      editorFlushRef.current();
+      const latest = await readServerPage(id);
+      if (!conflictedPagesRef.current.has(id)) return;
+      if (!latest) {
+        setRecoveryMessage({
+          id,
+          text: "Couldn't read the other version. Your local draft is still safe.",
+        });
+        return;
+      }
+      // Read after the request: an edit typed while it was out is the
+      // newest local text, and that is what is kept.
+      const pending = pendingRef.current?.id === id ? pendingRef.current : null;
+      if (!pending) {
+        // Nothing local is left to keep: the draft went with an earlier copy.
+        takeServerBody(id, latest);
+        return;
+      }
+      // Mine goes over the version just read: that body becomes the base and
+      // its rev the one the save carries. A third write between this read
+      // and the save is a conflict again, never overwritten unseen.
+      conflictedPagesRef.current.delete(id);
+      revisionsRef.current.set(id, latest.rev);
+      baseMarkdownRef.current.set(id, latest.markdown);
+      cachePut(latest);
+      const persisted = persistDraft(
+        localStorage,
+        draftStorageKey(id),
+        pending.md,
+        latest.rev,
+        pending.operationId,
+        Date.now(),
+        latest.markdown,
+        false,
+        draftSourcesForOperation(id, pending.operationId),
+      );
+      if (persisted) clearLocalRecoveryUnavailable(id);
+      else markLocalRecoveryUnavailable(id);
+      setRecoveryMessage((current) => (current?.id === id ? null : current));
+      if (selectedIdRef.current === id) setSave("saving");
+      await doSave(pending.id, pending.md, pending.operationId);
+    } finally {
+      if (conflictChoiceRef.current === id) conflictChoiceRef.current = null;
+      setConflictChoice((current) => (current?.id === id ? null : current));
+    }
+  }, [
+    cachePut,
+    clearLocalRecoveryUnavailable,
+    doSave,
+    markLocalRecoveryUnavailable,
+    readServerPage,
+    recoveryCopyId,
+    takeServerBody,
+  ]);
+
   const saveConflictCopy = useCallback(async () => {
     const sourceId = selectedIdRef.current;
     const sourcePath = sourceId ? findPath(treeRef.current, sourceId) : [];
@@ -4000,7 +4155,8 @@ export function Shell({
     if (
       !sourceId ||
       !conflictedPagesRef.current.has(sourceId) ||
-      recoveryCopyId === sourceId
+      recoveryCopyId === sourceId ||
+      conflictChoiceRef.current === sourceId
     )
       return;
     if (!sourceNode && !sourcePage) {
@@ -4092,29 +4248,45 @@ export function Shell({
       pendingRef.current?.id === sourceId &&
       pendingRef.current.operationId !== draft.operationId;
     const hasNewerDraft = newerStoredDraft || newerPendingDraft;
-    if (!hasNewerDraft) {
-      if (pendingRef.current?.id === sourceId) pendingRef.current = null;
-      if (editorDirtyRef.current === sourceId) editorDirtyRef.current = null;
-      conflictedPagesRef.current.delete(sourceId);
-      clearLocalRecoveryUnavailable(sourceId);
-      if (selectedIdRef.current === sourceId) setSave("saved");
-    }
-    setRecoveryMessage((current) => (current?.id === sourceId ? null : current));
-    setRecoveryCopyId((current) => (current === sourceId ? null : current));
-    await refreshTree().catch(() => {});
     if (hasNewerDraft) {
+      setRecoveryMessage((current) => (current?.id === sourceId ? null : current));
+      setRecoveryCopyId((current) => (current === sourceId ? null : current));
+      await refreshTree().catch(() => {});
       showToast("Copy saved. Newer edits are still in your local draft.");
       return;
     }
+    // The copy holds the local text, so the page itself takes the other
+    // version and stays open, saving again. The copy is one press away.
+    const latest = await readServerPage(sourceId);
+    setRecoveryCopyId((current) => (current === sourceId ? null : current));
+    await refreshTree().catch(() => {});
+    const openCopy = () => select(copyId);
+    if (latest && conflictedPagesRef.current.has(sourceId)) {
+      takeServerBody(sourceId, latest);
+      showToast("Draft saved as a copy", { actionLabel: "Open", onAction: openCopy });
+      return;
+    }
+    // The other version could not be read: the page leaves the conflict
+    // and the copy opens, as it always did. Coming back loads the page anew.
+    if (pendingRef.current?.id === sourceId) pendingRef.current = null;
+    if (editorDirtyRef.current === sourceId) editorDirtyRef.current = null;
+    conflictedPagesRef.current.delete(sourceId);
+    clearLocalRecoveryUnavailable(sourceId);
+    setRecoveryMessage((current) => (current?.id === sourceId ? null : current));
+    if (selectedIdRef.current === sourceId) {
+      setSave("saved");
+      openCopy();
+    }
     showToast("Draft saved as a copy");
-    if (selectedIdRef.current === sourceId) select(copyId);
   }, [
     clearDraftOperation,
     clearLocalRecoveryUnavailable,
+    readServerPage,
     recoveryCopyId,
     refreshTree,
     select,
     showToast,
+    takeServerBody,
   ]);
   const editorContextNode = useMemo(
     () =>
@@ -6612,6 +6784,9 @@ export function Shell({
         pendingDelete={pendingDelete}
         recoveryMessage={recoveryMessage}
         recoveryCopyId={recoveryCopyId}
+        conflictChoice={conflictChoice}
+        onKeepMine={keepMine}
+        onTakeTheirs={takeTheirs}
         onSaveConflictCopy={saveConflictCopy}
         toasts={toasts}
         urgentToast={urgentToast}

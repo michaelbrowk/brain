@@ -557,6 +557,26 @@ describe("the newest text leaves when the tab goes away", () => {
     expect(drafts()).toEqual([]);
   });
 
+  it("the first keystroke after a failed save takes the page out of 'Not saved' before any serialize", async () => {
+    // The serialize that produces the Markdown waits for quiet and an idle
+    // moment (components/editor/deferred-serialize.ts); the editor says
+    // "dirty" on the keystroke itself, and the indicator follows that word.
+    await open();
+    failingPuts = 6;
+    await type("Text the server refused");
+    await advance(700);
+    await advance(1_500);
+    await advance(1_500);
+    await flushFrames();
+    expect(document.body.textContent).toContain("Not saved");
+
+    await act(async () =>
+      (editorHarness.props as { onDirty?: () => void } | undefined)?.onDirty?.(),
+    );
+    await flushFrames();
+    expect(document.body.textContent).not.toContain("Not saved");
+  });
+
   it("a save that lands cancels the retry a failure scheduled", async () => {
     await open();
     failingPuts = 3;

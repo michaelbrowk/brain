@@ -6089,6 +6089,16 @@ export function Shell({
       undo.status !== "restoring"
     ) {
       editorDirtyRef.current = pageId;
+      // The keystroke is what makes the page unsaved; the serialize that
+      // hands over its Markdown follows up to a second later
+      // (components/editor/deferred-serialize.ts), and `onChange` says
+      // "saving" again then. A page in conflict stays in conflict.
+      if (
+        selectedIdRef.current === pageId &&
+        !conflictedPagesRef.current.has(pageId)
+      ) {
+        setSave("saving");
+      }
     }
   };
 

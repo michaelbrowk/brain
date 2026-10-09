@@ -3,9 +3,12 @@ import { Schema } from "@milkdown/kit/prose/model";
 import { EditorState } from "@milkdown/kit/prose/state";
 import { EditorView } from "@milkdown/kit/prose/view";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { getDocumentHeadings } from "@/lib/page-filing";
+import { wholeDocumentWalks } from "./editor-stack.harness";
 import {
   BRAIN_PAGE_REF_FILED_CLASS,
   docHasPageRef,
+  documentHeadingsPlugin,
   documentSections,
   FILED_FLASH_CLEAR_MS,
   filePageRefTransaction,
@@ -459,5 +462,65 @@ describe("the confirming flash", () => {
 
     vi.advanceTimersByTime(FILED_FLASH_CLEAR_MS - 400);
     expect(flashing(view)).toBeNull();
+  });
+});
+
+describe("the section list the tail offers", () => {
+  const mounted: EditorView[] = [];
+
+  afterEach(() => {
+    for (const view of mounted.splice(0)) view.destroy();
+  });
+
+  function mount(body: ReturnType<typeof doc>) {
+    const place = document.body.appendChild(document.createElement("div"));
+    const view = new EditorView(place, {
+      state: EditorState.create({ doc: body, plugins: [documentHeadingsPlugin()] }),
+      handleScrollToSelection: () => true,
+    });
+    mounted.push(view);
+    return view;
+  }
+
+  const names = () => getDocumentHeadings().map((heading) => heading.text);
+
+  it("publishes the sections on mount and takes them down on destroy", () => {
+    const view = mount(doc(heading(1, "Reading"), prose("A"), heading(2, "Later")));
+    expect(getDocumentHeadings()).toEqual([
+      { index: 0, depth: 1, text: "Reading" },
+      { index: 1, depth: 2, text: "Later" },
+    ]);
+    view.destroy();
+    mounted.splice(0);
+    expect(getDocumentHeadings()).toEqual([]);
+  });
+
+  it("keeps the published list, and walks nothing, while a paragraph is typed into", () => {
+    // "Reading" is 0..9, "A" is 9..12: the keystroke lands inside the paragraph.
+    const view = mount(doc(heading(1, "Reading"), prose("A")));
+    const before = getDocumentHeadings();
+    const walks = wholeDocumentWalks(() => {
+      view.dispatch(view.state.tr.insertText("x", 10));
+    });
+    expect(walks).toBe(0);
+    expect(getDocumentHeadings()).toBe(before);
+  });
+
+  it("follows a heading's text, its level, and a paragraph that becomes one", () => {
+    const view = mount(doc(heading(1, "Reading"), prose("A")));
+    view.dispatch(view.state.tr.insertText("Re-", 1));
+    expect(names()).toEqual(["Re-Reading"]);
+    view.dispatch(view.state.tr.setNodeAttribute(0, "level", 3));
+    expect(getDocumentHeadings()[0].depth).toBe(3);
+    view.dispatch(view.state.tr.setBlockType(13, 13, schema.nodes.heading, { level: 2 }));
+    expect(names()).toEqual(["Re-Reading", "A"]);
+  });
+
+  it("follows a split that makes a new section and a deletion that takes one away", () => {
+    const view = mount(doc(heading(1, "Reading"), prose("A")));
+    view.dispatch(view.state.tr.split(4));
+    expect(names()).toEqual(["Rea", "ding"]);
+    view.dispatch(view.state.tr.delete(0, 5));
+    expect(names()).toEqual(["ding"]);
   });
 });

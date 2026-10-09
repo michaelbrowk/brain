@@ -23,7 +23,6 @@ import {
   dropIndicatorState,
 } from "@milkdown/kit/plugin/cursor";
 import type { Ctx } from "@milkdown/kit/ctx";
-import { listener, listenerCtx } from "@milkdown/kit/plugin/listener";
 import { NodeSelection, Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import { Milkdown, MilkdownProvider, useEditor } from "@milkdown/react";
@@ -33,6 +32,7 @@ import { callout, CALLOUT_EMOJI_EVENT, type CalloutEmojiEventDetail } from "./ca
 import { columns } from "./columns";
 import { emptyBlocks } from "./empty-block";
 import { columnDrop } from "./column-drop";
+import { createDeferredSerializer, deferredSerialize } from "./deferred-serialize";
 import {
   editingCore,
   focusDocumentEnd,
@@ -444,6 +444,10 @@ function Inner({
     const serialize = ctx.get(serializerCtx);
     emitMarkdown(serialize(view.state.doc));
   }, [emitMarkdown]);
+  // The serialize that follows a pause in typing, at an idle moment rather
+  // than on a fixed timer (`deferred-serialize.ts` says why and what it
+  // costs). The flush below drops what it has scheduled.
+  const serializeLater = useMemo(() => createDeferredSerializer(), []);
   // Milkdown's markdown listener intentionally waits 200ms. Marking the editor
   // dirty in filterTransaction is synchronous and cheap, so SSE cannot replace
   // a just-typed document during that serialization window.
@@ -526,12 +530,6 @@ function Inner({
               : {}),
           }),
         });
-        ctx
-          .get(listenerCtx)
-          .markdownUpdated((_, md, prev) => {
-            if (md !== prev) emitMarkdown(md);
-          })
-          .blur(notifyFromContext);
         // Navigation and every Shell-driven remount serialize through the
         // registered flush callback before teardown. Milkdown removes the
         // serializer context before destroy listeners run, so serializing from
@@ -598,7 +596,9 @@ function Inner({
           notifyLossyLoad();
         }),
       )
-      .use(listener),
+      // Built with the editor, so it holds the callback of the render that
+      // built it, exactly as the blur listener it replaces did.
+      .use(deferredSerialize(serializeLater, notifyFromContext)),
   );
 
   useEffect(() => {
@@ -759,13 +759,16 @@ function Inner({
   useEffect(() => {
     if (!registerFlush) return;
     return registerFlush(() => {
+      // A flush serializes now, so a serialize still waiting for an idle
+      // moment would only repeat it.
+      serializeLater.drop();
       if (editorSession.isSerializationBlocked()) {
         onSerialized?.();
         return;
       }
       get()?.action(notifyFromContext);
     });
-  }, [editorSession, get, notifyFromContext, onSerialized, registerFlush]);
+  }, [editorSession, get, notifyFromContext, onSerialized, registerFlush, serializeLater]);
 
   // prosemirror-dropcursor removes its line when drop/dragend reach the editor
   // DOM. Our capture handlers stopPropagation for image/file uploads, and a

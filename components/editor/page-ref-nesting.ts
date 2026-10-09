@@ -4,6 +4,7 @@ import type { EditorView } from "@milkdown/kit/prose/view";
 import { $prose } from "@milkdown/kit/utils";
 import { resolveDropZone } from "@/lib/drop-zone";
 import type { TreeNode } from "@/lib/store/types";
+import { removedContentHas } from "./changed-ranges";
 import { isBlockLaneDepth, isBlockLaneElement } from "./columns";
 
 const COLUMN_SIDE_ZONE_PX = 20;
@@ -264,6 +265,10 @@ function occurrenceBefore(doc: ProseNode, id: string, pos: number): number {
     if (candidatePos < pos && candidate === id) occurrence += 1;
   });
   return occurrence;
+}
+
+function isPageRefNode(node: ProseNode): boolean {
+  return node.type.name === "page_ref";
 }
 
 function pageRefCounts(doc: ProseNode): Map<string, number> {
@@ -575,7 +580,20 @@ export function createPageRefNesting(
   onAccepted?: () => void,
   onRequestRemove?: RequestRemovePageRef,
 ) {
-  return $prose(() => {
+  return $prose(() =>
+    createPageRefNestingPlugin(onReparent, initiallyFrozen, onAccepted, onRequestRemove),
+  );
+}
+
+/** The plugin itself, reachable without an editor so a test can put a
+ *  transaction through its guard. */
+export function createPageRefNestingPlugin(
+  onReparent: ReparentPageRef,
+  initiallyFrozen = false,
+  onAccepted?: () => void,
+  onRequestRemove?: RequestRemovePageRef,
+): Plugin {
+  {
     let documentFrozen = initiallyFrozen;
     let unfreeze: (() => void) | null = null;
     let titleDragging = false;
@@ -680,6 +698,10 @@ export function createPageRefNesting(
       filterTransaction: (transaction, state) => {
         if (documentFrozen && transaction.docChanged) return false;
         if (!transaction.docChanged || !onRequestRemove) return true;
+        // A row can only go with content a step replaced. Reading those
+        // ranges first keeps the count below, which walks the whole document
+        // three times, off every keystroke that touches no ref at all.
+        if (!removedContentHas(transaction, isPageRefNode)) return true;
         const removed = findRemovedStandalonePageRef(
           state.doc,
           transaction.doc,
@@ -785,5 +807,5 @@ export function createPageRefNesting(
         },
       },
     });
-  });
+  }
 }

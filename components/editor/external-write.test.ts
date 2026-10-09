@@ -7,14 +7,18 @@
  *  write is not an undo step: the writer's own steps stay undoable around
  *  it. */
 
-import { parserCtx } from "@milkdown/kit/core";
+import { Editor, defaultValueCtx, editorViewCtx, parserCtx, rootCtx } from "@milkdown/kit/core";
+import { commonmark } from "@milkdown/kit/preset/commonmark";
+import { gfm } from "@milkdown/kit/preset/gfm";
+import type { EditorView } from "@milkdown/kit/prose/view";
 import { undo, undoDepth } from "@milkdown/kit/prose/history";
 import { TextSelection, type Transaction } from "@milkdown/kit/prose/state";
 import { ReplaceStep } from "@milkdown/kit/prose/transform";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mountFullStack, type MountedStack } from "./editor-stack.harness";
 import { applyExternalMarkdown, EXTERNAL_WRITE_META } from "./external-write";
-import { setPageRefOrigin, syncLivePageInfo } from "./page-ref";
+import { pageRef, setPageRefOrigin, syncLivePageInfo } from "./page-ref";
+import { createPageRefNesting } from "./page-ref-nesting";
 
 const BASE = ["First paragraph.", "Second paragraph.", "Third paragraph."].join("\n\n");
 
@@ -146,5 +150,41 @@ describe("an external write applied in place", () => {
     expect(applyExternalMarkdown(stack.view, parse, next)).toBe("applied");
     expect(stack.serialize().trim()).toBe(next);
     expect(stack.view.state.selection.head).toBe(textPos("Third") + 2);
+  });
+});
+
+describe("an external write that drops a page row", () => {
+  afterEach(() => {
+    syncLivePageInfo();
+    setPageRefOrigin("");
+    document.body.replaceChildren();
+  });
+
+  it("applies without asking the writer to confirm a removal they never made", async () => {
+    setPageRefOrigin("http://localhost:3000");
+    syncLivePageInfo([{ id: "abc123", title: "Page", icon: "" }]);
+    const root = document.createElement("div");
+    document.body.append(root);
+    const asked: unknown[] = [];
+    const editor = await Editor.make()
+      .config((ctx) => {
+        ctx.set(rootCtx, root);
+        ctx.set(defaultValueCtx, "A\n\n[Page](/p/abc123)\n\nB");
+      })
+      .use(commonmark)
+      .use(gfm)
+      .use(pageRef)
+      .use(createPageRefNesting(() => null, false, () => {}, (removed) => asked.push(removed)))
+      .create();
+    const view = editor.ctx.get(editorViewCtx) as EditorView;
+    const result = applyExternalMarkdown(
+      view,
+      (markdown) => editor.ctx.get(parserCtx)(markdown),
+      "A\n\nB",
+    );
+    expect(asked).toEqual([]);
+    expect(result).toBe("applied");
+    expect(view.state.doc.textContent).toBe("AB");
+    await editor.destroy();
   });
 });

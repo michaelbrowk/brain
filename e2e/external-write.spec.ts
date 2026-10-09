@@ -355,3 +355,24 @@ test("a key typed while the previous save is out survives a write from elsewhere
     await device.close();
   }
 });
+
+test("a write elsewhere that drops a page row asks this tab nothing", async ({
+  page,
+  browser,
+}) => {
+  await login(page);
+  const child = await makePage(page, "Row child", "child");
+  const id = await makePage(page, "Row parent", `Alpha.\n\n[Row child](/p/${child})\n\nOmega.`);
+  const content = await openPage(page, id);
+  const device = await otherDevice(browser);
+  try {
+    await writeFrom(device.page, id, "Alpha.\n\nOmega.");
+    await expect(content).not.toContainText("Row child");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(page.getByRole("alertdialog")).toHaveCount(0);
+    await sameEditor(content);
+    expect(await serverBody(page, id)).toBe("Alpha.\n\nOmega.");
+  } finally {
+    await device.close();
+  }
+});

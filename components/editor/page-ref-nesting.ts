@@ -5,6 +5,7 @@ import { $prose } from "@milkdown/kit/utils";
 import { resolveDropZone } from "@/lib/drop-zone";
 import type { TreeNode } from "@/lib/store/types";
 import { removedContentHas } from "./changed-ranges";
+import { EXTERNAL_WRITE_META } from "./external-write";
 import { isBlockLaneDepth, isBlockLaneElement } from "./columns";
 
 const COLUMN_SIDE_ZONE_PX = 20;
@@ -698,6 +699,10 @@ export function createPageRefNestingPlugin(
       filterTransaction: (transaction, state) => {
         if (documentFrozen && transaction.docChanged) return false;
         if (!transaction.docChanged || !onRequestRemove) return true;
+        // A row that went with a write made elsewhere (another device, an
+        // agent) was removed there: the confirmation is for a removal the
+        // writer makes here, and asking it of them would refuse the write.
+        if (transaction.getMeta(EXTERNAL_WRITE_META) === true) return true;
         // A row can only go with content a step replaced. Reading those
         // ranges first keeps the count below, which walks the whole document
         // three times, off every keystroke that touches no ref at all.

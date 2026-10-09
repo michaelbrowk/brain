@@ -1389,15 +1389,23 @@ export function Shell({
   // reload the open page from disk if it changed externally (MCP / another tab).
   // A rev match means it was our own write — skip it (no self-reload flicker).
   const reloadCurrent = useCallback(
-    async (id: string) => {
+    async function reload(id: string, retries = 2): Promise<void> {
       const revisionAtRequest = revisionsRef.current.get(id);
       const r = await apiFetch(`/api/page/${id}`);
       if (!r.ok) return;
       const p = await r.json();
       // A PUT or a newer GET may finish while this response is in flight. The
       // old body must not replace either the cache or the live editor after its
-      // request baseline has advanced.
-      if (revisionsRef.current.get(id) !== revisionAtRequest) return;
+      // request baseline has advanced. That baseline may have moved to a body
+      // older than this answer (two writes back to back, their reads
+      // overlapping), so a read that still differs is asked again rather
+      // than dropped, a bounded number of times.
+      if (revisionsRef.current.get(id) !== revisionAtRequest) {
+        if (p.rev !== revisionsRef.current.get(id) && retries > 0) {
+          await reload(id, retries - 1);
+        }
+        return;
+      }
       if (p.rev === revisionsRef.current.get(id)) return;
       const loaded: LoadedPage = {
         id,

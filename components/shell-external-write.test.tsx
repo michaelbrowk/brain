@@ -140,7 +140,7 @@ describe("a write to the open page from somewhere else", () => {
   let heldPuts: Array<() => void>;
   let holdPuts: boolean;
   let heldGets: Array<() => void>;
-  let holdGets: boolean;
+  let holdGets: number;
   let heldPosts: Array<() => void>;
   let holdPosts: boolean;
 
@@ -175,7 +175,7 @@ describe("a write to the open page from somewhere else", () => {
     heldPuts = [];
     holdPuts = false;
     heldGets = [];
-    holdGets = false;
+    holdGets = 0;
     heldPosts = [];
     holdPosts = false;
     apiFetchMock.mockReset();
@@ -224,19 +224,15 @@ describe("a write to the open page from somewhere else", () => {
           }
           return Promise.resolve(writePut(body));
         }
-        if (holdGets) {
-          holdGets = false;
-          return new Promise<Response>((resolve) =>
-            heldGets.push(() =>
-              resolve(
-                response({
-                  meta: { id: "note", title: "Note" },
-                  markdown: server.markdown,
-                  rev: `rev-${server.rev}`,
-                }),
-              ),
-            ),
-          );
+        if (holdGets > 0) {
+          holdGets -= 1;
+          // Answered later with what the server held when it was asked.
+          const answer = response({
+            meta: { id: "note", title: "Note" },
+            markdown: server.markdown,
+            rev: `rev-${server.rev}`,
+          });
+          return new Promise<Response>((resolve) => heldGets.push(() => resolve(answer)));
         }
         return Promise.resolve(
           response({
@@ -503,7 +499,7 @@ describe("a write to the open page from somewhere else", () => {
   /** Press a way out whose read of the other version is held, type while it
    *  is out, then let the read answer. */
   async function pressAndTypeDuringRead(name: string, typed: string) {
-    holdGets = true;
+    holdGets = 1;
     const target = button(name);
     if (!target) throw new Error(`no button ${name}`);
     await act(async () => target.click());
@@ -584,5 +580,24 @@ describe("a write to the open page from somewhere else", () => {
     await advance(2_000);
     expect(puts.slice(before)).toEqual([]);
     expect(server.markdown).toBe("Base, theirs");
+  });
+
+  it("two writes back to back, answered in order, leave the newer one", async () => {
+    await open("Base");
+    holdGets = 2;
+    await writeElsewhere("Base 1");
+    await writeElsewhere("Base 2");
+    expect(heldGets).toHaveLength(2);
+    await act(async () => heldGets.shift()!());
+    await settle();
+    await act(async () => heldGets.shift()!());
+    await settle();
+    await flushFrames();
+
+    expect(editorHarness.holds).toBe("Base 2");
+    await type("Base 2, mine");
+    await advance(800);
+    expect(server.markdown).toBe("Base 2, mine");
+    expect(conflictShown()).toBe(false);
   });
 });

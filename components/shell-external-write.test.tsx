@@ -139,6 +139,8 @@ describe("a write to the open page from somewhere else", () => {
 
   let heldPuts: Array<() => void>;
   let holdPuts: boolean;
+  let heldGets: Array<() => void>;
+  let holdGets: boolean;
 
   /** The store's rule: the rev or the base body is current, or a 409. */
   function writePut(body: { markdown?: string; rev?: string; baseMarkdown?: string }) {
@@ -170,6 +172,8 @@ describe("a write to the open page from somewhere else", () => {
     editorHarness.refuse = false;
     heldPuts = [];
     holdPuts = false;
+    heldGets = [];
+    holdGets = false;
     apiFetchMock.mockReset();
     resetTasksStore();
     window.history.replaceState({}, "", "/p/note");
@@ -215,6 +219,20 @@ describe("a write to the open page from somewhere else", () => {
             );
           }
           return Promise.resolve(writePut(body));
+        }
+        if (holdGets) {
+          holdGets = false;
+          return new Promise<Response>((resolve) =>
+            heldGets.push(() =>
+              resolve(
+                response({
+                  meta: { id: "note", title: "Note" },
+                  markdown: server.markdown,
+                  rev: `rev-${server.rev}`,
+                }),
+              ),
+            ),
+          );
         }
         return Promise.resolve(
           response({
@@ -463,5 +481,47 @@ describe("a write to the open page from somewhere else", () => {
     expect(window.location.pathname).toBe("/p/note");
     expect(conflictShown()).toBe(false);
     await savesAgain("Base, theirs");
+  });
+
+  function drafts() {
+    return Object.keys(localStorage)
+      .filter((key) => key.startsWith("brain-draft"))
+      .map((key) => localStorage.getItem(key) ?? "");
+  }
+
+  /** Press a way out whose read of the other version is held, type while it
+   *  is out, then let the read answer. */
+  async function pressAndTypeDuringRead(name: string, typed: string) {
+    holdGets = true;
+    const target = button(name);
+    if (!target) throw new Error(`no button ${name}`);
+    await act(async () => target.click());
+    await settle();
+    expect(heldGets).toHaveLength(1);
+    await type(typed);
+    await act(async () => heldGets.shift()!());
+    await settle();
+    await flushFrames();
+    await advance(0);
+  }
+
+  it("Take theirs keeps text typed while it read the other version", async () => {
+    await inConflict();
+    await pressAndTypeDuringRead("Take theirs", "Base, mine and typed during the read");
+
+    expect(editorHarness.applied).toEqual([]);
+    expect(conflictShown()).toBe(true);
+    expect(drafts().join("")).toContain("Base, mine and typed during the read");
+    expect(server.markdown).toBe("Base, theirs");
+  });
+
+  it("Save a copy keeps text typed while it read the other version", async () => {
+    await inConflict();
+    await pressAndTypeDuringRead("Save a copy", "Base, mine plus typed after the copy");
+
+    expect(posts.map((post) => post.markdown)).toEqual(["Base, mine"]);
+    expect(editorHarness.applied).toEqual([]);
+    expect(conflictShown()).toBe(true);
+    expect(drafts().join("")).toContain("Base, mine plus typed after the copy");
   });
 });

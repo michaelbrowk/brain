@@ -158,6 +158,7 @@ import {
   loadedPageFromResponse,
   navigationPresenceReducer,
   PAGE_CACHE_CAP,
+  NEWER_EDITS_KEPT,
   PAGE_REF_BODY_CHANGED,
   PAGE_REF_READBACK_FAILED,
   RECENT_LIMIT,
@@ -4034,10 +4035,25 @@ export function Shell({
 
   /** The other version wins: it becomes this tab's base and goes into the
    *  live editor in place, and the local text is let go of, draft and latch
-   *  together, because the writer chose that. */
+   *  together, because the writer chose that. What the writer chose to let
+   *  go of is the local text as it stood at the press (`chosenOperation`, the
+   *  pending edit then, null for none): text typed while the other version
+   *  was being read is newer than the choice, so nothing is taken, the page
+   *  stays in conflict and the answer is false. */
   const takeServerBody = useCallback(
-    (id: string, latest: LoadedPage) => {
+    (id: string, latest: LoadedPage, chosenOperation: string | null) => {
+      // The keystrokes the editor has not handed over yet count too.
+      if (selectedIdRef.current === id) editorFlushRef.current();
       const pending = pendingRef.current?.id === id ? pendingRef.current : null;
+      if ((pending?.operationId ?? null) !== chosenOperation) return false;
+      // The editor answers before anything is let go of: a refusal remounts
+      // it on the body below, and an edit it still held is newer text.
+      let remount = false;
+      if (selectedIdRef.current === id) {
+        const applied = applyToLiveEditor(id, latest.markdown);
+        if (applied === "dirty") return false;
+        remount = applied === "refused";
+      }
       if (pending) clearDraftOperation(id, pending.operationId);
       try {
         const key = draftStorageKey(id);
@@ -4052,7 +4068,7 @@ export function Shell({
       cachePut(latest);
       clearLocalRecoveryUnavailable(id);
       setRecoveryMessage((current) => (current?.id === id ? null : current));
-      if (selectedIdRef.current !== id) return;
+      if (selectedIdRef.current !== id) return true;
       if (timer.current) clearTimeout(timer.current);
       timer.current = null;
       setPage((current) =>
@@ -4060,8 +4076,9 @@ export function Shell({
           ? { ...current, markdown: latest.markdown, rev: latest.rev }
           : current,
       );
-      if (applyToLiveEditor(id, latest.markdown) === "refused") setEditorEpoch((e) => e + 1);
+      if (remount) setEditorEpoch((e) => e + 1);
       setSave("idle");
+      return true;
     },
     [applyToLiveEditor, cachePut, clearDraftOperation, clearLocalRecoveryUnavailable],
   );
@@ -4078,6 +4095,9 @@ export function Shell({
     conflictChoiceRef.current = id;
     setConflictChoice({ id, kind: "theirs" });
     try {
+      // The local text the writer lets go of is the text at the press.
+      editorFlushRef.current();
+      const chosen = pendingRef.current?.id === id ? pendingRef.current.operationId : null;
       const latest = await readServerPage(id);
       if (!conflictedPagesRef.current.has(id)) return;
       if (!latest) {
@@ -4087,7 +4107,9 @@ export function Shell({
         });
         return;
       }
-      takeServerBody(id, latest);
+      if (!takeServerBody(id, latest, chosen)) {
+        setRecoveryMessage({ id, text: NEWER_EDITS_KEPT });
+      }
     } finally {
       if (conflictChoiceRef.current === id) conflictChoiceRef.current = null;
       setConflictChoice((current) => (current?.id === id ? null : current));
@@ -4123,7 +4145,7 @@ export function Shell({
       const pending = pendingRef.current?.id === id ? pendingRef.current : null;
       if (!pending) {
         // Nothing local is left to keep: the draft went with an earlier copy.
-        takeServerBody(id, latest);
+        takeServerBody(id, latest, null);
         return;
       }
       // Mine goes over the version just read: that body becomes the base and
@@ -4268,7 +4290,7 @@ export function Shell({
       setRecoveryMessage((current) => (current?.id === sourceId ? null : current));
       setRecoveryCopyId((current) => (current === sourceId ? null : current));
       await refreshTree().catch(() => {});
-      showToast("Copy saved. Newer edits are still in your local draft.");
+      showToast(`Copy saved. ${NEWER_EDITS_KEPT}`);
       return;
     }
     // The copy holds the local text, so the page itself takes the other
@@ -4278,8 +4300,16 @@ export function Shell({
     await refreshTree().catch(() => {});
     const openCopy = () => select(copyId);
     if (latest && conflictedPagesRef.current.has(sourceId)) {
-      takeServerBody(sourceId, latest);
-      showToast("Draft saved as a copy", { actionLabel: "Open", onAction: openCopy });
+      if (takeServerBody(sourceId, latest, draft.operationId)) {
+        showToast("Draft saved as a copy", { actionLabel: "Open", onAction: openCopy });
+      } else {
+        // Typed while the other version was read: the copy has the text up
+        // to the press, the page keeps the rest and stays in conflict.
+        showToast(`Copy saved. ${NEWER_EDITS_KEPT}`, {
+          actionLabel: "Open",
+          onAction: openCopy,
+        });
+      }
       return;
     }
     // The other version could not be read: the page leaves the conflict

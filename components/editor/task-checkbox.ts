@@ -32,6 +32,7 @@ import { isLinkedTask, type TaskView } from "@/lib/tasks/model";
 import { reconcilePageTasks } from "@/lib/tasks/reconcile";
 import { normalizeTaskText, parseTaskLines } from "@/lib/tasks/task-lines";
 
+import { editsStayInsideTextblocks } from "./changed-ranges";
 import { shouldFlipAbove } from "./menu-position";
 
 /** A real control on a task list item.
@@ -225,7 +226,8 @@ const MENU_EXIT_MS = DUR.fast * 1000;
 const MENU_GAP = 6;
 const EDGE_GUTTER = 8;
 
-const promoteKey = new PluginKey<PromoteState>("brainTaskPromote");
+/** Exported for the tests that compare the mapped marks with a rebuild. */
+export const promoteKey = new PluginKey<PromoteState>("brainTaskPromote");
 
 /** What joins one task line's text to the next when the plugin asks whether
  *  the list it is looking at is the list it looked at last.
@@ -311,6 +313,22 @@ function openPageId(): string | null {
   return (
     classifyInternalPageLink(window.location.pathname, window.location.origin)?.id ?? null
   );
+}
+
+/** Whether a position stands inside the line of a task item: the first
+ *  paragraph of a `list_item` that carries a checkbox. */
+function isTaskLineAt($inside: ResolvedPos): boolean {
+  if ($inside.depth < 2 || !$inside.parent.isTextblock) return false;
+  return isTaskItem($inside.node($inside.depth - 1)) && $inside.index($inside.depth - 1) === 0;
+}
+
+/** Whether a selection lies within one task line, which is the condition a
+ *  mark is shown under (`markDecorations`), read from the document rather
+ *  than from the list of every item. */
+function selectionInTaskLine(doc: ProseNode, selection: { from: number; to: number }): boolean {
+  if (selection.from < 0 || selection.from > doc.content.size) return false;
+  const $from = doc.resolve(selection.from);
+  return isTaskLineAt($from) && selection.to <= $from.end();
 }
 
 function taskItemsOf(doc: ProseNode): TaskItem[] {
@@ -448,7 +466,7 @@ export const taskPromote = $prose((ctx) => {
           },
           true,
         ),
-      apply: (tr, value, _old, state) => {
+      apply: (tr, value, old, state) => {
         const message = tr.getMeta(promoteKey) as PromoteMessage | undefined;
         let next = value;
         let rebind = false;
@@ -472,6 +490,22 @@ export const taskPromote = $prose((ctx) => {
         const redraw = message?.kind === "day";
         if (!rebind && !redraw && next === value && !tr.docChanged && !tr.selectionSet) {
           return value;
+        }
+        // A keystroke, or a caret move, away from every task line changes
+        // no line and shows no mark: the marks keep their words, and only
+        // their positions move with the document. Rebuilding them read
+        // every item of the page on every transaction.
+        if (
+          !rebind &&
+          !redraw &&
+          message === undefined &&
+          !selectionInTaskLine(old.doc, old.selection) &&
+          !selectionInTaskLine(state.doc, state.selection)
+        ) {
+          if (!tr.docChanged) return next;
+          if (editsStayInsideTextblocks(tr, (_line, $inside) => isTaskLineAt($inside))) {
+            return { ...next, decorations: next.decorations.map(tr.mapping, tr.doc) };
+          }
         }
         return build(state.doc, state.selection, next, rebind);
       },
@@ -624,7 +658,7 @@ function markDecorations(
     if (id !== undefined && task !== undefined) {
       const when = task.when === undefined ? undefined : String(task.when);
       decorations.push(
-        markWidget(item, promote, {
+        markWidget(index, item, promote, {
           word: item.checked ? "Done" : listWord(when, today, tomorrow),
           taskId: id,
           shown: true,
@@ -635,7 +669,7 @@ function markDecorations(
     // Nothing to name a task after yet.
     if (item.text === "") continue;
     decorations.push(
-      markWidget(item, promote, {
+      markWidget(index, item, promote, {
         word: "+ Task",
         taskId: null,
         shown:
@@ -655,6 +689,7 @@ interface MarkOptions {
 }
 
 function markWidget(
+  index: number,
   item: TaskItem,
   promote: PromoteContext,
   options: MarkOptions,
@@ -663,10 +698,15 @@ function markWidget(
     // After the words, never before them, and carrying none of their marks.
     side: 1,
     marks: [],
-    // The position leads the key. Two ghosts on two lines are otherwise the
-    // same widget to prosemirror-view, which keeps the first one's DOM for
-    // the second and lets a click land on the wrong line.
-    key: `${item.pos}:${options.taskId ?? "ghost"}:${options.word}:${
+    // The line's place in document order leads the key. Two ghosts on two
+    // lines are otherwise the same widget to prosemirror-view, which keeps
+    // the first one's DOM for the second and lets a click land on the wrong
+    // line. The place, not the position: a keystroke above the line moves
+    // its position and the set is mapped rather than rebuilt (`apply`), so a
+    // key that named the position would name a stale one, and the next
+    // rebuild would then redraw every mark below the caret, detaching the
+    // trigger a popover is open from.
+    key: `${index}:${options.taskId ?? "ghost"}:${options.word}:${
       options.shown ? "on" : "off"
     }`,
     ignoreSelection: true,

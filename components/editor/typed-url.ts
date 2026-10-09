@@ -1,7 +1,7 @@
 import { InputRule } from "@milkdown/kit/prose/inputrules";
 import { type EditorState, Plugin, PluginKey, TextSelection } from "@milkdown/kit/prose/state";
 import { $inputRule, $prose } from "@milkdown/kit/utils";
-import { pasteLinkCard } from "./link-preview";
+import { LINK_CARD_NODE, pasteLinkCard } from "./link-preview";
 import { webHrefFromInput } from "./web-link";
 
 /** A URL TYPED INTO THE LINE IS A LINK AS SOON AS IT IS FINISHED.
@@ -66,13 +66,13 @@ function typedUrlBefore(state: EditorState, end: number) {
 /** A space typed after an address links the address, and the space stays
  *  plain so the next word does not join the link. The rule puts the typed
  *  space in itself: an input rule that answers replaces the browser's own
- *  insertion. Only a typed space or tab: the input-rule plugin also runs
+ *  insertion. Any space but a newline: the input-rule plugin also runs
  *  every rule for Enter with a newline, modifier or not, and Enter is the
  *  handler below's. */
 export const typedUrlInputRule = $inputRule(
   () =>
     new InputRule(
-      new RegExp(`(?:^|[\\s(*_~])(?:https?:\\/\\/|www\\.)\\S*([ \\t\\u00a0])$`, "i"),
+      new RegExp(`(?:^|[\\s(*_~])(?:https?:\\/\\/|www\\.)\\S*([^\\S\\n])$`, "i"),
       (state, match, _start, end) => {
         const found = typedUrlBefore(state, state.selection.from);
         if (!found) return null;
@@ -102,10 +102,13 @@ export const typedUrlEnter = $prose(
           const found = typedUrlBefore(view.state, selection.from);
           if (!found) return false;
           const line = found.$end.parent;
-          if (line.textContent === found.url && selection.from === found.$end.end()) {
+          if (!event.shiftKey && line.textContent === found.url && selection.from === found.$end.end()) {
             const whole = TextSelection.create(view.state.doc, found.$end.start(), found.$end.end());
             const card = pasteLinkCard(view.state.apply(view.state.tr.setSelection(whole)), found.url);
-            if (card) {
+            // A line that cannot hold a card (a heading, a list item's first
+            // line, a table cell) gets the paste's inline link instead, and
+            // that one must still let the line split.
+            if (card?.doc.nodeAt(found.$end.before())?.type.name === LINK_CARD_NODE) {
               view.dispatch(card);
               return true;
             }

@@ -439,6 +439,33 @@ describe("a typed address, round 2 (L1, L3, M3, M5, M6, M20)", () => {
     expect(links(plain.view)).toEqual([{ text: "https://a.example", href: "https://a.example" }]);
   });
 
+  it("alone on a line that cannot take a card, Enter links it and splits the line as before", async () => {
+    for (const start of ["# ", "* ", "1. "]) {
+      const { view, markdown } = await mount(`${start}x`);
+      select(view, "x");
+      type(view, "https://a.example");
+      key(view, "Enter");
+      type(view, "next");
+      expect(links(view), start).toEqual([{ text: "https://a.example", href: "https://a.example" }]);
+      // The word typed after Enter is on a line of its own.
+      expect(view.state.selection.$from.parent.textContent, start).toBe("next");
+      expect(markdown(), start).not.toMatch(/example>?next/);
+      expect(shape(view), start).not.toContain("link_card");
+    }
+  });
+
+  it("leaves Shift-Enter to the hard break, and links after a full-width space as after any other", async () => {
+    const { view } = await mount("");
+    type(view, "https://a.example");
+    key(view, "Enter", { shiftKey: true });
+    expect(shape(view)).not.toContain("link_card");
+    expect(links(view)).toEqual([{ text: "https://a.example", href: "https://a.example" }]);
+
+    const wide = await mount("");
+    type(wide.view, "see https://b.example　");
+    expect(links(wide.view)).toEqual([{ text: "https://b.example", href: "https://b.example" }]);
+  });
+
   it("does nothing inside inline code, and nothing for Enter with a modifier", async () => {
     const code = await mount("`code https://a.example` tail");
     caret(code.view, after(code.view, "a.example"));

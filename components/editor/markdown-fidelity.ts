@@ -64,7 +64,7 @@ import { attachmentLinkSchema } from "./attachment-refs";
 /* ------------------------------------------------------------------------ */
 
 type Positioned = MarkdownNode & {
-  position?: { start?: { offset?: number }; end?: { offset?: number } };
+  position?: { start?: { offset?: number; column?: number }; end?: { offset?: number } };
 };
 
 function offsets(node: Positioned): [number, number] | null {
@@ -128,13 +128,25 @@ function readShapes(node: Positioned, source: string) {
       case "link":
         node.form = head === "<" ? "angle" : head === "[" ? "resource" : "literal";
         break;
-      case "table":
+      case "table": {
         // The whole table, bytes and all: column padding is the writer's,
         // and it is written back as long as no cell changed.
         // The store folds CRLF on the way in; the kept bytes must too, or a
         // CRLF file's table came back with the one block that still had CR.
-        node.source = source.slice(start, end).replace(/\r\n?/g, "\n");
+        const lines = source.slice(start, end).replace(/\r\n?/g, "\n").split("\n");
+        // Inside a list item the rows after the first carry the item's
+        // indent, and the item writes its indent again in front of what it
+        // is given: kept with it, the table moved right on every save until
+        // it stopped being a table. The container's prefix comes off; a row
+        // without it (a blockquote's `>`, a lazy line) has no plain prefix to
+        // take off, and the table is written normally instead.
+        const indent = " ".repeat(Math.max(0, (node.position?.start?.column ?? 1) - 1));
+        const rows = lines.slice(1);
+        node.source = rows.every((line) => line.startsWith(indent))
+          ? [lines[0], ...rows.map((line) => line.slice(indent.length))].join("\n")
+          : "";
         break;
+      }
       default:
         break;
     }

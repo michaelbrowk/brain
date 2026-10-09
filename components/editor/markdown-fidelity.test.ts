@@ -263,6 +263,33 @@ describe("round three: links under one mark, empty items, cells, trailing spaces
   });
 });
 
+describe("round four: tables in items, page refs, empty marks", () => {
+  it("keeps a table inside a list item in place across four saves", async () => {
+    for (const input of [
+      "- x\n\n  | a |\n  | --- |\n  | b |",
+      "1. x\n\n   | a |\n   | --- |\n   | b |",
+      "- x\n  | a |\n  | --- |\n  | b |",
+      "-\n  | a |\n  | --- |\n  | b |",
+    ]) {
+      let md = input;
+      const saves: string[] = [];
+      for (let save = 0; save < 4; save += 1) {
+        const { view, serialize } = await mount(md);
+        let tables = 0;
+        view.state.doc.descendants((node) => {
+          if (node.type.name === "table") tables += 1;
+        });
+        expect(tables, `${input} save ${save}`).toBe(1);
+        md = serialize();
+        saves.push(md);
+      }
+      // The first save may settle the shape; every save after it is the same.
+      expect(new Set(saves.slice(1)).size, input).toBe(1);
+      expect(saves[1], input).toBe(saves[0]);
+    }
+  });
+});
+
 describe("what an edit does to a kept shape", () => {
   it("writes an emptied setext heading as ATX, not an underline alone", async () => {
     const { view, serialize } = await mount("Title\n=====\n\nbody");

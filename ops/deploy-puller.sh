@@ -18,6 +18,11 @@ metadata_writer_path="$bin_dir/write-release-metadata.mjs"
 transaction_path="$bin_dir/deploy-transaction.mjs"
 mail_health_parser_path="$bin_dir/read-mail-health-commit.mjs"
 mail_runtime_projector_path="$bin_dir/project_mail_runtime.py"
+# How many one-second rounds a restarted release gets to answer healthy.
+# Mail's health waits for every account to open its connection, which took
+# eleven seconds on 2026-10-09; five rounds rolled back the new release and
+# then the old one too.
+health_attempts=30
 current="$base/current"
 bootstrap_marker="$base/.bootstrap-deploy-once"
 transaction_journal="$base/.deploy-transaction.json"
@@ -189,7 +194,7 @@ verify_release_health() {
 wait_for_release_health() {
   local expected="$1"
   local _attempt
-  for _attempt in 1 2 3 4 5; do
+  for (( _attempt = 1; _attempt <= health_attempts; _attempt++ )); do
     if verify_release_health "$expected"; then
       return 0
     fi
@@ -904,7 +909,7 @@ trap 'rollback 143' TERM
 atomic_switch "$release" promote
 restart_release_services
 
-for _attempt in 1 2 3 4 5; do
+for (( _attempt = 1; _attempt <= health_attempts; _attempt++ )); do
   if (( _attempt == 1 )); then
     # The first request initializes and indexes the full notes tree. Later
     # retries remain short so an actual deadlock still reaches rollback.

@@ -4153,7 +4153,10 @@ export function Shell({
       const pending = pendingRef.current?.id === id ? pendingRef.current : null;
       if (!pending) {
         // Nothing local is left to keep: the draft went with an earlier copy.
-        takeServerBody(id, latest, null);
+        // A key typed during the read is newer text, and the page says so.
+        if (!takeServerBody(id, latest, null)) {
+          setRecoveryMessage({ id, text: NEWER_EDITS_KEPT });
+        }
         return;
       }
       // Mine goes over the version just read: that body becomes the base and

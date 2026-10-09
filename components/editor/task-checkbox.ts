@@ -33,7 +33,7 @@ import { reconcilePageTasks } from "@/lib/tasks/reconcile";
 import { normalizeTaskText, parseTaskLines } from "@/lib/tasks/task-lines";
 
 import { editsStayInsideTextblocks } from "./changed-ranges";
-import { shouldFlipAbove } from "./menu-position";
+import { placeCaretMenu } from "./menu-position";
 
 /** A real control on a task list item.
  *
@@ -1076,11 +1076,12 @@ function showMenu(
  *  there is no room below. The same rule the caret-anchored menus use. */
 function place(element: HTMLElement, trigger: HTMLElement): void {
   const rect = trigger.getBoundingClientRect();
-  const above = shouldFlipAbove(
-    { top: rect.top, bottom: rect.bottom },
-    window.innerHeight,
-    element.offsetHeight,
-  );
+  const above =
+    placeCaretMenu(
+      { top: rect.top, bottom: rect.bottom },
+      { top: 0, bottom: window.innerHeight },
+      element.offsetHeight,
+    ).side === "above";
   // THE ROOM ON THE SIDE IT LANDS ON. The popover carries a month grid now,
   // and there are windows that hold neither side of it whole, so the grid
   // scrolls inside the material the way it does under a row. The property is

@@ -489,6 +489,21 @@ describe("Link to page over selected words", () => {
     }
   });
 
+  it("never links a run that is only whitespace, so the file carries no empty-label link", async () => {
+    const { editor, view, markdownNow } = await mount("**a** **b** c");
+    try {
+      const doc = view.state.doc;
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(doc, 1, doc.firstChild!.nodeSize - 1)));
+      view.dispatch(linkSelection(view.state, "https://a.example")!);
+      const saved = markdownNow();
+      expect(saved).not.toMatch(/\[\s*\]\(/);
+      expect(saved).toContain("[a](https://a.example)");
+      expect(saved).toContain("[c](https://a.example)");
+    } finally {
+      await editor.destroy();
+    }
+  });
+
   it("does nothing where the selection holds no words", async () => {
     const { editor, view } = await mount("x [Old](/p/abc123) y");
     try {

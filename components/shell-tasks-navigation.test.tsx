@@ -433,4 +433,42 @@ describe("tasks surface navigation (desktop)", () => {
     );
     expect(document.activeElement).toBe(capture);
   });
+
+  it("leaves the shifted chord alone: Mod-Shift-k is the editor's link field, not the palette", async () => {
+    window.history.replaceState({}, "", "/settings/appearance");
+
+    await act(async () =>
+      root.render(
+        <Shell tree={[]} initialSelectedId={null} initialSurface="settings" />,
+      ),
+    );
+    await settle();
+
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "k",
+          code: "KeyK",
+          metaKey: true,
+          shiftKey: true,
+          bubbles: true,
+        }),
+      );
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    await settle();
+    expect(document.body.querySelector("[cmdk-item]")).toBeNull();
+
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "k", code: "KeyK", metaKey: true, bubbles: true }),
+      );
+    });
+    await findLazy(
+      () => document.body.querySelector<HTMLElement>("[cmdk-item]"),
+      "the palette after the plain chord",
+    );
+  });
 });

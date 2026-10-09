@@ -41,3 +41,13 @@ export function notifyEditorDocChanged() {
   if (typeof window === "undefined") return;
   window.dispatchEvent(new CustomEvent(EDITOR_DOC_CHANGED_EVENT));
 }
+
+/** The writer asked for the link field (Mod-Shift-k in the editor). The key
+ *  is bound in a ProseMirror keymap, where every other editor chord lives;
+ *  the field is the floating toolbar's, which listens for this. */
+export const EDITOR_LINK_FIELD_EVENT = "brain:editor-link-field";
+
+export function notifyEditorLinkField() {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(EDITOR_LINK_FIELD_EVENT));
+}

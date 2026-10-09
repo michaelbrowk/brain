@@ -21,17 +21,38 @@ import {
 } from "@milkdown/kit/preset/commonmark";
 import { toggleStrikethroughCommand, insertTableCommand } from "@milkdown/kit/preset/gfm";
 import { setTextColorCommand, setHighlightCommand } from "./color-mark";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { DEFAULT_PAGE_ICON } from "@/lib/constants";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "../ui/icon";
 import { DUR, EASE_OUT } from "@/lib/motion";
-import { EDITOR_DOC_CHANGED_EVENT, notifyNestedTableBlocked } from "@/lib/editor-events";
+import {
+  EDITOR_DOC_CHANGED_EVENT,
+  EDITOR_LINK_FIELD_EVENT,
+  notifyNestedTableBlocked,
+} from "@/lib/editor-events";
 import { linkSelection } from "./insert-inline";
-import { linkedWordsHref } from "@/lib/internal-page-link";
+import { linkedWordsHref, linkedWordsPageId } from "@/lib/internal-page-link";
 import { isInTable } from "./table-guard";
 import { selectionIsInQuote, selectionIsTask, toggleTaskCommand } from "./task-checkbox";
+import {
+  type LinkRange,
+  hrefForWords,
+  linkRangeAt,
+  removeLink,
+  setLinkHref,
+  webHref,
+} from "./web-link";
+import { setDockedInset } from "./scroll-band";
+import { useTouchDock } from "./touch-dock";
+
+/** The material of a bar docked above the keyboard on a phone: this toolbar
+ *  and the writing bar wear the same one. The safe-area padding is separate
+ *  because only the lowest of two stacked bars reaches the window's edge. */
+export const DOCK_CLASS =
+  "fixed z-[calc(var(--z-drawer)_-_10)] border-t border-line bg-paper py-1 pl-[max(0.25rem,env(safe-area-inset-left))] pr-[max(0.25rem,env(safe-area-inset-right))] shadow-[0_-4px_16px_-8px_rgba(0,0,0,0.25)]";
+export const DOCK_SAFE_BOTTOM = "[padding-bottom:max(0.25rem,env(safe-area-inset-bottom))]";
 
 const COLORS = [
   "red",
@@ -195,6 +216,7 @@ export function FloatingToolbar({
   pages = [],
   ai = false,
   tasks = true,
+  dockOffset = 0,
 }: {
   container: React.RefObject<HTMLDivElement | null>;
   pages?: PageRef[];
@@ -204,12 +226,22 @@ export function FloatingToolbar({
   /** The Tasks module. Off and the Task button is absent, because the
    *  command it runs is not registered with the editor at all. */
   tasks?: boolean;
+  /** On touch, the height of the writing bar standing on the keyboard: this
+   *  toolbar docks on top of it rather than over it. */
+  dockOffset?: number;
 }) {
   const [linkOpen, setLinkOpen] = useState(false);
   const [colorOpen, setColorOpen] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
   const [aiLoading, setAiLoading] = useState<SelectionAiMode | null>(null);
   const [linkQuery, setLinkQuery] = useState("");
+  // The link the field is editing, when it opened over one that is already
+  // there (a click on it, or the caret in it): Enter rewrites its address
+  // over its whole extent, and the rows under the field open or remove it.
+  const [linkEdit, setLinkEdit] = useState<LinkRange | null>(null);
+  // The origin a page address is judged against, read once: the window is
+  // not a value to read while rendering.
+  const [origin] = useState(() => (typeof window === "undefined" ? "" : window.location.origin));
   const [inTable, setInTable] = useState(false);
   const [inQuote, setInQuote] = useState(false);
   const [taskActive, setTaskActive] = useState(false);
@@ -218,28 +250,10 @@ export function FloatingToolbar({
   const raf = useRef<number>(0);
   const barRef = useRef<HTMLDivElement | null>(null);
   const savedRange = useRef<Range | null>(null);
-  // touch = dock the bar above the keyboard; kbInset tracks the keyboard height
-  // via visualViewport (a fixed element sits below the keyboard otherwise)
-  const [isMobile, setIsMobile] = useState(false);
-  const [kbInset, setKbInset] = useState(0);
-  useEffect(() => {
-    const mq = window.matchMedia("(hover: none) and (pointer: coarse)");
-    const onMq = () => setIsMobile(mq.matches);
-    onMq();
-    mq.addEventListener("change", onMq);
-    const vv = window.visualViewport;
-    const onVv = () => {
-      if (vv) setKbInset(Math.max(0, window.innerHeight - (vv.offsetTop + vv.height)));
-    };
-    onVv();
-    vv?.addEventListener("resize", onVv);
-    vv?.addEventListener("scroll", onVv);
-    return () => {
-      mq.removeEventListener("change", onMq);
-      vv?.removeEventListener("resize", onVv);
-      vv?.removeEventListener("scroll", onVv);
-    };
-  }, []);
+  // touch = dock the bar above the keyboard; kbInset is the keyboard's height
+  // (a fixed element sits below the keyboard otherwise)
+  const { isTouch: isMobile, kbInset } = useTouchDock();
+  const reduce = useReducedMotion();
 
   const submenuOpen = linkOpen || colorOpen || aiOpen;
 
@@ -378,28 +392,170 @@ export function FloatingToolbar({
       window.removeEventListener("resize", update);
       vv?.removeEventListener("resize", update);
       vv?.removeEventListener("scroll", update);
-      cancelAnimationFrame(raf.current);
     };
   }, [update]);
 
+  // The frame a placement is waiting on goes only with the toolbar. It used
+  // to go every time the listeners above were re-bound, which is every time
+  // `update` is remade: the frame the layout effect below had just asked for
+  // was cancelled in the same commit, and a field opened with no bar up
+  // (over a link the caret already stood in) never got its place.
+  useEffect(() => () => cancelAnimationFrame(raf.current), []);
+
   // The first pass uses an estimate. Re-run after the portal has measured the
   // actual main bar or submenu, which can have very different dimensions.
+  // The link field can open with no bar up (over a link the caret is in, with
+  // nothing selected), so its opening is a reason to place the bar too.
   useLayoutEffect(() => {
-    if (pos) update();
+    if (pos || linkOpen) update();
     // `pos` intentionally contributes only visibility: depending on its
     // coordinates would turn the measurement correction into a render loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [Boolean(pos), linkOpen, colorOpen, aiOpen, aiLoading, update]);
+
+  // Docked on a phone it stands on the writing bar, so the band the caret
+  // keeps out of (scroll-band.ts) grows by its height while it is up, and
+  // the selection it belongs to comes up above it at once. The submenus
+  // change its height, so they re-measure.
+  const docked = Boolean(pos?.mobile);
+  useLayoutEffect(() => {
+    if (!docked) {
+      setDockedInset("selection-toolbar", 0);
+      return;
+    }
+    setDockedInset("selection-toolbar", barRef.current?.getBoundingClientRect().height ?? 0);
+    getEditor()?.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      view.dispatch(view.state.tr.scrollIntoView());
+    });
+    return () => setDockedInset("selection-toolbar", 0);
+  }, [docked, getEditor, linkOpen, colorOpen, aiOpen]);
 
   const closeAiAndRestoreSelection = useCallback(() => {
     setAiOpen(false);
     getEditor()?.action((ctx) => ctx.get(editorViewCtx).focus());
   }, [getEditor]);
 
-  const closeLinkAndRestoreSelection = useCallback(() => {
+  const closeLinkField = useCallback(() => {
     setLinkOpen(false);
+    setLinkEdit(null);
+    setLinkQuery("");
+  }, []);
+
+  const closeLinkAndRestoreSelection = useCallback(() => {
+    closeLinkField();
     getEditor()?.action((ctx) => ctx.get(editorViewCtx).focus());
-  }, [getEditor]);
+  }, [closeLinkField, getEditor]);
+
+  /** The field, over the bar's saved range: for the selected words, or for
+   *  the link the selection stands in, whose address it then shows. */
+  const openLinkField = useCallback(
+    (edit: LinkRange | null) => {
+      setAiOpen(false);
+      setColorOpen(false);
+      setLinkEdit(edit);
+      setLinkQuery(edit?.href ?? "");
+      setLinkOpen(true);
+    },
+    [],
+  );
+
+  /** The web link the whole selection stands in, or null. Words selected
+   *  inside one link are that link's: the field shows its address, and
+   *  Enter rewrites it over the whole link, not only over the words. */
+  const webLinkAroundSelection = useCallback(() => {
+    let found: LinkRange | null = null;
+    getEditor()?.action((ctx) => {
+      const { state } = ctx.get(editorViewCtx);
+      const { from, to } = state.selection;
+      const range = linkRangeAt(state, from);
+      if (!range || to > range.to || webHref(range.href, origin) === null) return;
+      found = range;
+    });
+    return found;
+  }, [getEditor, origin]);
+
+  /** The field over a link with nothing selected, anchored to the anchor
+   *  element the link is drawn as, so the bar stands over it. */
+  const openLinkFieldOver = useCallback(
+    (anchor: HTMLAnchorElement, range: LinkRange) => {
+      const domRange = document.createRange();
+      domRange.selectNodeContents(anchor);
+      savedRange.current = domRange;
+      openLinkField(range);
+    },
+    [openLinkField],
+  );
+
+  // A plain click on a web link, after the editor has put the caret in it.
+  // The editor's own click handler leaves a web link alone on a plain click;
+  // a modifier click stays the browser's, as for every link; a page link,
+  // linked words, an attachment and a card never reach here (`webHref`, the
+  // card's own attribute).
+  useEffect(() => {
+    const onClick = (event: MouseEvent) => {
+      if (
+        event.defaultPrevented ||
+        event.button !== 0 ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.shiftKey ||
+        event.altKey
+      )
+        return;
+      const target = event.target instanceof Element ? event.target : null;
+      const anchor = target?.closest<HTMLAnchorElement>("a[href]") ?? null;
+      const windowTarget = anchor?.getAttribute("target")?.trim().toLowerCase();
+      if (
+        !anchor ||
+        !container.current?.contains(anchor) ||
+        anchor.dataset.pageRef !== undefined ||
+        anchor.hasAttribute("data-brain-link-card") ||
+        anchor.hasAttribute("download") ||
+        (windowTarget && windowTarget !== "_self") ||
+        webHref(anchor.getAttribute("href"), origin) === null
+      )
+        return;
+      getEditor()?.action((ctx) => {
+        const view = ctx.get(editorViewCtx);
+        // A read-only editor (a lossy load, a frozen page) has no field: it
+        // would edit a document that is never saved. The click stays the
+        // editor's, which opens the link.
+        if (!view.editable) return;
+        const range = linkRangeAt(view.state, view.posAtDOM(anchor, 0));
+        if (range) openLinkFieldOver(anchor, range);
+      });
+    };
+    document.addEventListener("click", onClick);
+    return () => document.removeEventListener("click", onClick);
+  }, [container, getEditor, openLinkFieldOver, origin]);
+
+  // Mod-Shift-k in the editor: the field for the selected words, or for the
+  // link the caret stands in. With neither there is nothing to link.
+  useEffect(() => {
+    const onAsk = () => {
+      getEditor()?.action((ctx) => {
+        const view = ctx.get(editorViewCtx);
+        if (!view.editable) return;
+        const { selection } = view.state;
+        if (!selection.empty) {
+          if (!selectionOwnsFloatingToolbar(view.state, true)) return;
+          const sel = window.getSelection();
+          if (sel && sel.rangeCount > 0) savedRange.current = sel.getRangeAt(0).cloneRange();
+          openLinkField(webLinkAroundSelection());
+          return;
+        }
+        const range = linkRangeAt(view.state, selection.from);
+        if (!range || webHref(range.href, origin) === null) return;
+        const { node } = view.domAtPos(Math.min(range.from + 1, range.to));
+        const element = node instanceof Element ? node : node.parentElement;
+        const anchor = element?.closest<HTMLAnchorElement>("a[href]");
+        if (anchor) openLinkFieldOver(anchor, range);
+      });
+    };
+    window.addEventListener(EDITOR_LINK_FIELD_EVENT, onAsk);
+    return () => window.removeEventListener(EDITOR_LINK_FIELD_EVENT, onAsk);
+  }, [getEditor, openLinkField, openLinkFieldOver, origin, webLinkAroundSelection]);
 
   useEffect(() => {
     if (!aiOpen) return;
@@ -491,14 +647,96 @@ export function FloatingToolbar({
       if (tr) view.dispatch(tr);
       view.focus();
     });
-    setLinkOpen(false);
-    setLinkQuery("");
+    closeLinkField();
     setPos(null);
   };
 
-  const linkResults = pages
-    .filter((pg) => pg.title.toLowerCase().includes(linkQuery.trim().toLowerCase()))
-    .slice(0, 6);
+  const linkQueryText = linkQuery.trim();
+  const linkResults = linkEdit
+    ? []
+    : pages
+        .filter((pg) => pg.title.toLowerCase().includes(linkQuery.trim().toLowerCase()))
+        .slice(0, 6);
+  // The address the typed text reads as. A bare domain (`notes.md`) is one
+  // only when no page is titled like it: a scheme, `www.`, a path or a mail
+  // address says address on its own, and then the page rows stand under the
+  // address row rather than giving way. One of this Brain's own page URLs
+  // links the words to the page (`hrefForWords`), shown as typed.
+  const linkCandidate = hrefForWords(linkQueryText, origin);
+  const addressOnItsOwn =
+    /^(https?:\/\/|mailto:|www\.)/i.test(linkQueryText) ||
+    linkQueryText.includes("/") ||
+    linkQueryText.includes("@");
+  const typedHref =
+    linkCandidate && (addressOnItsOwn || linkResults.length === 0) ? linkCandidate : null;
+  const typedHrefLabel =
+    typedHref && linkedWordsPageId(typedHref, origin) !== null ? linkQueryText : typedHref;
+
+  /** The link the field opened over, where it still is: the document may
+   *  have changed under the field, and a rewrite of other words is worse
+   *  than none. */
+  const editedLink = (state: EditorState) => {
+    if (!linkEdit) return null;
+    const range = linkRangeAt(state, linkEdit.from);
+    return range && range.href === linkEdit.href ? range : null;
+  };
+
+  /** `href` on the selected words, or over the whole link the field opened
+   *  on. The words stay in either case. */
+  const applyWebLink = (href: string) => {
+    getEditor()?.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      const range = editedLink(view.state);
+      const tr = linkEdit
+        ? range && setLinkHref(view.state, range, href)
+        : linkSelection(view.state, href);
+      if (tr) view.dispatch(tr.scrollIntoView());
+      view.focus();
+    });
+    closeLinkField();
+    setPos(null);
+  };
+
+  const removeEditedLink = () => {
+    getEditor()?.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      const range = editedLink(view.state);
+      if (range) view.dispatch(removeLink(view.state, range).scrollIntoView());
+      view.focus();
+    });
+    closeLinkField();
+    setPos(null);
+  };
+
+  const openEditedLink = () => {
+    const href = linkEdit?.href;
+    closeLinkAndRestoreSelection();
+    if (!href) return;
+    // A mail address opens the mail client, not a tab.
+    if (href.toLowerCase().startsWith("mailto:")) window.location.assign(href);
+    else window.open(href, "_blank", "noopener,noreferrer");
+  };
+
+  /** Enter in the field: an address links (or, over a link, rewrites it, and
+   *  emptied removes it); words pick the first page. Text that is neither
+   *  leaves the field open. */
+  const submitLinkField = () => {
+    const typed = linkQuery.trim();
+    if (linkEdit) {
+      if (!typed) {
+        removeEditedLink();
+        return;
+      }
+      const href = hrefForWords(typed, origin);
+      if (href) applyWebLink(href);
+      return;
+    }
+    if (typedHref) {
+      applyWebLink(typedHref);
+      return;
+    }
+    if (linkResults[0]) insertPageLink(linkResults[0]);
+  };
 
   if (typeof document === "undefined") return null;
 
@@ -506,21 +744,34 @@ export function FloatingToolbar({
     <AnimatePresence>
       {pos && (
         <motion.div
-          initial={pos.mobile ? { opacity: 0, y: 8 } : { opacity: 0, y: 4, scale: 0.98 }}
-          animate={pos.mobile ? { opacity: 1, y: 0 } : { opacity: 1, y: 0, scale: 1 }}
-          exit={{ opacity: 0, y: pos.mobile ? 8 : 2, transition: { duration: 0.08 } }}
+          initial={
+            reduce
+              ? { opacity: 0 }
+              : pos.mobile
+                ? { opacity: 0, y: 8 }
+                : { opacity: 0, y: 4, scale: 0.98 }
+          }
+          animate={
+            reduce ? { opacity: 1 } : pos.mobile ? { opacity: 1, y: 0 } : { opacity: 1, y: 0, scale: 1 }
+          }
+          exit={
+            reduce
+              ? { opacity: 0, transition: { duration: DUR.exit } }
+              : { opacity: 0, y: pos.mobile ? 8 : 2, transition: { duration: DUR.exit } }
+          }
           transition={{ duration: DUR.base, ease: EASE_OUT }}
           ref={barRef}
           role="toolbar"
           aria-label="Text formatting"
+          data-editor-dock=""
           style={
             pos.mobile
-              ? { position: "fixed", left: 0, right: 0, bottom: kbInset }
+              ? { position: "fixed", left: 0, right: 0, bottom: kbInset + dockOffset }
               : { position: "fixed", top: pos.top, left: pos.left }
           }
           className={
             pos.mobile
-              ? "fixed z-[calc(var(--z-drawer)_-_10)] border-t border-line bg-paper py-1 pl-[max(0.25rem,env(safe-area-inset-left))] pr-[max(0.25rem,env(safe-area-inset-right))] shadow-[0_-4px_16px_-8px_rgba(0,0,0,0.25)] [padding-bottom:max(0.25rem,env(safe-area-inset-bottom))]"
+              ? `${DOCK_CLASS} ${dockOffset ? "pb-1" : DOCK_SAFE_BOTTOM}`
               : "fixed z-[calc(var(--z-drawer)_-_10)] max-w-[calc(100vw-1rem)] -translate-x-1/2 rounded-md border border-line bg-paper p-1 shadow-[var(--shadow-overlay)]"
           }
         >
@@ -580,10 +831,15 @@ export function FloatingToolbar({
               </button>
             </div>
           ) : linkOpen ? (
-            <div className="w-[260px]">
+            // Docked above the keyboard the field takes the bar's whole width.
+            <div className={pos.mobile ? "w-full" : "w-[260px]"}>
               <input
                 autoFocus
-                aria-label="Link to page"
+                aria-label="Link"
+                type="text"
+                autoCapitalize="off"
+                autoCorrect="off"
+                spellCheck={false}
                 value={linkQuery}
                 onChange={(e) => setLinkQuery(e.target.value)}
                 onKeyDown={(e) => {
@@ -591,31 +847,47 @@ export function FloatingToolbar({
                     e.preventDefault();
                     closeLinkAndRestoreSelection();
                   }
-                  if (e.key === "Enter" && linkResults[0]) {
+                  if (e.key === "Enter") {
                     // Taken here: the editor has the focus back by the time
                     // the key's default runs, and it would split the line
                     // where the linked words are.
                     e.preventDefault();
-                    insertPageLink(linkResults[0]);
+                    submitLinkField();
                   }
                 }}
-                placeholder="Link to page…"
+                placeholder={linkEdit ? "Link address" : "Paste a link or search pages"}
                 className="h-8 w-full rounded-sm border border-line bg-surface px-2.5 text-[13px] text-ink outline-none placeholder:text-ink-3 max-md:text-[16px]"
               />
               <div className="mt-1 max-h-44 overflow-y-auto">
-                {linkResults.map((pg) => (
-                  <button
-                    key={pg.id}
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={() => insertPageLink(pg)}
-                    className="flex h-8 w-full items-center gap-2 rounded-sm px-2 text-left text-[13px] text-ink-2 transition-colors hover:bg-fill-hover"
-                  >
-                    <span className="text-[14px]">{pg.icon ?? DEFAULT_PAGE_ICON}</span>
-                    <span className="truncate">{pg.title}</span>
-                  </button>
-                ))}
-                {linkResults.length === 0 && (
-                  <p className="px-2 py-3 text-center text-[12px] text-ink-3">No pages</p>
+                {linkEdit ? (
+                  <>
+                    <Row label="Open link" onRun={openEditedLink}>
+                      <Icon name="arrow-right-linear" size={14} className="text-ink-3" />
+                      Open link
+                    </Row>
+                    <Row label="Remove link" onRun={removeEditedLink}>
+                      <Icon name="close-linear" size={14} className="text-ink-3" />
+                      Remove link
+                    </Row>
+                  </>
+                ) : (
+                  <>
+                    {typedHref && (
+                      <Row label={`Link to ${typedHrefLabel}`} onRun={() => applyWebLink(typedHref)}>
+                        <Icon name="link-linear" size={14} className="text-ink-3" />
+                        <span className="truncate">Link to {typedHrefLabel}</span>
+                      </Row>
+                    )}
+                    {linkResults.map((pg) => (
+                      <Row key={pg.id} label={pg.title} onRun={() => insertPageLink(pg)}>
+                        <span className="text-[14px]">{pg.icon ?? DEFAULT_PAGE_ICON}</span>
+                        <span className="truncate">{pg.title}</span>
+                      </Row>
+                    ))}
+                    {!typedHref && linkResults.length === 0 && (
+                      <p className="px-2 py-3 text-center text-[12px] text-ink-3">No pages</p>
+                    )}
+                  </>
                 )}
               </div>
             </div>
@@ -730,14 +1002,7 @@ export function FloatingToolbar({
                   </TB>
                 </>
               )}
-              <TB
-                label="Link to page"
-                onRun={() => {
-                  setAiOpen(false);
-                  setColorOpen(false);
-                  setLinkOpen(true);
-                }}
-              >
+              <TB label="Link" onRun={() => openLinkField(webLinkAroundSelection())}>
                 <Icon name="link-linear" size={15} />
               </TB>
               <TB
@@ -759,7 +1024,10 @@ export function FloatingToolbar({
   );
 }
 
-function TB({
+/** One toolbar button, 28 on a pointer and 36 under a finger. The writing
+ *  bar is built from the same three pieces, so the two bars docked on the
+ *  keyboard are one set of controls. */
+export function TB({
   label,
   onRun,
   children,
@@ -801,10 +1069,34 @@ function TB({
   );
 }
 
-function Tt({ children }: { children: React.ReactNode }) {
+/** A row under the link field: a page to link to, the address typed, or an
+ *  action on the link the field opened over. */
+function Row({
+  label,
+  onRun,
+  children,
+}: {
+  label: string;
+  onRun: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      aria-label={label}
+      // preventDefault on mousedown keeps the text selection alive
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={onRun}
+      className="flex h-8 w-full items-center gap-2 rounded-sm px-2 text-left text-[13px] text-ink-2 transition-colors hover:bg-fill-hover hover:text-ink"
+    >
+      {children}
+    </button>
+  );
+}
+
+export function Tt({ children }: { children: React.ReactNode }) {
   return <span className="text-[12px] font-semibold">{children}</span>;
 }
 
-function Sep() {
+export function Sep() {
   return <span role="separator" className="mx-0.5 h-4 w-px bg-line" />;
 }

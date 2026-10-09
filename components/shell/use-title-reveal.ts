@@ -18,12 +18,19 @@ import { useEffect } from "react";
  *  edge makes the handover exact: the crumb takes the name in the frame the
  *  title gives it up.
  *
- *  An IntersectionObserver on the title, the scroll-edge atom's pattern
- *  (DESIGN.md v2 → §7): off the scroll event path, and the flag lands on the
- *  DOM rather than in state, so crossing the line never re-renders the
- *  shell. Hidden is the rest state, so the crumb cannot flash before the
- *  first callback — an engine without the observer is handed the crumb it
- *  has always had.
+ *  An IntersectionObserver on the element handed in, the scroll-edge atom's
+ *  pattern (DESIGN.md v2 → §7): off the scroll event path, and the flag
+ *  lands on the DOM rather than in state, so crossing the line never
+ *  re-renders the shell. Hidden is the rest state, so the crumb cannot flash
+ *  before the first callback — an engine without the observer is handed the
+ *  crumb it has always had.
+ *
+ *  What is handed in is the whole head, not the title's own box. A note
+ *  hands its title with the Edited line and the chip row under it: watched
+ *  on the title alone, the crumb came while "+ Category" was still in the
+ *  band, chrome over chrome, and the pill took the chips' taps. The crumb
+ *  waits until the last of the head has gone under the row; the body prose
+ *  that follows runs under the pills by design.
  *
  *  TWO SURFACES ASK FOR THIS, so it takes the two selectors rather than
  *  naming the page's. A note hands the flag to `.brain-main` off

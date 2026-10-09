@@ -86,6 +86,7 @@ const TasksSurface = dynamic(
 import type { ShareEnableResult } from "./share-popover";
 import { Hub } from "./hub";
 import { MobileTabBar } from "./mobile-tab-bar";
+import { KEYBOARD_MIN } from "./editor/touch-dock";
 import { MobilePagesView } from "./mobile-pages-view";
 import { MOVE_BLOCKED_MESSAGE } from "./page-move-dialog";
 import {
@@ -649,7 +650,7 @@ export function Shell({
     const updateKeyboard = () => {
       const covered =
         window.innerHeight - (viewport.offsetTop + viewport.height);
-      setMobileKeyboardOpen(covered > 120);
+      setMobileKeyboardOpen(covered > KEYBOARD_MIN);
     };
     updateKeyboard();
     viewport.addEventListener("resize", updateKeyboard);
@@ -3038,8 +3039,9 @@ export function Shell({
       // inert, and a chord that opened the palette or folded the sidebar
       // there would act on a window nobody can see. ⌘↵ is the composer's own.
       if (mailSheetOpen) return;
-      // ⌘K — match by key (K is never a dead key)
-      if (e.key.toLowerCase() === "k" && !e.altKey) {
+      // ⌘K — match by key (K is never a dead key). ⌘⇧K is the editor's
+      // link field, so the shifted chord is not the palette's.
+      if (e.key.toLowerCase() === "k" && !e.altKey && !e.shiftKey) {
         e.preventDefault();
         if (paletteOpen) onPaletteOpenChange(false);
         else openPalette();

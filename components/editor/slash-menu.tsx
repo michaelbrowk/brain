@@ -20,7 +20,7 @@ import { Icon } from "../ui/icon";
 import { DUR, EASE_OUT } from "@/lib/motion";
 import { insertCalloutCommand } from "./callout";
 import { insertColumnsCommand } from "./columns";
-import { notifyNestedTableBlocked } from "@/lib/editor-events";
+import { EDITOR_DOC_CHANGED_EVENT, notifyNestedTableBlocked } from "@/lib/editor-events";
 import { insertToggleCommand } from "./toggle";
 import { insertMathBlockCommand } from "./math";
 import { ensureTaskCommand, isInQuote } from "./task-checkbox";
@@ -32,7 +32,8 @@ import {
 } from "./attachments";
 import { insertImage, insertInlineNear } from "./insert-inline";
 import type { PageRef } from "./floating-toolbar";
-import { clampMenuLeft, shouldFlipAbove } from "./menu-position";
+import { clampMenuLeft, MENU_GAP, placeCaretMenu } from "./menu-position";
+import { usableViewport } from "./touch-dock";
 
 interface Item {
   label: string;
@@ -174,15 +175,17 @@ interface State {
   top?: number; // when placed below the caret
   bottom?: number; // when flipped above the caret (caret near the viewport bottom)
   left: number;
+  /** The menu's own 280, or the room the viewport has for it. */
+  maxHeight: number;
   query: string;
   from: number; // doc pos of the "/" so we can delete it
   inTable: boolean;
   inQuote: boolean;
 }
 
-/** menu max height (max-h-[280px]) + breathing room */
 const MENU_W = 220;
-const MENU_H = 300;
+/** The menu's full height; placement shrinks it to the room there is. */
+const MENU_H = 280;
 
 /** Notion-style "/" menu: type / at the start of an empty line to insert a block. */
 export function SlashMenu({
@@ -192,11 +195,15 @@ export function SlashMenu({
   upload,
   createPage,
   tasks = true,
+  dockOffset = 0,
 }: SlashMenuCapabilities & {
   container: React.RefObject<HTMLDivElement | null>;
   onCreatePageAtCursor?: (
     insertPageRef: (page: PageRef) => boolean,
   ) => Promise<void>;
+  /** What stands on the viewport's bottom edge (the phone's writing bar):
+   *  the menu keeps above it as it keeps above the keyboard. */
+  dockOffset?: number;
 }) {
   const [, getEditor] = useInstance();
   const [state, setState] = useState<State | null>(null);
@@ -228,17 +235,15 @@ export function SlashMenu({
         setState(null);
         return;
       }
-      const rect = sel.getRangeAt(0).getBoundingClientRect();
       const r = root.getBoundingClientRect();
       const ed = getEditor();
-      let from = -1;
-      let inTable = false;
-      let inQuote = false;
-      ed?.action((ctx) => {
+      // The caret's box, asked of the editor: a collapsed DOM range measures
+      // 0×0 at (0,0) in WebKit once the editor has set the selection itself,
+      // which placed the menu at the top of the page.
+      const caret = ed?.action((ctx) => {
         const view = ctx.get(editorViewCtx);
-        from = view.state.selection.$from.start();
         const $from = view.state.selection.$from;
-        inQuote = isInQuote($from);
+        let inTable = false;
         for (let depth = $from.depth; depth >= 0; depth -= 1) {
           const name = $from.node(depth).type.name;
           if (name === "table" || name === "table_cell" || name === "table_header") {
@@ -246,27 +251,49 @@ export function SlashMenu({
             break;
           }
         }
+        return {
+          rect: view.coordsAtPos(view.state.selection.from),
+          from: $from.start(),
+          inTable,
+          inQuote: isInQuote($from),
+        };
       });
-      const vh = window.visualViewport?.height ?? window.innerHeight;
-      const flip = shouldFlipAbove(rect, vh, MENU_H);
+      // Without an editor (the keys test mounts the menu on its own) the
+      // DOM range is the only box there is.
+      const rect = caret?.rect ?? sel.getRangeAt(0).getBoundingClientRect();
+      const { from = -1, inTable = false, inQuote = false } = caret ?? {};
+      const placed = placeCaretMenu(rect, usableViewport(dockOffset), MENU_H);
       setState({
         left: clampMenuLeft(rect.left - r.left, r.width, MENU_W),
+        maxHeight: placed.maxHeight,
         query,
         from,
         inTable,
         inQuote,
-        ...(flip
-          ? { bottom: r.bottom - rect.top + 6 }
-          : { top: rect.bottom - r.top + 6 }),
+        ...(placed.side === "above"
+          ? { bottom: r.bottom - rect.top + MENU_GAP }
+          : { top: rect.bottom - r.top + MENU_GAP }),
       });
       setActive(0);
     });
-  }, [container, getEditor]);
+  }, [container, dockOffset, getEditor]);
 
   useEffect(() => {
     document.addEventListener("selectionchange", update);
+    // A press on the writing bar types the slash without a `selectionchange`
+    // (WebKit fires none for a selection the editor sets itself); the
+    // editor's own event says the line changed.
+    window.addEventListener(EDITOR_DOC_CHANGED_EVENT, update);
+    // The keyboard arriving or leaving changes the room there is, with the
+    // caret where it was.
+    const vv = window.visualViewport;
+    vv?.addEventListener("resize", update);
+    vv?.addEventListener("scroll", update);
     return () => {
       document.removeEventListener("selectionchange", update);
+      window.removeEventListener(EDITOR_DOC_CHANGED_EVENT, update);
+      vv?.removeEventListener("resize", update);
+      vv?.removeEventListener("scroll", update);
       cancelAnimationFrame(raf.current);
     };
   }, [update]);
@@ -558,8 +585,13 @@ export function SlashMenu({
             animate={reduce ? { opacity: 1 } : { opacity: 1, y: 0 }}
             exit={{ opacity: 0, transition: { duration: DUR.exit } }}
             transition={reduce ? { duration: DUR.base } : { duration: DUR.base, ease: EASE_OUT }}
-            style={{ top: state.top, bottom: state.bottom, left: state.left }}
-            className="absolute z-[calc(var(--z-drawer)_-_10)] max-h-[280px] w-[220px] overflow-y-auto rounded-lg border border-line bg-paper p-1 shadow-[var(--shadow-overlay)]"
+            style={{
+              top: state.top,
+              bottom: state.bottom,
+              left: state.left,
+              maxHeight: state.maxHeight,
+            }}
+            className="absolute z-[calc(var(--z-drawer)_-_10)] w-[220px] overflow-y-auto rounded-lg border border-line bg-paper p-1 shadow-[var(--shadow-overlay)]"
           >
             {results.map((item, i) => (
               <button
@@ -567,7 +599,9 @@ export function SlashMenu({
                 onMouseDown={(e) => e.preventDefault()}
                 onMouseMove={() => setActive(i)}
                 onClick={() => run(item)}
-                className={`flex h-8 w-full items-center gap-2.5 rounded-sm px-2 text-left text-[13px] transition-colors ${
+                // 32 under a pointer, 44 under a finger: the touch minimum,
+                // the way the toolbar's buttons grow from 28 to 36 there.
+                className={`flex h-8 w-full items-center gap-2.5 rounded-sm px-2 text-left text-[13px] transition-colors [@media(hover:none)]:h-11 ${
                   i === active ? "bg-fill-active text-ink" : "text-ink-2"
                 }`}
               >

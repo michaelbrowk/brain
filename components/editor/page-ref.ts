@@ -48,6 +48,12 @@ export function setPageRefOrigin(origin: string) {
   pageRefOrigin = origin;
 }
 
+/** The origin a page URL is judged against, for the plugins that read a
+ *  pasted address (`web-link.ts`): the editor sets it from the window. */
+export function currentPageRefOrigin(): string {
+  return pageRefOrigin;
+}
+
 /** Where a ref points at display time. Unset, the owner's rule: a page the
  *  live directory knows links at `/p/<id>`, one it does not is unavailable.
  *  A link visitor's island sets one instead: the share URL for a page inside

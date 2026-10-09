@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@milkdown/react", () => ({ useInstance: () => [null, () => null] }));
 vi.mock("framer-motion", () => import("@/test/framer-motion-mock"));
 
+import { EDITOR_DOC_CHANGED_EVENT } from "@/lib/editor-events";
 import { SlashMenu } from "./slash-menu";
 import { WikiLinkMenu } from "./wikilink-menu";
 
@@ -27,22 +28,31 @@ const MENUS: ReadonlyArray<{
   name: string;
   trigger: string;
   unmatched: string;
-  mount: (container: Container) => ReactNode;
+  mount: (container: Container, dockOffset?: number) => ReactNode;
 }> = [
   {
     name: "the slash menu",
     trigger: "/",
     unmatched: "/zzz",
-    mount: (container) => (
-      <SlashMenu container={container} createPage onCreatePageAtCursor={async () => {}} />
+    mount: (container, dockOffset) => (
+      <SlashMenu
+        container={container}
+        createPage
+        onCreatePageAtCursor={async () => {}}
+        dockOffset={dockOffset}
+      />
     ),
   },
   {
     name: "the wiki-link menu",
     trigger: "[[",
     unmatched: "[[zzz",
-    mount: (container) => (
-      <WikiLinkMenu container={container} pages={[{ id: "p1", title: "Alpha" }]} />
+    mount: (container, dockOffset) => (
+      <WikiLinkMenu
+        container={container}
+        pages={[{ id: "p1", title: "Alpha" }]}
+        dockOffset={dockOffset}
+      />
     ),
   },
 ];
@@ -81,13 +91,13 @@ describe.each(MENUS)("$name keys", ({ trigger, unmatched, mount }) => {
 
   /** An editor holding one line, with the caret at its end. The line is the
    *  target of every key below, as ProseMirror's own element would be. */
-  async function renderLine(text: string) {
+  async function renderLine(text: string, dockOffset?: number) {
     const container = createRef<HTMLDivElement>();
     await act(async () =>
       root.render(
         <div ref={container}>
           <p>{text}</p>
-          {mount(container)}
+          {mount(container, dockOffset)}
         </div>,
       ),
     );
@@ -96,14 +106,15 @@ describe.each(MENUS)("$name keys", ({ trigger, unmatched, mount }) => {
     return line;
   }
 
-  function caretAtEnd(line: HTMLElement) {
+  function caretAtEnd(line: HTMLElement, announce: "selectionchange" | "doc-changed" = "selectionchange") {
     const text = line.firstChild!;
     const range = document.createRange();
     range.setStart(text, text.textContent!.length);
     range.collapse(true);
     window.getSelection()!.removeAllRanges();
     window.getSelection()!.addRange(range);
-    document.dispatchEvent(new Event("selectionchange"));
+    if (announce === "selectionchange") document.dispatchEvent(new Event("selectionchange"));
+    else window.dispatchEvent(new Event(EDITOR_DOC_CHANGED_EVENT));
   }
 
   const menuShown = () => host.querySelectorAll("button").length > 0;
@@ -214,5 +225,38 @@ describe.each(MENUS)("$name keys", ({ trigger, unmatched, mount }) => {
     search.focus();
     expect(press(search, "Enter").defaultPrevented).toBe(false);
     expect(press(search, "ArrowDown").defaultPrevented).toBe(false);
+  });
+
+  // A press on the phone's writing bar types the trigger without a
+  // `selectionchange` (WebKit fires none for a selection the editor sets):
+  // the editor's own event opens the menu.
+  it("opens on the editor's doc-changed event without a selectionchange", async () => {
+    const container = createRef<HTMLDivElement>();
+    await act(async () =>
+      root.render(
+        <div ref={container}>
+          <p>{trigger}</p>
+          {mount(container)}
+        </div>,
+      ),
+    );
+    caretAtEnd(host.querySelector("p")!, "doc-changed");
+    await act(async () => frames.splice(0).forEach((frame) => frame(0)));
+    expect(menuShown()).toBe(true);
+  });
+
+  // What is docked on the viewport's bottom edge (the writing bar) is not
+  // room for the menu: the cap shrinks by it.
+  it("keeps clear of what is docked on the viewport's bottom edge", async () => {
+    window.innerHeight = 300;
+    await openOn(trigger);
+    const free = host.querySelector<HTMLElement>("[data-testid$=\"menu\"]")!.style.maxHeight;
+    act(() => root.unmount());
+    root = createRoot(host);
+    await renderLine(trigger, 100);
+    await act(async () => frames.splice(0).forEach((frame) => frame(0)));
+    const docked = host.querySelector<HTMLElement>("[data-testid$=\"menu\"]")!.style.maxHeight;
+    expect(free).toBe("280px");
+    expect(docked).toBe("194px");
   });
 });

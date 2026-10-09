@@ -100,11 +100,7 @@ import {
 } from "./attachments";
 import { attachmentRefs } from "./attachment-refs";
 import { attachmentSrc } from "./attachment-src";
-import {
-  classifyInternalPageLink,
-  followEditorAnchor,
-  observeInternalPageLinks,
-} from "./internal-page-link";
+import { classifyInternalPageLink, followEditorAnchor } from "./internal-page-link";
 import "./milkdown.css";
 import "./table-block.css";
 import { hasTemplateCaret, takeTemplateCaret } from "@/lib/templates";
@@ -817,12 +813,6 @@ function Inner({
 
     root.addEventListener(CALLOUT_EMOJI_EVENT, onCalloutEmoji);
     return () => root.removeEventListener(CALLOUT_EMOJI_EVENT, onCalloutEmoji);
-  }, []);
-
-  useEffect(() => {
-    const root = wrap.current;
-    if (!root) return;
-    return observeInternalPageLinks(root, window.location.origin);
   }, []);
 
   useEffect(() => {

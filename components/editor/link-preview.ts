@@ -258,6 +258,7 @@ type MutableMarkdownNode = MarkdownNode & {
   title?: unknown;
   url?: unknown;
   value?: unknown;
+  form?: unknown;
 };
 
 /** Where a card may stand: a parent whose content the editor holds as
@@ -285,6 +286,7 @@ function asLinkCard(node: MutableMarkdownNode): MutableMarkdownNode | null {
     url: href,
     value: text.value,
     title: typeof link.title === "string" ? link.title : null,
+    form: typeof link.form === "string" ? link.form : null,
   };
 }
 
@@ -324,6 +326,9 @@ export const linkCardSchema = $nodeSchema(LINK_CARD_NODE, () => ({
     // trailing slash, and writing it back as read keeps the file unchanged.
     text: { default: "" },
     title: { default: null },
+    // How the file spells it: `<url>` (the form a paste or a typed address
+    // writes, and every card written before) or a bare address read as one.
+    form: { default: "angle" },
   },
   parseDOM: [
     {
@@ -358,6 +363,7 @@ export const linkCardSchema = $nodeSchema(LINK_CARD_NODE, () => ({
         href: typeof md.url === "string" ? md.url : "",
         text: typeof md.value === "string" ? md.value : "",
         title: typeof md.title === "string" ? md.title : null,
+        form: md.form === "literal" ? "literal" : "angle",
       });
     },
   },
@@ -368,7 +374,11 @@ export const linkCardSchema = $nodeSchema(LINK_CARD_NODE, () => ({
       // one link, one text. remark-stringify then spells it as it always has.
       state
         .openNode("paragraph")
-        .openNode("link", undefined, { url: node.attrs.href, title: node.attrs.title })
+        .openNode("link", undefined, {
+          url: node.attrs.href,
+          title: node.attrs.title,
+          form: node.attrs.form,
+        })
         .addNode("text", undefined, cardText(node))
         .closeNode()
         .closeNode();

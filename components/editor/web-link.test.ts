@@ -486,6 +486,28 @@ describe("a typed address, round 2 (L1, L3, M3, M5, M6, M20)", () => {
   });
 });
 
+describe("a link card in the file", () => {
+  it("is written as <url> when made in the editor, the form every card has carried", async () => {
+    const pasted = await mount("");
+    paste(pasted.view, "https://a.example/post");
+    expect(shape(pasted.view)).toContain("link_card");
+    expect(pasted.markdown()).toMatch(/^<https:\/\/a\.example\/post>/);
+
+    const typed = await mount("");
+    type(typed.view, "https://a.example/typed");
+    key(typed.view, "Enter");
+    expect(typed.markdown()).toMatch(/^<https:\/\/a\.example\/typed>/);
+  });
+
+  it("keeps the form it was read in, angle or bare", async () => {
+    for (const markdown of ["<https://a.example/x>\n\nafter", "https://a.example/x\n\nafter"]) {
+      const { view, markdown: saved } = await mount(markdown);
+      expect(shape(view), markdown).toContain("link_card");
+      expect(saved(), markdown).toBe(markdown);
+    }
+  });
+});
+
 describe("Mod-Shift-k", () => {
   it("asks the toolbar for the link field and takes the key", async () => {
     const { view } = await mount("words");

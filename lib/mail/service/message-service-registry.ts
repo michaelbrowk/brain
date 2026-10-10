@@ -28,6 +28,7 @@ import {
   type MailCacheSenderBackfillBatch,
   type MailCacheThreadFirstSender,
   type MailReplyContext,
+  MailCacheError,
   selectWorstMailSyncError,
   SqliteMailMessageCache,
 } from "./message-cache";
@@ -84,6 +85,8 @@ export class MultiAccountMailMessageService implements MailMessageService {
   private readonly onChange: ((change: MailServiceChange) => void) | undefined;
   private readonly entries = new Map<string, RegistryEntry>();
   private readonly invalidatedAccounts = new Set<string>();
+  /** The code each account's last failed resolution threw, for health. */
+  private readonly resolutionFailures = new Map<string, string>();
   private resolutionTail: Promise<void> = Promise.resolve();
 
   constructor(options: {
@@ -102,18 +105,35 @@ export class MultiAccountMailMessageService implements MailMessageService {
     this.onChange = options.onChange;
   }
 
+  /**
+   * What the background sync has already recorded, read without resolving,
+   * opening, or dialling anything and without queueing behind resolution.
+   * Health is the deploy gate: one unreachable mailbox must make it degraded,
+   * never unavailable. An account with no entry yet contributes the code its
+   * last resolution failed with, or nothing synced yet.
+   */
   async readBackgroundSyncHealth(): Promise<MailBackgroundSyncHealth> {
-    const accounts = await this.store.listAccounts();
+    const accounts = (await this.store.listAccounts()).filter(
+      (account) => !this.invalidatedAccounts.has(account.account.accountId),
+    );
     if (accounts.length === 0) {
       return Object.freeze({ lastSuccessfulAt: null, lastErrorCode: null });
     }
-    const states = await Promise.all(
-      accounts.map((account) =>
-        this.withEntry(account.account.accountId, (entry) =>
-          entry.service.readBackgroundSyncHealth(),
-        ),
-      ),
-    );
+    const states = accounts.map((account) => {
+      const accountId = account.account.accountId;
+      // A failed re-resolution can leave the replaced entry's closed cache in
+      // the map, so the failure outranks whatever entry is still there.
+      const failure = this.resolutionFailures.get(accountId);
+      const entry = this.entries.get(accountId);
+      if (failure !== undefined || !entry) {
+        return { lastSuccessfulAt: null, lastErrorCode: failure ?? null };
+      }
+      try {
+        return entry.cache.readBackgroundSyncHealth();
+      } catch (error) {
+        return { lastSuccessfulAt: null, lastErrorCode: resolutionFailureCode(error) };
+      }
+    });
     const successful = states.map((state) => state.lastSuccessfulAt);
     return Object.freeze({
       lastSuccessfulAt: successful.every(
@@ -376,6 +396,7 @@ export class MultiAccountMailMessageService implements MailMessageService {
   async invalidateAccount(accountId: string): Promise<void> {
     const execute = async () => {
       this.invalidatedAccounts.add(accountId);
+      this.resolutionFailures.delete(accountId);
       const entry = this.entries.get(accountId);
       if (!entry) return;
       entry.lifecycle.abort(new MailAccountError("account_not_found"));
@@ -432,7 +453,14 @@ export class MultiAccountMailMessageService implements MailMessageService {
       if (this.invalidatedAccounts.has(accountId)) {
         throw new MailAccountError("account_not_found");
       }
-      const entry = await this.resolveUnlocked(accountId);
+      let entry: RegistryEntry;
+      try {
+        entry = await this.resolveUnlocked(accountId);
+      } catch (error) {
+        this.resolutionFailures.set(accountId, resolutionFailureCode(error));
+        throw error;
+      }
+      this.resolutionFailures.delete(accountId);
       entry.activeOperations += 1;
       leased = entry;
     };
@@ -543,6 +571,20 @@ export class MultiAccountMailMessageService implements MailMessageService {
     entry.destroyProvider?.();
     entry.cache.close();
   }
+}
+
+const STABLE_ERROR_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+
+function resolutionFailureCode(error: unknown): string {
+  if (
+    (error instanceof MailProviderSyncError ||
+      error instanceof MailCacheError ||
+      error instanceof MailAccountError) &&
+    STABLE_ERROR_CODE.test(error.code)
+  ) {
+    return error.code;
+  }
+  return "mail_provider_unavailable";
 }
 
 function providerTransportBindingVersion(

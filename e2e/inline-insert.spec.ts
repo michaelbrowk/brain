@@ -162,7 +162,8 @@ test("@inline [[ on an empty list item keeps the next words in that item", async
 
   await expect
     .poll(() => savedMarkdown(page, id))
-    .toMatch(new RegExp(`^\\* first\\n\\n\\* ${refPattern(targetId)} tail\\n\\n\\* last$`));
+    // The list was written tight, and it stays tight.
+    .toMatch(new RegExp(`^\\* first\\n\\* ${refPattern(targetId)} tail\\n\\* last$`));
 });
 
 test("@inline text composed on the line after a picked page stays when the caret leaves", async ({

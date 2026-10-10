@@ -3919,6 +3919,27 @@ export class SqliteMailMessageCache {
       validateMailboxRetryIndex(retryRows[0]?.next_mailbox_index);
     }
     this.reconcileMailboxExtension(database);
+    // An uninitialized mailbox publishes nothing, so memberships it no longer
+    // stages are dead rows an earlier runtime stranded, not evidence of a
+    // damaged cache.
+    database
+      .prepare(
+        `DELETE FROM thread_mailboxes AS membership
+          WHERE membership.account_id = ?
+            AND EXISTS (
+              SELECT 1
+                FROM mailbox_sync_state AS state
+               WHERE state.account_id = membership.account_id
+                 AND state.mailbox_id = membership.mailbox_id
+                 AND state.status = 'uninitialized'
+                 AND membership.generation <> state.active_thread_generation
+                 AND (
+                   state.staged_thread_generation IS NULL OR
+                   membership.generation <> state.staged_thread_generation
+                 )
+            )`,
+      )
+      .run(this.accountId);
     const invalidMembership = database
       .prepare(
         `SELECT 1 AS invalid
@@ -5296,6 +5317,16 @@ export class SqliteMailMessageCache {
     ) {
       // An Inbox-only rebuild must not mix an incomplete new-generation
       // lower bound into a complete active snapshot for another mailbox.
+      return false;
+    }
+    if (
+      row.status === "uninitialized" &&
+      row.staged_thread_generation !== null &&
+      (row.staged_thread_generation as number) > generation
+    ) {
+      // A hidden mailbox already stages the newer rebuild. An active-generation
+      // write (a Done mid-rebuild) must not pull it back and strand the
+      // memberships the rebuild has written.
       return false;
     }
     if (

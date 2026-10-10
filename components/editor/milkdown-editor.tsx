@@ -6,6 +6,7 @@ import {
   defaultValueCtx,
   editorViewCtx,
   editorViewOptionsCtx,
+  parserCtx,
   serializerCtx,
 } from "@milkdown/kit/core";
 import {
@@ -33,6 +34,11 @@ import { columns } from "./columns";
 import { emptyBlocks } from "./empty-block";
 import { columnDrop } from "./column-drop";
 import { createDeferredSerializer, deferredSerialize } from "./deferred-serialize";
+import {
+  applyExternalMarkdown,
+  EXTERNAL_WRITE_META,
+  type ExternalWriteResult,
+} from "./external-write";
 import {
   editingCore,
   focusDocumentEnd,
@@ -145,6 +151,12 @@ interface EditorProps {
   onDirty?: () => void;
   onSerialized?: () => void;
   registerFlush?: (flush: () => void) => () => void;
+  /** Hands the shell a way to put a body written elsewhere (another device,
+   *  an agent) into this editor in place, instead of remounting it on the
+   *  new body: `external-write.ts`. "refused" asks the caller to remount. */
+  registerExternalWrite?: (
+    apply: (markdown: string) => ExternalWriteResult,
+  ) => () => void;
   pages?: PageRef[];
   /** Live titles and icons for the page refs in this body, for a surface
    *  that has a directory but offers no page list. `pages` is both at once —
@@ -385,6 +397,7 @@ function Inner({
   onDirty,
   onSerialized,
   registerFlush,
+  registerExternalWrite,
   pages,
   pageDirectory,
   onNavigate,
@@ -405,6 +418,9 @@ function Inner({
   // the surface has.
   const refDirectory = pages ?? pageDirectory;
   const lastEmitted = useRef(value);
+  // How many edits this editor has handed to `onChange`, so the external
+  // write below can tell whether its own serialize just handed one over.
+  const emittedEdits = useRef(0);
   // The phone's writing bar, standing on the keyboard: its height while it
   // is up, which the selection toolbar and the caret menus keep clear of.
   const [dockOffset, setDockOffset] = useState(0);
@@ -440,7 +456,10 @@ function Inner({
       // Initial serialization can normalize live page labels (for example by
       // adding the current icon) without any editor transaction. It is display
       // state, not a user edit, and must not materialize synthesized children.
-      if (documentChanged) onChange(markdown);
+      if (documentChanged) {
+        emittedEdits.current += 1;
+        onChange(markdown);
+      }
     }
     onSerialized?.();
   }, [editorSession, onChange, onSerialized]);
@@ -465,7 +484,15 @@ function Inner({
             filterTransaction: (transaction) => {
               const isSyntheticTrailingParagraph =
                 transaction.getMeta(TRAILING_PARAGRAPH_TRANSACTION_META) === true;
-              if (transaction.docChanged && !isSyntheticTrailingParagraph) {
+              // A body written elsewhere is the server's, not the writer's:
+              // nothing in it is unsaved.
+              const isExternalWrite =
+                transaction.getMeta(EXTERNAL_WRITE_META) === true;
+              if (
+                transaction.docChanged &&
+                !isSyntheticTrailingParagraph &&
+                !isExternalWrite
+              ) {
                 editorSession.markDocumentChanged();
               }
               if (
@@ -787,6 +814,52 @@ function Inner({
       get()?.action(notifyFromContext);
     });
   }, [editorSession, get, notifyFromContext, onSerialized, registerFlush, serializeLater]);
+
+  useEffect(() => {
+    if (!registerExternalWrite) return;
+    return registerExternalWrite((markdown) => {
+      // A page opened read-only, or one whose document is a frozen snapshot
+      // behind a nesting move, is remounted on the new body instead: the load
+      // guard and the move's own path decide what it shows then.
+      if (lossyLoad.current || editorSession.isSerializationBlocked()) return "refused";
+      // A keystroke can be in the document and not yet in the shell: the
+      // serialize waits for an idle moment (`deferred-serialize.ts`), and the
+      // shell forgets the page is dirty when an earlier save lands. Hand it
+      // over first. If it was there, nothing is applied: the shell keeps its
+      // base, the save meets the other version and the page is in conflict,
+      // which is where text typed against a body that changed belongs.
+      serializeLater.drop();
+      const emittedBefore = emittedEdits.current;
+      try {
+        get()?.action(notifyFromContext);
+      } catch {
+        return "refused";
+      }
+      if (emittedEdits.current !== emittedBefore) return "dirty";
+      let result: ExternalWriteResult = "refused";
+      try {
+        get()?.action((ctx) => {
+          result = applyExternalMarkdown(
+            ctx.get(editorViewCtx),
+            ctx.get(parserCtx),
+            markdown,
+          );
+        });
+      } catch {
+        return "refused";
+      }
+      if (result !== "refused") {
+        // The editor now holds the server's body (the serialize scheduled
+        // from earlier typing went above). A change flag left by an edit
+        // taken back would hand that body over as an edit on the next
+        // flush, and the next flush compares against this body, not the
+        // last one emitted.
+        editorSession.takeDocumentChanged();
+        lastEmitted.current = markdown;
+      }
+      return result;
+    });
+  }, [editorSession, get, notifyFromContext, registerExternalWrite, serializeLater]);
 
   // prosemirror-dropcursor removes its line when drop/dragend reach the editor
   // DOM. Our capture handlers stopPropagation for image/file uploads, and a

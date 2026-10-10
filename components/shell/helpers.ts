@@ -322,6 +322,9 @@ export type PageRefNestingOperation = {
 // hovering a tree row prefetches it. Cache holds server-authoritative bodies
 // only (never unsaved edits) so revalidation can't clobber your typing.
 export const PAGE_CACHE_CAP = 30;
+/** A way out of a conflict met text typed while it was running: that text is
+ *  newer than the choice, so the page keeps it and stays in conflict. */
+export const NEWER_EDITS_KEPT = "Newer edits are still in your local draft.";
 export const RECENT_STORAGE_KEY = "brain-recent";
 export const FOCUS_STORAGE_KEY = "brain-focus";
 export const LOCAL_RECOVERY_UNAVAILABLE =

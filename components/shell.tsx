@@ -53,6 +53,7 @@ import type { SmartSortResult } from "./smart-sort-preview";
 import dynamic from "next/dynamic";
 import { useTheme } from "next-themes";
 import type { PageMenuHandlers } from "./tree/row-menu";
+import type { ExternalWriteResult } from "./editor/external-write";
 import {
   CommandPalette,
   type CommandPaletteSelection,
@@ -157,6 +158,7 @@ import {
   loadedPageFromResponse,
   navigationPresenceReducer,
   PAGE_CACHE_CAP,
+  NEWER_EDITS_KEPT,
   PAGE_REF_BODY_CHANGED,
   PAGE_REF_READBACK_FAILED,
   RECENT_LIMIT,
@@ -437,6 +439,14 @@ export function Shell({
   }, []);
   const [save, setSave] = useState<SaveState>("idle");
   const [recoveryCopyId, setRecoveryCopyId] = useState<string | null>(null);
+  // The way out of a conflict that is running ("Keep mine" or "Take
+  // theirs"; "Save a copy" is `recoveryCopyId`). The ref refuses a second
+  // press in the same frame, the state draws the pill.
+  const [conflictChoice, setConflictChoice] = useState<{
+    id: string;
+    kind: "mine" | "theirs";
+  } | null>(null);
+  const conflictChoiceRef = useRef<string | null>(null);
   const [recoveryMessage, setRecoveryMessage] = useState<{
     id: string;
     text: string;
@@ -790,6 +800,12 @@ export function Shell({
     Promise.resolve(true),
   );
   const editorFlushRef = useRef<() => void>(() => {});
+  // The live editor's in-place apply of a body written elsewhere, filed under
+  // the page it shows: a late answer for another page must never reach it.
+  const editorExternalWriteRef = useRef<{
+    pageId: string;
+    apply: (markdown: string) => ExternalWriteResult;
+  } | null>(null);
   const editorDirtyRef = useRef<string | null>(null);
   const coverQueueRef = useRef(createKeyedQueue());
   const coverConfirmedRef = useRef<Map<string, string | undefined>>(new Map());
@@ -1201,6 +1217,36 @@ export function Shell({
     };
   }, []);
 
+  const registerEditorExternalWrite = useCallback(
+    (pageId: string, apply: (markdown: string) => ExternalWriteResult) => {
+      const entry = { pageId, apply };
+      editorExternalWriteRef.current = entry;
+      return () => {
+        if (editorExternalWriteRef.current === entry) {
+          editorExternalWriteRef.current = null;
+        }
+      };
+    },
+    [],
+  );
+
+  /** Put a body written elsewhere into the open editor in place: the caret,
+   *  the scroll and the undo history stay (C9). "refused" when the editor
+   *  could not take it (not mounted yet, opened read-only, a parse that would
+   *  drop content), and the caller remounts the editor on the body instead.
+   *  "dirty" when the editor held a keystroke the shell had not been handed:
+   *  it has been handed over now (`onChange` ran), nothing was applied, and
+   *  the caller must leave the page's base alone so that edit's save meets
+   *  the other version as a conflict. */
+  const applyToLiveEditor = useCallback(
+    (id: string, markdown: string): ExternalWriteResult => {
+      const live = editorExternalWriteRef.current;
+      if (!live || live.pageId !== id) return "refused";
+      return live.apply(markdown);
+    },
+    [],
+  );
+
   // ── page cache (instant re-navigation + hover prefetch) ──────
   const pageCache = useRef<Map<string, LoadedPage>>(
     new Map(seededPage ? [[seededPage.id, seededPage]] : []),
@@ -1343,15 +1389,23 @@ export function Shell({
   // reload the open page from disk if it changed externally (MCP / another tab).
   // A rev match means it was our own write — skip it (no self-reload flicker).
   const reloadCurrent = useCallback(
-    async (id: string) => {
+    async function reload(id: string, retries = 2): Promise<void> {
       const revisionAtRequest = revisionsRef.current.get(id);
       const r = await apiFetch(`/api/page/${id}`);
       if (!r.ok) return;
       const p = await r.json();
       // A PUT or a newer GET may finish while this response is in flight. The
       // old body must not replace either the cache or the live editor after its
-      // request baseline has advanced.
-      if (revisionsRef.current.get(id) !== revisionAtRequest) return;
+      // request baseline has advanced. That baseline may have moved to a body
+      // older than this answer (two writes back to back, their reads
+      // overlapping), so a read that still differs is asked again rather
+      // than dropped, a bounded number of times.
+      if (revisionsRef.current.get(id) !== revisionAtRequest) {
+        if (p.rev !== revisionsRef.current.get(id) && retries > 0) {
+          await reload(id, retries - 1);
+        }
+        return;
+      }
       if (p.rev === revisionsRef.current.get(id)) return;
       const loaded: LoadedPage = {
         id,
@@ -1373,14 +1427,25 @@ export function Shell({
         coverQueueRef.current.has(id)
       )
         return;
+      if (selectedIdRef.current !== id) {
+        revisionsRef.current.set(id, p.rev);
+        baseMarkdownRef.current.set(id, p.markdown);
+        return;
+      }
+      // Silent: an external change just refreshes the page, no toast. It
+      // lands in the live editor where it differs, and a new editor is
+      // built only when that one cannot take it. The editor answers first,
+      // before the base moves: a keystroke it had not handed over yet keeps
+      // the old base, and its save becomes a conflict instead of vanishing
+      // under the other version.
+      const applied = applyToLiveEditor(id, loaded.markdown);
+      if (applied === "dirty") return;
       revisionsRef.current.set(id, p.rev);
       baseMarkdownRef.current.set(id, p.markdown);
-      if (selectedIdRef.current !== id) return;
       setPage(loaded);
-      setEditorEpoch((e) => e + 1);
-      // silent — an external change just refreshes the page, no toast
+      if (applied === "refused") setEditorEpoch((e) => e + 1);
     },
-    [cachePut],
+    [applyToLiveEditor, cachePut],
   );
 
   const mutate = useCallback(
@@ -3960,6 +4025,177 @@ export function Shell({
     !!inheritedShareRoot ||
     !!expiredInheritedShareRoot;
   const shareScopeRevision = useMemo(() => shareTreeRevision(tree), [tree]);
+  // ── a page in conflict: the ways out (H13) ─────────────────
+  // A conflict used to end only in a copy, and until then the page took no
+  // save at all. Each way out below ends it in place, on the page, and the
+  // page saves again afterwards.
+
+  /** The page as the server holds it now, or null when it cannot be read. */
+  const readServerPage = useCallback(async (id: string) => {
+    try {
+      const response = await apiFetch(`/api/page/${id}`);
+      if (!response.ok) return null;
+      return loadedPageFromResponse(id, await response.json());
+    } catch {
+      return null;
+    }
+  }, []);
+
+  /** The other version wins: it becomes this tab's base and goes into the
+   *  live editor in place, and the local text is let go of, draft and latch
+   *  together, because the writer chose that. What the writer chose to let
+   *  go of is the local text as it stood at the press (`chosenOperation`, the
+   *  pending edit then, null for none): text typed while the other version
+   *  was being read is newer than the choice, so nothing is taken, the page
+   *  stays in conflict and the answer is false. */
+  const takeServerBody = useCallback(
+    (id: string, latest: LoadedPage, chosenOperation: string | null) => {
+      // The keystrokes the editor has not handed over yet count too.
+      if (selectedIdRef.current === id) editorFlushRef.current();
+      const pending = pendingRef.current?.id === id ? pendingRef.current : null;
+      if ((pending?.operationId ?? null) !== chosenOperation) return false;
+      // The editor answers before anything is let go of: a refusal remounts
+      // it on the body below, and an edit it still held is newer text.
+      let remount = false;
+      if (selectedIdRef.current === id) {
+        const applied = applyToLiveEditor(id, latest.markdown);
+        if (applied === "dirty") return false;
+        remount = applied === "refused";
+      }
+      if (pending) clearDraftOperation(id, pending.operationId);
+      try {
+        const key = draftStorageKey(id);
+        const raw = localStorage.getItem(key);
+        if (raw !== null && decodeDraft(raw).conflicted) localStorage.removeItem(key);
+      } catch {}
+      if (pendingRef.current?.id === id) pendingRef.current = null;
+      if (editorDirtyRef.current === id) editorDirtyRef.current = null;
+      conflictedPagesRef.current.delete(id);
+      revisionsRef.current.set(id, latest.rev);
+      baseMarkdownRef.current.set(id, latest.markdown);
+      cachePut(latest);
+      clearLocalRecoveryUnavailable(id);
+      setRecoveryMessage((current) => (current?.id === id ? null : current));
+      if (selectedIdRef.current !== id) return true;
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = null;
+      setPage((current) =>
+        current?.id === id
+          ? { ...current, markdown: latest.markdown, rev: latest.rev }
+          : current,
+      );
+      if (remount) setEditorEpoch((e) => e + 1);
+      setSave("idle");
+      return true;
+    },
+    [applyToLiveEditor, cachePut, clearDraftOperation, clearLocalRecoveryUnavailable],
+  );
+
+  const takeTheirs = useCallback(async () => {
+    const id = selectedIdRef.current;
+    if (
+      !id ||
+      !conflictedPagesRef.current.has(id) ||
+      conflictChoiceRef.current === id ||
+      recoveryCopyId === id
+    )
+      return;
+    conflictChoiceRef.current = id;
+    setConflictChoice({ id, kind: "theirs" });
+    try {
+      // The local text the writer lets go of is the text at the press.
+      editorFlushRef.current();
+      const chosen = pendingRef.current?.id === id ? pendingRef.current.operationId : null;
+      const latest = await readServerPage(id);
+      if (!conflictedPagesRef.current.has(id)) return;
+      if (!latest) {
+        setRecoveryMessage({
+          id,
+          text: "Couldn't read the other version. Your local draft is still safe.",
+        });
+        return;
+      }
+      if (!takeServerBody(id, latest, chosen)) {
+        setRecoveryMessage({ id, text: NEWER_EDITS_KEPT });
+      }
+    } finally {
+      if (conflictChoiceRef.current === id) conflictChoiceRef.current = null;
+      setConflictChoice((current) => (current?.id === id ? null : current));
+    }
+  }, [readServerPage, recoveryCopyId, takeServerBody]);
+
+  const keepMine = useCallback(async () => {
+    const id = selectedIdRef.current;
+    if (
+      !id ||
+      !conflictedPagesRef.current.has(id) ||
+      conflictChoiceRef.current === id ||
+      recoveryCopyId === id
+    )
+      return;
+    conflictChoiceRef.current = id;
+    setConflictChoice({ id, kind: "mine" });
+    try {
+      // The text visible at the press, not what the deferred serialize last
+      // handed over.
+      editorFlushRef.current();
+      const latest = await readServerPage(id);
+      if (!conflictedPagesRef.current.has(id)) return;
+      if (!latest) {
+        setRecoveryMessage({
+          id,
+          text: "Couldn't read the other version. Your local draft is still safe.",
+        });
+        return;
+      }
+      // Read after the request: an edit typed while it was out is the
+      // newest local text, and that is what is kept.
+      const pending = pendingRef.current?.id === id ? pendingRef.current : null;
+      if (!pending) {
+        // Nothing local is left to keep: the draft went with an earlier copy.
+        // A key typed during the read is newer text, and the page says so.
+        if (!takeServerBody(id, latest, null)) {
+          setRecoveryMessage({ id, text: NEWER_EDITS_KEPT });
+        }
+        return;
+      }
+      // Mine goes over the version just read: that body becomes the base and
+      // its rev the one the save carries. A third write between this read
+      // and the save is a conflict again, never overwritten unseen.
+      conflictedPagesRef.current.delete(id);
+      revisionsRef.current.set(id, latest.rev);
+      baseMarkdownRef.current.set(id, latest.markdown);
+      cachePut(latest);
+      const persisted = persistDraft(
+        localStorage,
+        draftStorageKey(id),
+        pending.md,
+        latest.rev,
+        pending.operationId,
+        Date.now(),
+        latest.markdown,
+        false,
+        draftSourcesForOperation(id, pending.operationId),
+      );
+      if (persisted) clearLocalRecoveryUnavailable(id);
+      else markLocalRecoveryUnavailable(id);
+      setRecoveryMessage((current) => (current?.id === id ? null : current));
+      if (selectedIdRef.current === id) setSave("saving");
+      await doSave(pending.id, pending.md, pending.operationId);
+    } finally {
+      if (conflictChoiceRef.current === id) conflictChoiceRef.current = null;
+      setConflictChoice((current) => (current?.id === id ? null : current));
+    }
+  }, [
+    cachePut,
+    clearLocalRecoveryUnavailable,
+    doSave,
+    markLocalRecoveryUnavailable,
+    readServerPage,
+    recoveryCopyId,
+    takeServerBody,
+  ]);
+
   const saveConflictCopy = useCallback(async () => {
     const sourceId = selectedIdRef.current;
     const sourcePath = sourceId ? findPath(treeRef.current, sourceId) : [];
@@ -3968,7 +4204,8 @@ export function Shell({
     if (
       !sourceId ||
       !conflictedPagesRef.current.has(sourceId) ||
-      recoveryCopyId === sourceId
+      recoveryCopyId === sourceId ||
+      conflictChoiceRef.current === sourceId
     )
       return;
     if (!sourceNode && !sourcePage) {
@@ -4060,29 +4297,53 @@ export function Shell({
       pendingRef.current?.id === sourceId &&
       pendingRef.current.operationId !== draft.operationId;
     const hasNewerDraft = newerStoredDraft || newerPendingDraft;
-    if (!hasNewerDraft) {
-      if (pendingRef.current?.id === sourceId) pendingRef.current = null;
-      if (editorDirtyRef.current === sourceId) editorDirtyRef.current = null;
-      conflictedPagesRef.current.delete(sourceId);
-      clearLocalRecoveryUnavailable(sourceId);
-      if (selectedIdRef.current === sourceId) setSave("saved");
-    }
-    setRecoveryMessage((current) => (current?.id === sourceId ? null : current));
-    setRecoveryCopyId((current) => (current === sourceId ? null : current));
-    await refreshTree().catch(() => {});
     if (hasNewerDraft) {
-      showToast("Copy saved. Newer edits are still in your local draft.");
+      setRecoveryMessage((current) => (current?.id === sourceId ? null : current));
+      setRecoveryCopyId((current) => (current === sourceId ? null : current));
+      await refreshTree().catch(() => {});
+      showToast(`Copy saved. ${NEWER_EDITS_KEPT}`);
       return;
     }
+    // The copy holds the local text, so the page itself takes the other
+    // version and stays open, saving again. The copy is one press away.
+    const latest = await readServerPage(sourceId);
+    setRecoveryCopyId((current) => (current === sourceId ? null : current));
+    await refreshTree().catch(() => {});
+    const openCopy = () => select(copyId);
+    if (latest && conflictedPagesRef.current.has(sourceId)) {
+      if (takeServerBody(sourceId, latest, draft.operationId)) {
+        showToast("Draft saved as a copy", { actionLabel: "Open", onAction: openCopy });
+      } else {
+        // Typed while the other version was read: the copy has the text up
+        // to the press, the page keeps the rest and stays in conflict.
+        showToast(`Copy saved. ${NEWER_EDITS_KEPT}`, {
+          actionLabel: "Open",
+          onAction: openCopy,
+        });
+      }
+      return;
+    }
+    // The other version could not be read: the page leaves the conflict
+    // and the copy opens, as it always did. Coming back loads the page anew.
+    if (pendingRef.current?.id === sourceId) pendingRef.current = null;
+    if (editorDirtyRef.current === sourceId) editorDirtyRef.current = null;
+    conflictedPagesRef.current.delete(sourceId);
+    clearLocalRecoveryUnavailable(sourceId);
+    setRecoveryMessage((current) => (current?.id === sourceId ? null : current));
+    if (selectedIdRef.current === sourceId) {
+      setSave("saved");
+      openCopy();
+    }
     showToast("Draft saved as a copy");
-    if (selectedIdRef.current === sourceId) select(copyId);
   }, [
     clearDraftOperation,
     clearLocalRecoveryUnavailable,
+    readServerPage,
     recoveryCopyId,
     refreshTree,
     select,
     showToast,
+    takeServerBody,
   ]);
   const editorContextNode = useMemo(
     () =>
@@ -6437,6 +6698,7 @@ export function Shell({
                   onEditorDirty={onEditorDirty}
                   onEditorSerialized={onEditorSerialized}
                   registerFlush={registerEditorFlush}
+                  registerExternalWrite={registerEditorExternalWrite}
                   pages={allPages}
                   searchHighlight={searchHighlight}
                   onSearchHighlightStatus={onSearchHighlightStatus}
@@ -6579,6 +6841,9 @@ export function Shell({
         pendingDelete={pendingDelete}
         recoveryMessage={recoveryMessage}
         recoveryCopyId={recoveryCopyId}
+        conflictChoice={conflictChoice}
+        onKeepMine={keepMine}
+        onTakeTheirs={takeTheirs}
         onSaveConflictCopy={saveConflictCopy}
         toasts={toasts}
         urgentToast={urgentToast}

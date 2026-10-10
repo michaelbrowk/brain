@@ -244,6 +244,15 @@ export function SnackbarSlot({
   );
 }
 
+/** One of several answers a pill offers at once: a page in conflict asks
+ *  which version stays, and the answers are equals, so none of them is the
+ *  pill's single action. */
+export type SnackbarChoice = {
+  label: string;
+  onAction: () => void;
+  disabled?: boolean;
+};
+
 export type SnackbarPillProps = {
   icon?: string;
   title: string;
@@ -251,6 +260,11 @@ export type SnackbarPillProps = {
   actionLabel?: string;
   onAction?: () => void;
   actionDisabled?: boolean;
+  /** Several answers instead of one action. The pill keeps its capsule while
+   *  they fit beside the words; on a narrow screen they wrap under them and
+   *  the pill rounds to the panel radius, since a capsule two rows tall
+   *  would cut into the words at its corners. */
+  choices?: readonly SnackbarChoice[];
   durationSec?: number;
   onHoverStart?: () => void;
   onHoverEnd?: () => void;
@@ -265,11 +279,44 @@ export function SnackbarPill({
   actionLabel,
   onAction,
   actionDisabled,
+  choices,
   durationSec,
   onHoverStart,
   onHoverEnd,
   ref,
 }: SnackbarPillProps & { ref?: React.Ref<HTMLDivElement> }) {
+  if (choices?.length) {
+    return (
+      <motion.div
+        ref={ref}
+        {...slideUp}
+        layout="position"
+        onHoverStart={onHoverStart}
+        onHoverEnd={onHoverEnd}
+        className="brain-toast brain-toast-choices pointer-events-auto relative flex flex-wrap items-center justify-start gap-x-3 gap-y-2 overflow-hidden py-2.5 pr-2.5 pl-5"
+      >
+        <div className="min-w-0 flex-[1_1_12rem]">
+          <div className="text-control truncate font-semibold text-paper">{title}</div>
+          {subtitle && <div className="text-caption mt-0.5 text-paper/60">{subtitle}</div>}
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {/* By place, not by label: a label that turns into "Saving…" is
+              the same button, and keeps the focus it has. */}
+          {choices.map((choice, index) => (
+            <Button
+              key={index}
+              variant="pill"
+              className="shrink-0"
+              onClick={choice.onAction}
+              disabled={choice.disabled}
+            >
+              {choice.label}
+            </Button>
+          ))}
+        </div>
+      </motion.div>
+    );
+  }
   return (
     <motion.div
       ref={ref}

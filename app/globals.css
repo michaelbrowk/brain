@@ -2726,6 +2726,12 @@ a.brain-share-url:active {
   box-shadow: var(--shadow-3);
   color: var(--paper);
 }
+/* A pill with several answers (`SnackbarChoice`). On one row it is 52px tall,
+   so the panel radius still draws the capsule; wrapped onto two rows on a
+   phone it rounds there instead of cutting into the words at its corners. */
+.brain-toast.brain-toast-choices {
+  border-radius: var(--r-panel);
+}
 
 @media (prefers-reduced-motion: reduce) {
   .btn:active,

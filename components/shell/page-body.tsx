@@ -83,6 +83,13 @@ export interface PageBodyProps {
   onEditorDirty: (pageId: string) => void;
   onEditorSerialized: (pageId: string) => void;
   registerFlush: NonNullable<EditorProps["registerFlush"]>;
+  /** The live editor's in-place apply of a body written elsewhere, filed
+   *  under the page it shows so a late answer for another page never
+   *  reaches it. */
+  registerExternalWrite: (
+    pageId: string,
+    apply: Parameters<NonNullable<EditorProps["registerExternalWrite"]>>[0],
+  ) => () => void;
   pages: NonNullable<EditorProps["pages"]>;
   searchHighlight: EditorProps["searchHighlight"];
   onSearchHighlightStatus: NonNullable<EditorProps["onSearchHighlightStatus"]>;
@@ -119,6 +126,7 @@ export function PageBody({
   onEditorDirty,
   onEditorSerialized,
   registerFlush,
+  registerExternalWrite,
   pages,
   searchHighlight,
   onSearchHighlightStatus,
@@ -163,6 +171,7 @@ export function PageBody({
           onDirty={() => onEditorDirty(page.id)}
           onSerialized={() => onEditorSerialized(page.id)}
           registerFlush={registerFlush}
+          registerExternalWrite={(apply) => registerExternalWrite(page.id, apply)}
           pages={pages}
           onNavigate={onSelect}
           searchHighlight={

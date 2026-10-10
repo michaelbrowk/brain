@@ -7869,6 +7869,12 @@ test("a cross-tab conflict stops PUTs and recovers the exact draft as a sibling"
     await route.continue();
   });
   await page.getByRole("button", { name: "Save a copy" }).click();
+  // The copy holds the local text, and the page itself takes the other
+  // version in place and stays open; the toast opens the copy.
+  await expect(page.getByRole("textbox", { name: "Page content" })).toContainText(
+    "Remote body that must survive",
+  );
+  await page.getByRole("button", { name: "Open", exact: true }).click();
   await expect
     .poll(() => new URL(page.url()).pathname.split("/").at(-1))
     .not.toBe(created.id);
@@ -7955,6 +7961,12 @@ test("conflict recovery clears adopted drafts after edit and repeated reloads", 
   expect(originalPuts).toBe(1);
 
   await page.getByRole("button", { name: "Save a copy" }).click();
+  // The copy holds the local text, and the page itself takes the other
+  // version in place and stays open; the toast opens the copy.
+  await expect(page.getByRole("textbox", { name: "Page content" })).toContainText(
+    "Remote durable body",
+  );
+  await page.getByRole("button", { name: "Open", exact: true }).click();
   await expect
     .poll(() => new URL(page.url()).pathname.split("/").at(-1))
     .not.toBe(created.id);
@@ -8030,6 +8042,12 @@ test("recovery falls back to a visible root copy when its parent was trashed", a
   });
 
   await page.getByRole("button", { name: "Save a copy" }).click();
+  // The copy holds the local text, and the page itself takes the other
+  // version in place and stays open; the toast opens the copy.
+  await expect(page.getByRole("textbox", { name: "Page content" })).toContainText(
+    "Remote child body",
+  );
+  await page.getByRole("button", { name: "Open", exact: true }).click();
   await expect
     .poll(() => new URL(page.url()).pathname.split("/").at(-1))
     .not.toBe(source.id);

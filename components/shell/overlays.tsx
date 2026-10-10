@@ -81,6 +81,10 @@ export interface ShellOverlaysProps {
   pendingDelete: { id: string; title: string; error?: string } | null;
   recoveryMessage: { id: string; text: string } | null;
   recoveryCopyId: string | null;
+  /** The way out of a conflict that is running, besides the copy. */
+  conflictChoice: { id: string; kind: "mine" | "theirs" } | null;
+  onKeepMine: () => Promise<void>;
+  onTakeTheirs: () => Promise<void>;
   onSaveConflictCopy: () => Promise<void>;
   /** The general-purpose pills standing, oldest first. A pill whose action
    *  has begun and not settled is `pending`: its button is out of reach and
@@ -144,6 +148,9 @@ export function ShellOverlays({
   pendingDelete,
   recoveryMessage,
   recoveryCopyId,
+  conflictChoice,
+  onKeepMine,
+  onTakeTheirs,
   onSaveConflictCopy,
   toasts,
   urgentToast,
@@ -155,6 +162,8 @@ export function ShellOverlays({
   onPauseDelete,
   onResumeDelete,
 }: ShellOverlaysProps) {
+  const conflictBusy =
+    recoveryCopyId === selectedId || conflictChoice?.id === selectedId;
   const toastsShown =
     !pendingDelete &&
     save !== "conflict" &&
@@ -340,6 +349,11 @@ export function ShellOverlays({
           actionDisabled={pageRefUndo?.status === "restoring"}
           onAction={() => void onRestoreRemovedPageRef()}
         />
+        {/* A page in conflict asks which version stays, and each answer
+            ends the conflict on the page: Keep mine writes the local text
+            over the other version, Take theirs puts the other version into
+            the editor where the writer is, and Save a copy keeps the local
+            text as a sibling page first. One runs at a time. */}
         <Snackbar
           open={save === "conflict" && !pendingDelete}
           title="Page changed elsewhere"
@@ -348,11 +362,28 @@ export function ShellOverlays({
               ? LOCAL_RECOVERY_UNAVAILABLE
               : recoveryMessage?.id === selectedId
               ? recoveryMessage.text
-              : "Save your local draft as a sibling copy."
+              : "Choose which version this page keeps."
           }
-          actionLabel={recoveryCopyId === selectedId ? "Saving…" : "Save a copy"}
-          actionDisabled={recoveryCopyId === selectedId}
-          onAction={onSaveConflictCopy}
+          choices={[
+            {
+              label:
+                conflictChoice?.id === selectedId && conflictChoice.kind === "mine"
+                  ? "Saving…"
+                  : "Keep mine",
+              onAction: () => void onKeepMine(),
+              disabled: conflictBusy,
+            },
+            {
+              label: "Take theirs",
+              onAction: () => void onTakeTheirs(),
+              disabled: conflictBusy,
+            },
+            {
+              label: recoveryCopyId === selectedId ? "Saving…" : "Save a copy",
+              onAction: () => void onSaveConflictCopy(),
+              disabled: conflictBusy,
+            },
+          ]}
         />
         <Snackbar
           open={

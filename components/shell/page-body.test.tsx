@@ -75,6 +75,7 @@ function baseProps(overrides: Partial<PageBodyProps> = {}): PageBodyProps {
     onEditorDirty: vi.fn(),
     onEditorSerialized: vi.fn(),
     registerFlush,
+    registerExternalWrite: vi.fn(() => () => {}),
     pages: [],
     searchHighlight: null,
     onSearchHighlightStatus: vi.fn(),
@@ -148,6 +149,16 @@ describe("PageBody editor wiring", () => {
   it("passes Shell's registerFlush through by identity", () => {
     const props = baseProps();
     expect(editorElement(props).props.registerFlush).toBe(props.registerFlush);
+  });
+
+  it("files the editor's in-place apply under the rendered page id", () => {
+    const props = baseProps();
+    const apply = vi.fn(() => "applied" as const);
+    const editor = editorElement(props).props as {
+      registerExternalWrite: (write: typeof apply) => () => void;
+    };
+    editor.registerExternalWrite(apply);
+    expect(props.registerExternalWrite).toHaveBeenCalledWith("alpha", apply);
   });
 
   it("binds onChange / onDirty / onSerialized to the rendered page id", () => {

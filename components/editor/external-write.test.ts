@@ -1,0 +1,252 @@
+// @vitest-environment jsdom
+
+/** A write to the open page from somewhere else (another device, an agent
+ *  through MCP) reaches the editor as one replace over the range that
+ *  differs, through the whole plugin stack. The caret stays on its words,
+ *  the view keeps the DOM of every block the write did not touch, and the
+ *  write is not an undo step: the writer's own steps stay undoable around
+ *  it. */
+
+import { Editor, defaultValueCtx, editorViewCtx, parserCtx, rootCtx } from "@milkdown/kit/core";
+import { commonmark } from "@milkdown/kit/preset/commonmark";
+import { gfm } from "@milkdown/kit/preset/gfm";
+import type { EditorView } from "@milkdown/kit/prose/view";
+import { Plugin } from "@milkdown/kit/prose/state";
+import type { MarkdownNode, Root } from "@milkdown/kit/transformer";
+import { $prose, $remark } from "@milkdown/kit/utils";
+import { undo, undoDepth } from "@milkdown/kit/prose/history";
+import { TextSelection, type Transaction } from "@milkdown/kit/prose/state";
+import { ReplaceStep } from "@milkdown/kit/prose/transform";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mountFullStack, type MountedStack } from "./editor-stack.harness";
+import { applyExternalMarkdown, EXTERNAL_WRITE_META } from "./external-write";
+import { images } from "./image";
+import { loadGuard } from "./load-guard";
+import { pageRef, setPageRefOrigin, syncLivePageInfo } from "./page-ref";
+import { createPageRefNesting } from "./page-ref-nesting";
+
+const BASE = ["First paragraph.", "Second paragraph.", "Third paragraph."].join("\n\n");
+
+describe("an external write applied in place", () => {
+  let stack: MountedStack;
+
+  beforeEach(async () => {
+    window.history.replaceState({}, "", "/p/page1");
+    vi.stubGlobal("fetch", async () => ({ ok: true, json: async () => ({ tasks: [] }) }));
+    stack = await mountFullStack(BASE);
+  });
+  afterEach(() => {
+    stack.editor.destroy();
+    vi.unstubAllGlobals();
+    syncLivePageInfo();
+    setPageRefOrigin("");
+    document.body.replaceChildren();
+    window.history.replaceState({}, "", "/");
+  });
+
+  const parse = (markdown: string) => stack.editor.ctx.get(parserCtx)(markdown);
+  const textPos = (needle: string) => {
+    let found = -1;
+    stack.view.state.doc.descendants((node, pos) => {
+      if (found < 0 && node.isText && node.text?.includes(needle)) {
+        found = pos + node.text.indexOf(needle);
+      }
+      return found < 0;
+    });
+    if (found < 0) throw new Error(`no text ${needle}`);
+    return found;
+  };
+  const caretAt = (pos: number) =>
+    stack.view.dispatch(
+      stack.view.state.tr.setSelection(TextSelection.create(stack.view.state.doc, pos)),
+    );
+  /** Every transaction the view applies from now on. */
+  const recordTransactions = () => {
+    const seen: Transaction[] = [];
+    stack.view.setProps({
+      // Appended transactions too: a plugin answering the write with a
+      // change of its own would be counted as the writer's edit.
+      dispatchTransaction: (tr) => {
+        const { state, transactions } = stack.view.state.applyTransaction(tr);
+        seen.push(...transactions);
+        stack.view.updateState(state);
+      },
+    });
+    return seen;
+  };
+
+  it("replaces only the differing range and keeps the caret on its words", () => {
+    caretAt(textPos("Third") + 3);
+    const thirdDom = stack.view.nodeDOM(textPos("Third") - 1);
+    const seen = recordTransactions();
+    const next = [
+      "First paragraph, edited on the phone.",
+      "Second paragraph.",
+      "Third paragraph.",
+    ].join("\n\n");
+
+    expect(applyExternalMarkdown(stack.view, parse, next)).toBe("applied");
+
+    expect(stack.serialize().trim()).toBe(next);
+    // The caret is still after "Thi", though everything before it moved.
+    expect(stack.view.state.selection.head).toBe(textPos("Third") + 3);
+    // One replace, inside the first paragraph, and nothing else redrawn.
+    const external = seen.filter((tr) => tr.getMeta(EXTERNAL_WRITE_META) === true);
+    expect(external).toHaveLength(1);
+    const steps = external[0].steps;
+    expect(steps).toHaveLength(1);
+    const step = steps[0] as ReplaceStep;
+    expect(step).toBeInstanceOf(ReplaceStep);
+    const firstEnd = stack.view.state.doc.child(0).nodeSize;
+    expect((step as unknown as { to: number }).to).toBeLessThanOrEqual(firstEnd);
+    expect(stack.view.nodeDOM(textPos("Third") - 1)).toBe(thirdDom);
+    // Nothing in the stack answered with an edit of the writer's own.
+    expect(
+      seen.filter(
+        (tr) =>
+          tr.docChanged &&
+          tr.getMeta(EXTERNAL_WRITE_META) !== true &&
+          tr.getMeta("addToHistory") !== false,
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("is not an undo step, and the writer's own step stays undoable", () => {
+    const end = textPos("Third paragraph.") + "Third paragraph.".length;
+    stack.view.dispatch(stack.view.state.tr.insertText(" Mine.", end));
+    expect(undoDepth(stack.view.state)).toBe(1);
+    const next = [
+      "First paragraph, edited by an agent.",
+      "Second paragraph.",
+      "Third paragraph. Mine.",
+    ].join("\n\n");
+
+    expect(applyExternalMarkdown(stack.view, parse, next)).toBe("applied");
+    expect(undoDepth(stack.view.state)).toBe(1);
+
+    undo(stack.view.state, stack.view.dispatch);
+    expect(stack.serialize().trim()).toBe(
+      ["First paragraph, edited by an agent.", "Second paragraph.", "Third paragraph."].join(
+        "\n\n",
+      ),
+    );
+  });
+
+  it("changes nothing when the body is the one the editor holds", () => {
+    const seen = recordTransactions();
+    expect(applyExternalMarkdown(stack.view, parse, BASE)).toBe("unchanged");
+    expect(seen.filter((tr) => tr.docChanged)).toHaveLength(0);
+  });
+
+  it("refuses a view that takes no edits, so the caller remounts instead", () => {
+    stack.view.setProps({ editable: () => false });
+    expect(applyExternalMarkdown(stack.view, parse, "Something else.")).toBe("refused");
+    expect(stack.serialize().trim()).toBe(BASE);
+  });
+
+  it("applies structural changes: blocks added, removed and retyped", () => {
+    caretAt(textPos("Third") + 2);
+    const next = [
+      "# A heading now",
+      "- Second paragraph.",
+      "New block in the middle.",
+      "Third paragraph.",
+    ].join("\n\n");
+    expect(applyExternalMarkdown(stack.view, parse, next)).toBe("applied");
+    expect(stack.serialize().trim()).toBe(next);
+    expect(stack.view.state.selection.head).toBe(textPos("Third") + 2);
+  });
+});
+
+describe("an external write that drops a page row", () => {
+  afterEach(() => {
+    syncLivePageInfo();
+    setPageRefOrigin("");
+    document.body.replaceChildren();
+  });
+
+  it("applies without asking the writer to confirm a removal they never made", async () => {
+    setPageRefOrigin("http://localhost:3000");
+    syncLivePageInfo([{ id: "abc123", title: "Page", icon: "" }]);
+    const root = document.createElement("div");
+    document.body.append(root);
+    const asked: unknown[] = [];
+    const editor = await Editor.make()
+      .config((ctx) => {
+        ctx.set(rootCtx, root);
+        ctx.set(defaultValueCtx, "A\n\n[Page](/p/abc123)\n\nB");
+      })
+      .use(commonmark)
+      .use(gfm)
+      .use(pageRef)
+      .use(createPageRefNesting(() => null, false, () => {}, (removed) => asked.push(removed)))
+      .create();
+    const view = editor.ctx.get(editorViewCtx) as EditorView;
+    const result = applyExternalMarkdown(
+      view,
+      (markdown) => editor.ctx.get(parserCtx)(markdown),
+      "A\n\nB",
+    );
+    expect(asked).toEqual([]);
+    expect(result).toBe("applied");
+    expect(view.state.doc.textContent).toBe("AB");
+    await editor.destroy();
+  });
+});
+
+describe("an external write the editor cannot take", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    document.body.replaceChildren();
+  });
+
+  async function mini(markdown: string, extra: unknown[] = []) {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const editor = await Editor.make()
+      .config((ctx) => {
+        ctx.set(rootCtx, root);
+        ctx.set(defaultValueCtx, markdown);
+      })
+      .use(commonmark)
+      .use(gfm)
+      .use(extra.flat() as never)
+      .use(loadGuard(() => {}))
+      .create();
+    const view = editor.ctx.get(editorViewCtx) as EditorView;
+    const parse = (next: string) => editor.ctx.get(parserCtx)(next);
+    return { editor, view, parse };
+  }
+
+  it("refuses a body whose parse would drop content", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    // The remark pass that once made every image a block: a heading holding
+    // one cannot be built, and a load of that body would open read-only.
+    const blockEveryImage = $remark("zzBlockEveryImageExternal", () => () => (tree: Root) => {
+      const walk = (node: MarkdownNode) => {
+        node.children = node.children?.map((child) => {
+          if (child.type === "image") return { ...child, type: "brainImage" };
+          walk(child);
+          return child;
+        });
+      };
+      walk(tree as unknown as MarkdownNode);
+    });
+    const { editor, view, parse } = await mini("Plain.", [images, blockEveryImage]);
+    expect(applyExternalMarkdown(view, parse, "# Title ![i](/a.png) end\n\nafter")).toBe(
+      "refused",
+    );
+    expect(view.state.doc.textContent).toBe("Plain.");
+    await editor.destroy();
+  });
+
+  it("answers refused when a plugin refuses the transaction", async () => {
+    const refuseAll = $prose(
+      () => new Plugin({ filterTransaction: (tr) => !tr.docChanged }),
+    );
+    const { editor, view, parse } = await mini("Plain.", [refuseAll]);
+    expect(applyExternalMarkdown(view, parse, "Other.")).toBe("refused");
+    expect(view.state.doc.textContent).toBe("Plain.");
+    await editor.destroy();
+  });
+});

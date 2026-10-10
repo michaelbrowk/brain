@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -9,6 +10,7 @@ import type {
   StoredGmailMailAccount,
   StoredImapMailAccount,
 } from "./account-types";
+import { createMailServiceHttpServer } from "./http";
 import type { ImapSessionClient } from "./imapflow-adapter";
 import type { CachedProviderThread } from "./message-cache";
 import {
@@ -619,6 +621,163 @@ describe("multi-account message registry", () => {
     } finally {
       database.close();
     }
+  });
+});
+
+describe("background sync health never waits on an account", () => {
+  const UNREACHABLE_ID = "account-a44444444444444444444444444444444";
+
+  function twoAccountStore(): MultiMailAccountStore {
+    const healthy = gmailAccountFixture();
+    const imap = imapAccountFixture();
+    const unreachable = {
+      ...imap,
+      account: { ...imap.account, accountId: UNREACHABLE_ID },
+    } as StoredImapMailAccount;
+    const store = storeFixture();
+    vi.mocked(store.listAccounts).mockResolvedValue([healthy, unreachable]);
+    vi.mocked(store.readAccount).mockImplementation(async (accountId) =>
+      accountId === UNREACHABLE_ID ? unreachable : healthy,
+    );
+    vi.mocked(store.countAccounts).mockResolvedValue(2);
+    return store;
+  }
+
+  async function serveHealth(
+    service: MultiAccountMailMessageService,
+    store: MultiMailAccountStore,
+  ): Promise<{ status: number; body: Record<string, unknown>; elapsedMs: number }> {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-mail-registry-http-"));
+    roots.push(root);
+    const socketPath = path.join(root, "mail.sock");
+    const server = createMailServiceHttpServer({
+      build: { commit: "dev", builtAt: "dev" },
+      messages: service,
+      accounts: {
+        localSchemaVersion: 2,
+        accountCount: () => store.countAccounts(),
+      } as unknown as Parameters<typeof createMailServiceHttpServer>[0]["accounts"],
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, () => resolve());
+    });
+    const startedAt = Date.now();
+    try {
+      return await new Promise((resolve, reject) => {
+        const request = httpRequest(
+          {
+            socketPath,
+            method: "GET",
+            path: "/v1/health",
+            headers: { Host: "brain-mail" },
+          },
+          (response) => {
+            const chunks: Buffer[] = [];
+            response.on("data", (chunk: Buffer) => chunks.push(chunk));
+            response.on("end", () =>
+              resolve({
+                status: response.statusCode ?? 0,
+                body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
+                elapsedMs: Date.now() - startedAt,
+              }),
+            );
+          },
+        );
+        request.once("error", reject);
+        request.end();
+      });
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }
+
+  it("answers degraded at once while another account's provider connect hangs", async () => {
+    const stateDirectory = await mkdtemp(path.join(tmpdir(), "brain-mail-registry-"));
+    roots.push(stateDirectory);
+    const store = twoAccountStore();
+    const hung = deferred<never>();
+    const create = vi.fn(async (account: { account: { accountId: string } }) =>
+      account.account.accountId === UNREACHABLE_ID
+        ? hung.promise
+        : { provider: providerFixture({}) },
+    );
+    const service = new MultiAccountMailMessageService({
+      stateDirectory,
+      store,
+      providerFactory: { create } as unknown as MailProviderFactory,
+    });
+    await service.syncAccount(ACCOUNT_ID, { maxItems: 20 });
+    const hanging = service.syncAccount(UNREACHABLE_ID, { maxItems: 20 });
+    hanging.catch(() => undefined);
+    await vi.waitFor(() => expect(create).toHaveBeenCalledTimes(2));
+
+    const health = await serveHealth(service, store);
+
+    expect(health.status).toBe(200);
+    expect(health.body).toMatchObject({
+      status: "degraded",
+      receiveReadiness: "degraded",
+      activeAccounts: 2,
+    });
+    expect(health.elapsedMs).toBeLessThan(1_000);
+    expect(create).toHaveBeenCalledTimes(2);
+  }, 10_000);
+
+  it("names the unreachable account's failure instead of answering unavailable", async () => {
+    const stateDirectory = await mkdtemp(path.join(tmpdir(), "brain-mail-registry-"));
+    roots.push(stateDirectory);
+    const store = twoAccountStore();
+    const create = vi.fn(async (account: { account: { accountId: string } }) => {
+      if (account.account.accountId === UNREACHABLE_ID) {
+        throw new MailProviderSyncError("mail_provider_unavailable");
+      }
+      return { provider: providerFixture({}) };
+    });
+    const service = new MultiAccountMailMessageService({
+      stateDirectory,
+      store,
+      providerFactory: { create } as unknown as MailProviderFactory,
+    });
+    await service.syncAccount(ACCOUNT_ID, { maxItems: 20 });
+    await expect(
+      service.syncAccount(UNREACHABLE_ID, { maxItems: 20 }),
+    ).rejects.toThrow(MailProviderSyncError);
+
+    const health = await serveHealth(service, store);
+
+    expect(health.status).toBe(200);
+    expect(health.body).toMatchObject({
+      status: "degraded",
+      lastErrorCode: "mail_provider_unavailable",
+    });
+    expect(create).toHaveBeenCalledTimes(2);
+    await service.close();
+  }, 10_000);
+
+  it("never resolves an account or dials a provider to answer", async () => {
+    const stateDirectory = await mkdtemp(path.join(tmpdir(), "brain-mail-registry-"));
+    roots.push(stateDirectory);
+    const store = twoAccountStore();
+    const create = vi.fn();
+    const service = new MultiAccountMailMessageService({
+      stateDirectory,
+      store,
+      providerFactory: { create },
+    });
+
+    await expect(service.readBackgroundSyncHealth()).resolves.toEqual({
+      lastSuccessfulAt: null,
+      lastErrorCode: null,
+    });
+    const health = await serveHealth(service, store);
+
+    expect(health.status).toBe(200);
+    expect(health.body).toMatchObject({ status: "degraded", lastErrorCode: null });
+    expect(create).not.toHaveBeenCalled();
+    expect(store.readAccount).not.toHaveBeenCalled();
+    await service.close();
   });
 });
 

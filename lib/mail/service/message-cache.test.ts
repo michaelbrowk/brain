@@ -3618,6 +3618,101 @@ describe("per-account message cache", () => {
     reopened.close();
   });
 
+  it("keeps a hidden mailbox on the rebuild generation when an archive lands mid-rebuild", async () => {
+    const fixture = await createCache();
+    const first = fixture.cache.beginInitial("100");
+    fixture.cache.putInitialPage(
+      first,
+      [threadFixture("thread-a", 1_000), threadFixture("thread-b", 1_001)],
+      null,
+      null,
+    );
+    fixture.cache.completeInitial(first, 2_000);
+    const second = fixture.cache.beginInitial("200");
+    fixture.cache.putInitialPage(
+      second,
+      [threadFixture("thread-a", 1_000)],
+      null,
+      "next-page",
+    );
+    fixture.cache.markReauthRequired("mail_provider_reauth_required");
+
+    // Done on a thread while the rebuild is still paging writes the active
+    // generation, which must not pull All Mail's staged generation back.
+    fixture.cache.replaceActiveThread(threadFixture("thread-b", 1_001, ["all"]));
+    withDatabase(cacheDatabasePath(fixture.cacheRoot), (database) => {
+      expect(
+        database
+          .prepare(
+            `SELECT staged_thread_generation
+               FROM mailbox_sync_state
+              WHERE account_id = ? AND mailbox_id = 'all'`,
+          )
+          .get(ACCOUNT_ID),
+      ).toEqual({ staged_thread_generation: second });
+    });
+    fixture.cache.close();
+
+    const reopened = new SqliteMailMessageCache({
+      cacheRoot: fixture.cacheRoot,
+      accountId: ACCOUNT_ID,
+    });
+    await expect(reopened.initialize()).resolves.toBeUndefined();
+    reopened.close();
+  });
+
+  it("drops unpublished memberships a hidden mailbox no longer stages on open", async () => {
+    const fixture = await createCache();
+    const first = fixture.cache.beginInitial("100");
+    fixture.cache.putInitialPage(
+      first,
+      [threadFixture("thread-a", 1_000)],
+      null,
+      null,
+    );
+    fixture.cache.completeInitial(first, 2_000);
+    const second = fixture.cache.beginInitial("200");
+    fixture.cache.putInitialPage(
+      second,
+      [threadFixture("thread-a", 1_000)],
+      null,
+      "next-page",
+    );
+    fixture.cache.markReauthRequired("mail_provider_reauth_required");
+    fixture.cache.close();
+
+    // The state an earlier runtime left behind: All Mail pulled back to the
+    // active generation while its memberships for the rebuild stayed.
+    const databasePath = cacheDatabasePath(fixture.cacheRoot);
+    withDatabase(databasePath, (database) => {
+      database
+        .prepare(
+          `UPDATE mailbox_sync_state
+              SET staged_thread_generation = ?
+            WHERE account_id = ? AND mailbox_id = 'all'`,
+        )
+        .run(first, ACCOUNT_ID);
+    });
+
+    const reopened = new SqliteMailMessageCache({
+      cacheRoot: fixture.cacheRoot,
+      accountId: ACCOUNT_ID,
+    });
+    await expect(reopened.initialize()).resolves.toBeUndefined();
+    reopened.close();
+    withDatabase(databasePath, (database) => {
+      expect(
+        database
+          .prepare(
+            `SELECT COUNT(*) AS count
+               FROM thread_mailboxes
+              WHERE account_id = ? AND mailbox_id = 'all' AND generation = ?`,
+          )
+          .get(ACCOUNT_ID, second),
+      ).toEqual({ count: 0 });
+    });
+  });
+
   it("fails closed when a rollback runtime rebinds an IMAP credential", async () => {
     const fixture = await createCache();
     fixture.cache.bindProviderCacheIdentity({

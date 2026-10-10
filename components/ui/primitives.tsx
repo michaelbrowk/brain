@@ -293,7 +293,7 @@ export function SnackbarPill({
         layout="position"
         onHoverStart={onHoverStart}
         onHoverEnd={onHoverEnd}
-        className="brain-toast brain-toast-choices pointer-events-auto relative flex flex-wrap items-center justify-end gap-x-3 gap-y-2 overflow-hidden py-2.5 pr-2.5 pl-5"
+        className="brain-toast brain-toast-choices pointer-events-auto relative flex flex-wrap items-center justify-start gap-x-3 gap-y-2 overflow-hidden py-2.5 pr-2.5 pl-5"
       >
         <div className="min-w-0 flex-[1_1_12rem]">
           <div className="text-control truncate font-semibold text-paper">{title}</div>

@@ -25,7 +25,15 @@ through the same trusted, encrypted account binding and verified TLS session,
 then publishes Inbox metadata for at most the newest 200 messages in bounded
 pages of 20. Its cache identity is `(accountId, Inbox, UIDVALIDITY, UID)` and
 each IMAP message is deliberately represented as one Brain thread until
-conversation grouping is implemented. New UIDs are polled incrementally;
+conversation grouping is implemented. A rebuild page that was asked for and
+not read (the session's deadline closed it, or the server failed it) is asked
+for again at half its width, down to one message, and stays narrow until the
+range that failed has been read. A single message that still cannot be read
+is asked for without BODYSTRUCTURE and the list headers, and then for UID,
+flags, date and size alone, so a letter the server cannot describe within a
+session is cached without its attachment mark and list category, or without
+sender and subject, and never holds the rebuild or is passed over. The retry
+state is in memory, as the Sent scan's is. New UIDs are polled incrementally;
 UIDVALIDITY changes, definite expunges, and the tenth incremental poll rebuild
 the bounded snapshot. Message bodies, inline images, attachments, and cached
 remote images now reach the reader through the same isolated content pipeline

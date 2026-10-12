@@ -250,6 +250,12 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
    */
   private sentScanRetry: SentScanRetry | null = null;
   /**
+   * A page of the first Inbox rebuild that was asked for and not read, and
+   * how the next call at its token asks. In memory only, like the Sent
+   * scan's: after a restart the same halving finds the same letter again.
+   */
+  private initialPageRetry: InitialPageRetry | null = null;
+  /**
    * When the screen last asked for a scan. The sync's sessions ask the Sent
    * folder's STATUS only while it keeps asking. Nothing tells this adapter
    * that the screen was switched off, so the STATUS goes on for
@@ -303,6 +309,50 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
     const maxItems = validatePageSize(input.maxItems);
     const parsedToken =
       input.pageToken === null ? null : parseInitialPageToken(input.pageToken);
+    const retry =
+      this.initialPageRetry?.pageToken === input.pageToken ? this.initialPageRetry : null;
+    // Kept outside the session: one that runs into its deadline is abandoned
+    // mid-await, and what it asked for is all that is known about it then.
+    const attempt = { asked: 0, query: retry?.query ?? ("full" as InitialFetchQuery) };
+    let page: MailProviderInitialPage;
+    try {
+      page = await this.readInitialPage(
+        parsedToken,
+        retry === null ? maxItems : Math.min(maxItems, retry.width),
+        attempt,
+        signal,
+      );
+    } catch (error) {
+      if (attempt.asked > 0 && !signal.aborted) {
+        this.initialPageRetry = afterUnreadInitialPage(input.pageToken, attempt, retry);
+      }
+      throw error;
+    }
+    // The page after a narrowed one stays narrow until the range that failed
+    // has been gone through: one of its halves holds the letter.
+    const left = (retry?.left ?? 0) - attempt.asked;
+    this.initialPageRetry =
+      retry !== null && left > 0 && page.nextPageToken !== null
+        ? Object.freeze({
+            pageToken: page.nextPageToken,
+            width: Math.min(retry.width, left),
+            left,
+            query: "full" as const,
+          })
+        : null;
+    return page;
+  }
+
+  /**
+   * One page of the first rebuild, newest first. `width` is the page size,
+   * narrower than the caller's after a page that could not be read.
+   */
+  private readInitialPage(
+    parsedToken: InitialPageToken | null,
+    maxItems: number,
+    attempt: { asked: number; readonly query: InitialFetchQuery },
+    signal: AbortSignal,
+  ): Promise<MailProviderInitialPage> {
     return this.runSync(signal, (client) =>
       withInbox(client, async (mailbox) => {
         const uidValidity = validateUidValidity(mailbox.uidValidity);
@@ -336,9 +386,10 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
           token.minimumSequence,
           token.nextEndSequence - maxItems + 1,
         );
+        attempt.asked = token.nextEndSequence - startSequence + 1;
         const messages = await client.fetchAll(
           `${startSequence}:${token.nextEndSequence}`,
-          metadataFetchQuery(),
+          initialFetchQuery(attempt.query),
         );
         assertInitialPageSnapshot(messages, {
           startSequence,
@@ -1739,6 +1790,71 @@ function metadataFetchQuery() {
     // imapflow fetches named headers with BODY.PEEK[HEADER.FIELDS (…)], so
     // the read-only session stays flag-neutral.
     headers: ["list-id", "list-unsubscribe", "precedence", "auto-submitted"],
+  });
+}
+
+/**
+ * What a page of the first rebuild asks for each letter. `full` is the
+ * metadata fetch. A letter that no session can read with it (a server that
+ * parses a large letter on demand to answer BODYSTRUCTURE runs past the
+ * session's deadline) is asked for without BODYSTRUCTURE and the list
+ * headers, then for what the server's index holds alone: UID, flags, date and
+ * size. The letter is cached either way, without the attachment mark and the
+ * list category, or without sender and subject, and never passed over.
+ */
+type InitialFetchQuery = "full" | "envelope" | "bare";
+
+function initialFetchQuery(query: InitialFetchQuery) {
+  if (query === "full") return metadataFetchQuery();
+  if (query === "envelope") {
+    return Object.freeze({
+      uid: true,
+      flags: true,
+      envelope: true,
+      internalDate: true,
+      size: true,
+    });
+  }
+  return Object.freeze({ uid: true, flags: true, internalDate: true, size: true });
+}
+
+/** A page of the first rebuild that could not be read, and the next ask at its token. */
+interface InitialPageRetry {
+  /** The token the next page starts from; null for the snapshot's first page. */
+  readonly pageToken: string | null;
+  /** Messages the next page may ask for. */
+  readonly width: number;
+  /** Messages of the range that failed that have not been read yet. */
+  readonly left: number;
+  readonly query: InitialFetchQuery;
+}
+
+/**
+ * What a page that was asked for and not read turns into: a page of several
+ * letters is asked for again at half its width, and a page of one letter is
+ * asked for again with less, down to the index's own fields. That last ask
+ * repeats as it is: a session that cannot read even those is the connection,
+ * and the letter waits for it.
+ */
+function afterUnreadInitialPage(
+  pageToken: string | null,
+  attempt: { readonly asked: number; readonly query: InitialFetchQuery },
+  retry: InitialPageRetry | null,
+): InitialPageRetry {
+  const left = Math.max(attempt.asked, retry?.left ?? 0);
+  if (attempt.asked > 1) {
+    return Object.freeze({
+      pageToken,
+      width: Math.max(1, Math.floor(attempt.asked / 2)),
+      left,
+      query: attempt.query,
+    });
+  }
+  return Object.freeze({
+    pageToken,
+    width: 1,
+    left,
+    query: attempt.query === "full" ? "envelope" : "bare",
   });
 }
 

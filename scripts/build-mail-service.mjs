@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { build } from "esbuild";
 
 import { MAIL_RUNTIME_BUNDLED_AWAY } from "./build-release.mjs";
+import { sharedMailModulesPlugin } from "./mail-bundle-shared-modules.mjs";
 
 const execFileAsync = promisify(execFile);
 const root = process.cwd();
@@ -81,6 +82,7 @@ const smtpRuntimeBundle = await build({
   legalComments: "none",
   logLevel: "info",
   metafile: true,
+  plugins: [sharedMailModulesPlugin(root)],
 });
 // Every module the bundle above inlined. The compiled copies tsc left behind
 // are dead once the bundle exists, and a module in the tarball that the

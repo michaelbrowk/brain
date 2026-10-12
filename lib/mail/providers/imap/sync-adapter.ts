@@ -2695,9 +2695,43 @@ function mapImapProviderError(error: unknown): MailProviderSyncError {
     ) {
       return new MailProviderSyncError("mail_provider_reauth_required");
     }
-    return new MailProviderSyncError("mail_provider_unavailable");
+    return new MailProviderSyncError("mail_provider_unavailable", null, error.code);
   }
-  return new MailProviderSyncError("mail_provider_unavailable");
+  return new MailProviderSyncError(
+    "mail_provider_unavailable",
+    null,
+    imapFailureReason(error),
+  );
+}
+
+/**
+ * Which kind of failure an ImapFlow error was, as a stable code for the log:
+ * the server's bracketed response code (`server_unavailable`), else
+ * ImapFlow's own code (`line_too_large`, `etimeout`), else the bare status
+ * (`server_no`). The response text is the server's prose and is never read.
+ */
+function imapFailureReason(error: unknown): string {
+  if (error instanceof TypeError) return "type_error";
+  if (error === null || typeof error !== "object") return "unclassified";
+  const fields = error as Record<string, unknown>;
+  const candidates = [
+    typeof fields.serverResponseCode === "string"
+      ? `server_${fields.serverResponseCode}`
+      : null,
+    typeof fields.code === "string" ? fields.code : null,
+    typeof fields.responseStatus === "string"
+      ? `server_${fields.responseStatus}`
+      : null,
+  ];
+  for (const candidate of candidates) {
+    if (candidate === null) continue;
+    const code = candidate
+      .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+      .replace(/[-.\s]+/g, "_")
+      .toLowerCase();
+    if (/^[a-z][a-z0-9_]{0,63}$/.test(code)) return code;
+  }
+  return "unclassified";
 }
 
 /* ------------------------------------------------------------------------- *

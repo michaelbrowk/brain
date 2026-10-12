@@ -208,6 +208,32 @@ describe("IMAP metadata sync adapter", () => {
     ).rejects.toMatchObject({ code: "mail_provider_cursor_invalid" });
   });
 
+  it("names what a failed page fetch was, without the server's text", async () => {
+    const cases: readonly (readonly [unknown, string])[] = [
+      [Object.assign(new Error("line too long"), { code: "LineTooLarge" }), "line_too_large"],
+      [
+        Object.assign(new Error("Backend error for alice@example.com"), {
+          responseStatus: "NO",
+          serverResponseCode: "UNAVAILABLE",
+        }),
+        "server_unavailable",
+      ],
+      [Object.assign(new Error("Command failed"), { responseStatus: "BAD" }), "server_bad"],
+      [new TypeError("cannot read properties of null"), "type_error"],
+      [new Error("something else"), "unclassified"],
+    ];
+    for (const [failure, reason] of cases) {
+      const fixture = providerFixture({ exists: 25, uidNext: 26 });
+      fixture.client.fetchAll.mockRejectedValueOnce(failure);
+      await expect(
+        fixture.provider.listInitialThreads(
+          { pageToken: null, maxItems: 5 },
+          new AbortController().signal,
+        ),
+      ).rejects.toMatchObject({ code: "mail_provider_unavailable", reason });
+    }
+  });
+
   it("keeps non-Inbox mailbox listing unavailable in this slice", async () => {
     const fixture = providerFixture({ exists: 1, uidNext: 2 });
     const signal = new AbortController().signal;

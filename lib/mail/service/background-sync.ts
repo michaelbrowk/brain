@@ -22,6 +22,7 @@ const IDLE_PASS_FLOOR_MS = 5_000;
  */
 const SENT_SCAN_MIN_WINDOW_MS = 60_000;
 const SAFE_ACCOUNT_ID = /^account-a[0-9a-f]{32}$/;
+const STABLE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
 /**
  * Every time this scheduler keeps is on the monotonic clock. A due time on
@@ -136,6 +137,7 @@ export class MailBackgroundSyncScheduler {
   private readonly searchIndex: MailBackgroundSearchIndexPort | null;
   private readonly senders: MailBackgroundSenderPort | null;
   private readonly idle: MailBackgroundIdlePort | null;
+  private readonly onEvent: (record: Record<string, unknown>) => void;
   private readonly accountQueue: string[] = [];
   /** When each account's provider sync is next due; absent means now. */
   private readonly syncDueAt = new Map<string, number>();
@@ -173,6 +175,8 @@ export class MailBackgroundSyncScheduler {
       readonly searchIndex?: MailBackgroundSearchIndexPort;
       readonly senders?: MailBackgroundSenderPort;
       readonly idle?: MailBackgroundIdlePort;
+      /** Where a failed provider sync is reported, for the service log. */
+      readonly onEvent?: (record: Record<string, unknown>) => void;
     } = {},
   ) {
     this.port = port;
@@ -214,6 +218,7 @@ export class MailBackgroundSyncScheduler {
     }
     this.senders = options.senders ?? null;
     this.idle = options.idle ?? null;
+    this.onEvent = options.onEvent ?? (() => undefined);
   }
 
   start(): void {
@@ -373,6 +378,27 @@ export class MailBackgroundSyncScheduler {
     );
   }
 
+  /**
+   * One line per failed provider sync. The failure itself rests the account
+   * for a backoff, so a server that keeps refusing costs a line per attempt
+   * and never one per pass. Only the stable code and the site that raised it
+   * are kept: the error's message can carry server text.
+   */
+  private reportSyncFailure(accountId: string, error: unknown): void {
+    const code = stableField(error, "code");
+    const reason = stableField(error, "reason");
+    try {
+      this.onEvent({
+        event: "mail_background_sync_failed",
+        accountId,
+        errorCode: code ?? "unclassified_error",
+        ...(reason === null ? {} : { reason }),
+      });
+    } catch {
+      // A log sink that throws cannot stop the next account's sync.
+    }
+  }
+
   private async runPass(signal: AbortSignal): Promise<boolean> {
     let accounts: Awaited<ReturnType<MailBackgroundSyncScheduler["listAccounts"]>>;
     const visitAll = this.visitAll;
@@ -456,9 +482,10 @@ export class MailBackgroundSyncScheduler {
           syncHasMore = step.hasMore;
           syncSucceeded =
             step.result.status === "idle" || step.result.status === "syncing";
-        } catch {
+        } catch (error) {
           if (signal.aborted) return false;
           failed = true;
+          this.reportSyncFailure(accountId, error);
         }
         if (syncSucceeded) this.syncHealthy.add(accountId);
         else this.syncHealthy.delete(accountId);
@@ -562,6 +589,12 @@ export class MailBackgroundSyncScheduler {
     const hasContinuation = !signal.aborted && this.accountQueue.length > 0;
     return hasContinuation;
   }
+}
+
+function stableField(error: unknown, field: "code" | "reason"): string | null {
+  if (error === null || typeof error !== "object") return null;
+  const value = (error as Record<string, unknown>)[field];
+  return typeof value === "string" && STABLE_CODE.test(value) ? value : null;
 }
 
 function validateHasMoreStep(value: {

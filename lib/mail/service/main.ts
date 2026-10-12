@@ -257,6 +257,7 @@ async function main(): Promise<void> {
     // The scheduler owns IDLE's lifetime, so the pause, the Mail switch and
     // shutdown close every session through the stop they already call.
     ...(imapIdle ? { idle: imapIdle } : {}),
+    onEvent: writeServiceLog,
   });
   kickBackgroundSync = () => backgroundSync.kick();
   requestBackgroundSync = (accountId) => backgroundSync.requestSync(accountId);

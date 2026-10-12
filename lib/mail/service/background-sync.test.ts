@@ -135,6 +135,41 @@ describe("Mail background sync scheduler", () => {
     expect(observedAbort).toBe(true);
   });
 
+  it("logs a failed provider sync by its stable code and site, never its text", async () => {
+    const events: Record<string, unknown>[] = [];
+    const scheduler = new MailBackgroundSyncScheduler(
+      {
+        listAccountIds: async () => [accountA, accountB],
+        runBackgroundSyncStep: async (accountId) => {
+          if (accountId === accountA) {
+            throw Object.assign(new Error("Backend error for alice@example.com"), {
+              code: "mail_provider_unavailable",
+              reason: "server_unavailable",
+            });
+          }
+          throw new Error("SQLITE_BUSY: database is locked");
+        },
+      },
+      { onEvent: (record) => events.push(record) },
+    );
+
+    await scheduler.runNow();
+
+    expect(events).toEqual([
+      {
+        event: "mail_background_sync_failed",
+        accountId: accountA,
+        errorCode: "mail_provider_unavailable",
+        reason: "server_unavailable",
+      },
+      {
+        event: "mail_background_sync_failed",
+        accountId: accountB,
+        errorCode: "unclassified_error",
+      },
+    ]);
+  });
+
   it("drains provider pages round-robin in bounded six-page bursts", async () => {
     vi.useFakeTimers();
     const calls: string[] = [];

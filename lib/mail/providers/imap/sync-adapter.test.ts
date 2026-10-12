@@ -1,7 +1,7 @@
 import type { FetchMessageObject, MailboxObject } from "imapflow";
 import { describe, expect, it, vi } from "vitest";
 
-import type { StoredImapMailAccount } from "../../service/account-types";
+import { MailAccountError, type StoredImapMailAccount } from "../../service/account-types";
 import type { ImapSessionClient } from "../../service/imapflow-adapter";
 import {
   ImapMailSyncAdapter,
@@ -232,6 +232,90 @@ describe("IMAP metadata sync adapter", () => {
         ),
       ).rejects.toMatchObject({ code: "mail_provider_unavailable", reason });
     }
+  });
+
+  it("reads past a letter whose metadata never arrives within a session", async () => {
+    const fixture = providerFixture({ exists: 45, uidNext: 46 });
+    // Letter 16's BODYSTRUCTURE and ENVELOPE outlast every session: the
+    // session's deadline closes it, the way a provider that parses a huge
+    // letter on demand does. Its UID, flags, date and size come from the index.
+    const slow = (range: string | number, query: Record<string, unknown>) => {
+      const [start, end] =
+        typeof range === "number" ? [range, range] : range.split(":").map(Number);
+      return start! <= 16 && 16 <= end! && (query.bodyStructure || query.envelope);
+    };
+    const original = fixture.client.fetchAll.getMockImplementation() as (
+      range: string | number,
+      query: unknown,
+      options?: unknown,
+    ) => Promise<FetchMessageObject[]>;
+    fixture.client.fetchAll.mockImplementation(
+      async (range: string | number, query: Record<string, unknown>, options?: unknown) => {
+        if (slow(range, query)) throw new MailAccountError("imap_connection_timeout");
+        const messages = await original(range, query, options);
+        return messages.map(({ envelope, bodyStructure, ...rest }) => ({
+          ...rest,
+          ...(query.envelope ? { envelope } : {}),
+          ...(query.bodyStructure ? { bodyStructure } : {}),
+        }));
+      },
+    );
+    const signal = new AbortController().signal;
+    const read = new Map<string, { subject: string | null }>();
+    let token: string | null = null;
+    let failures = 0;
+    for (let call = 0; call < 40; call += 1) {
+      let page;
+      try {
+        page = await fixture.provider.listInitialThreads(
+          { pageToken: token, maxItems: 5 },
+          signal,
+        );
+      } catch (error) {
+        expect(error).toMatchObject({
+          code: "mail_provider_unavailable",
+          reason: "imap_connection_timeout",
+        });
+        failures += 1;
+        continue;
+      }
+      for (const thread of page.threads) {
+        read.set(thread.thread.threadId, { subject: thread.thread.subject });
+      }
+      token = page.nextPageToken;
+      if (token === null) break;
+    }
+
+    expect(token).toBeNull();
+    expect(read.size).toBe(45);
+    // The letter is kept, with what the index alone could say about it.
+    expect(read.get("i77u16")).toEqual({ subject: null });
+    expect(read.get("i77u15")).toEqual({ subject: "Subject 15" });
+    expect(read.get("i77u17")).toEqual({ subject: "Subject 17" });
+    // 5 → 2 → 1 → without BODYSTRUCTURE → bare: a handful of failed pages.
+    expect(failures).toBeLessThanOrEqual(5);
+    // Once past the range that failed, pages are whole again.
+    expect(fixture.client.fetchAll).toHaveBeenLastCalledWith("1:5", expect.anything());
+  });
+
+  it("keeps a page's letters when every session fails, and narrows no further than one", async () => {
+    const fixture = providerFixture({ exists: 10, uidNext: 11 });
+    fixture.client.fetchAll.mockRejectedValue(new MailAccountError("imap_connection_timeout"));
+    const signal = new AbortController().signal;
+    for (let call = 0; call < 6; call += 1) {
+      await expect(
+        fixture.provider.listInitialThreads({ pageToken: null, maxItems: 5 }, signal),
+      ).rejects.toMatchObject({ code: "mail_provider_unavailable" });
+    }
+    const ranges = fixture.client.fetchAll.mock.calls.map((call) => call[0]);
+    expect(ranges).toEqual(["6:10", "9:10", "10:10", "10:10", "10:10", "10:10"]);
+    // The last fallback still asks for the letter itself: it is never passed over.
+    expect(fixture.client.fetchAll.mock.calls.at(-1)![1]).toEqual({
+      uid: true,
+      flags: true,
+      internalDate: true,
+      size: true,
+    });
   });
 
   it("keeps non-Inbox mailbox listing unavailable in this slice", async () => {

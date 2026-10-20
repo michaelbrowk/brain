@@ -531,6 +531,23 @@ describe("the removal guard on a transaction", () => {
     expect(next.doc.eq(state.doc)).toBe(true);
   });
 
+  it("refuses a whole-body replacement but permits editing prose beside the child row", () => {
+    const onRequestRemove = vi.fn();
+    const state = guarded(onRequestRemove);
+    const replacement = state.tr.replaceWith(
+      0, state.doc.content.size, prose("Local conflicted source"),
+    );
+    expect(state.apply(replacement).doc.eq(state.doc)).toBe(true);
+    expect(onRequestRemove).toHaveBeenCalledExactlyOnceWith({
+      id: "target", occurrence: 0, label: "T",
+    });
+
+    const edited = state.apply(state.tr.insertText("Local conflicted source", 1, 2));
+    expect(edited.doc.child(0).textContent).toBe("Local conflicted source");
+    expect(edited.doc.child(1).eq(state.doc.child(1))).toBe(true);
+    expect(onRequestRemove).toHaveBeenCalledTimes(1);
+  });
+
   it("asks when a row's id is rewritten in place, which also takes the page out", () => {
     const onRequestRemove = vi.fn();
     const state = guarded(onRequestRemove);

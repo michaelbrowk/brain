@@ -2,7 +2,9 @@
 
 Live imports must use the authenticated `notion_*` MCP tools. The legacy
 `scripts/notion-import.py` writes the filesystem directly and is only retained
-for offline export recovery. It must not target live notes.
+for offline export recovery into a fresh target. The first Store startup
+backfills that tree's child links. It must not target live notes or extend an
+already initialized notebook; use MCP or portable import for that.
 
 ## Safety model
 
@@ -147,7 +149,7 @@ records a stable error code without storing exception text after a run has
 opened.
 An exact legacy page whose sole Notion metadata is the reviewed `notionId` is
 reported as an upgradeable `bound_untracked` candidate. Preserve may use it
-read-only; adopt may add the complete tracked baseline only after the same
+as an anchor without replacing its content; adopt may add the complete tracked baseline only after the same
 rev/parent/next-sibling and canonical-target checks as an unbound page. A
 different `notionId` or any partial source, conversion, target, reservation, or
 abort metadata is never upgradeable.
@@ -304,7 +306,16 @@ Channel v1 entry point and behavior remain unchanged. Generic v2 supports
 create-only and anchored plans. `prepareGenericNotionExecution` validates the
 complete active dependency graph and asset inventory; the live executor then
 performs the fail-closed read-before-write candidate phase described above.
-Preserved ids remain read-only anchors. Adopted ids enter the normal two-pass
+Preserved ids remain revision-pinned anchors: the importer does not replace
+their content or binding. Creating an imported child now appends its normal
+standalone link to an eligible parent, including a preserved parent, and
+therefore changes that parent's revision. Review and refresh its preserved
+`expectedRev` and build a new plan/journal before continuing or reusing those
+bindings; the old revision still fails closed. Imported parent read-back accepts only the canonical source body
+or that body with the exact known direct-child rows appended in tree order.
+Boards, collections, collection rows and app parents remain excluded.
+
+Adopted ids enter the normal two-pass
 flow only after the explicit Store adoption handshake, and are verified from
 their canonical read-back target. Any fixed-baseline drift fails with zero
 journal records and zero remote mutations. A partial adoption run is resumable:

@@ -1862,301 +1862,37 @@ test("stale-ref cleanup does not reconcile a shifted occurrence as success", asy
   await page.unroute("**/api/page-ref/nest");
 });
 
-test("authored and structural child links are one canonical page-ref entity", async ({
-  page,
-}) => {
+test("child creation, move, trash and restore update the open parent's document", async ({ page }) => {
   await login(page);
-  const authoredTitle =
-    "Authored nested page with a deliberately long title that wraps on narrow screens";
-  const derivedTitle =
-    "Derived nested page with a deliberately long title that wraps on narrow screens";
-  const parentResponse = await browserJson(page, "/api/page", {
-    method: "POST",
-    body: { title: "Canonical nested pages" },
-  });
-  const parent = parentResponse.body as { id: string };
-  const authoredResponse = await browserJson(page, "/api/page", {
-    method: "POST",
-    body: { parentId: parent.id, title: authoredTitle },
-  });
-  const derivedResponse = await browserJson(page, "/api/page", {
-    method: "POST",
-    body: { parentId: parent.id, title: derivedTitle },
-  });
-  const authoredChild = authoredResponse.body as { id: string };
-  const derivedChild = derivedResponse.body as { id: string };
-  const emptyParent = await browserJson(page, `/api/page/${parent.id}`);
-  const explicitRef = `[Stale authored label](/p/${authoredChild.id})`;
-  expect(
-    (
-      await browserJson(page, `/api/page/${parent.id}`, {
-        method: "PUT",
-        body: {
-          markdown: explicitRef,
-          rev: (emptyParent.body as { rev: string }).rev,
-        },
-      })
-    ).ok,
-  ).toBe(true);
-
-  await page.goto(`/p/${parent.id}`);
-  const article = page.locator("article.brain-page-article");
-  const authored = page.locator(
-    `.ProseMirror a.brain-page-ref[data-page-ref="${authoredChild.id}"]`,
-  );
-  const derivedWrapper = page.locator("[data-derived-page-refs]");
-  const derived = derivedWrapper.locator(
-    `a.brain-page-ref[data-page-ref="${derivedChild.id}"]`,
-  );
-  await expect(authored).toHaveText(`📄 ${authoredTitle}`);
-  await expect(derived).toHaveText(`📄 ${derivedTitle}`);
-  await expect(derived).toHaveAttribute("href", `/p/${derivedChild.id}`);
-  // One icon element in each, so a title that wraps indents under the title
-  // and not under the emoji. Nothing else in either link is wrapped.
-  await expect(authored.locator("span")).toHaveCount(1);
-  await expect(derived.locator("span")).toHaveCount(1);
-  await expect(authored.locator("span.brain-page-ref-icon")).toHaveText("📄");
-  await expect(derived.locator("span.brain-page-ref-icon")).toHaveText("📄");
-  await expect(article.locator('section[aria-label="Subpages"]')).toHaveCount(0);
-  await expect(article.locator("[data-subpages-count]")).toHaveCount(0);
-  await expect(article.getByText("Subpages", { exact: true })).toHaveCount(0);
-  await expect(derivedWrapper.locator("ul, ol, li, header, h2")).toHaveCount(0);
-  // The tail is ruled off and named. Still no Subpages widget — no list, no
-  // heading, no count — but not document content either: while it said
-  // nothing, a child the body had taken and one it had not were identical.
-  await expect(derivedWrapper).toHaveCSS("border-top-width", "1px");
-  await expect(
-    derivedWrapper.getByText("Not in this page", { exact: true }),
-  ).toHaveCount(1);
-
-  const pageRefStyle = async (locator: Locator) =>
-    locator.evaluate((element) => {
-      const style = getComputedStyle(element);
-      const rect = element.getBoundingClientRect();
-      const rowRect = element.parentElement?.getBoundingClientRect();
-      return {
-        fontFamily: style.fontFamily,
-        fontSize: style.fontSize,
-        fontWeight: style.fontWeight,
-        lineHeight: style.lineHeight,
-        padding: [
-          style.paddingTop,
-          style.paddingRight,
-          style.paddingBottom,
-          style.paddingLeft,
-        ],
-        margin: [
-          style.marginTop,
-          style.marginRight,
-          style.marginBottom,
-          style.marginLeft,
-        ],
-        borderRadius: style.borderRadius,
-        borderBottomWidth: style.borderBottomWidth,
-        color: style.color,
-        cursor: style.cursor,
-        textDecorationLine: style.textDecorationLine,
-        whiteSpace: style.whiteSpace,
-        overflowWrap: style.overflowWrap,
-        linkHeight: Math.round(rect.height * 10) / 10,
-        rowHeight: Math.round((rowRect?.height ?? 0) * 10) / 10,
-        left: Math.round(rect.left * 10) / 10,
-      };
-    });
-  // Read the ink tokens where the links live: the shell re-points --ink at the
-  // v2 ramp, so reading them off <body> would compare against another palette.
-  const ink = await article.evaluate((host) => {
-    const read = (token: string) => {
-      const probe = document.createElement("span");
-      probe.style.color = `var(${token})`;
-      host.append(probe);
-      const value = getComputedStyle(probe).color;
-      probe.remove();
-      return value;
-    };
-    return { primary: read("--ink"), oneStepDown: read("--ink-2") };
-  });
-  // The two links are one entity: same type, same box, same affordance, in the
-  // same column. Two things about a tail row are deliberately not the same,
-  // and the rule that draws them says why (`milkdown.css`): a child the body
-  // has not taken yet reads one step down in ink, and its row stands a step
-  // taller because the row — not the link — carries the filing control.
-  const expectOneEntity = (
-    derivedStyle: Awaited<ReturnType<typeof pageRefStyle>>,
-    authoredStyle: Awaited<ReturnType<typeof pageRefStyle>>,
-  ) => {
-    const {
-      color: derivedColor,
-      rowHeight: derivedRowHeight,
-      ...derivedBox
-    } = derivedStyle;
-    const {
-      color: authoredColor,
-      rowHeight: authoredRowHeight,
-      ...authoredBox
-    } = authoredStyle;
-    expect(derivedBox).toEqual(authoredBox);
-    expect(authoredColor).toBe(ink.primary);
-    expect(derivedColor).toBe(ink.oneStepDown);
-    expect(derivedRowHeight).toBeGreaterThan(authoredRowHeight);
+  const create = async (title: string, parentId: string | null = null) => {
+    const response = await browserJson(page, "/api/page", { method: "POST", body: { title, parentId } });
+    expect(response.ok).toBe(true);
+    return response.body as { id: string; icon: string; title: string };
   };
-
-  const authoredDesktop = await pageRefStyle(authored);
-  const derivedDesktop = await pageRefStyle(derived);
-  expectOneEntity(derivedDesktop, authoredDesktop);
-  expect(authoredDesktop).toMatchObject({
-    fontSize: "16px",
-    fontWeight: "500",
-    lineHeight: "24px",
-    padding: ["0px", "3px", "0px", "3px"],
-    margin: ["0px", "-1px", "0px", "-1px"],
-    borderRadius: "4px",
-    borderBottomWidth: "0px",
-    cursor: "pointer",
-    textDecorationLine: "none",
-    whiteSpace: "nowrap",
-  });
-
-  const authoredRest = await authored.evaluate(
-    (element) => getComputedStyle(element).backgroundColor,
-  );
-  await authored.hover();
-  await page.waitForTimeout(180);
-  const authoredHover = await authored.evaluate(
-    (element) => getComputedStyle(element).backgroundColor,
-  );
-  expect(authoredHover).not.toBe(authoredRest);
-  await derived.hover();
-  await page.waitForTimeout(180);
-  // The same fill, one object wider: in the tail the row takes the hover, so
-  // the name and the control it reveals light up together, not separately.
-  const derivedRow = derived.locator("xpath=..");
-  expect(
-    await derivedRow.evaluate(
-      (element) => getComputedStyle(element).backgroundColor,
-    ),
-  ).toBe(authoredHover);
-  expect(
-    await derived.evaluate(
-      (element) => getComputedStyle(element).backgroundColor,
-    ),
-  ).toBe(authoredRest);
-
-  const integratedLayout = await page.evaluate(
-    ({ authoredId }) => {
-      const authoredParagraph = document
-        .querySelector<HTMLElement>(`a[data-page-ref="${authoredId}"]`)
-        ?.closest<HTMLElement>("p.brain-page-ref-only");
-      const trailingBlock =
-        authoredParagraph?.nextElementSibling as HTMLElement | null;
-      const wrapper = document.querySelector<HTMLElement>(
-        "[data-derived-page-refs]",
-      );
-      if (!authoredParagraph || !trailingBlock || !wrapper) return null;
-      return {
-        trailingBlockIsWritableParagraph: trailingBlock.matches(
-          "p:not(.brain-page-ref-only)",
-        ),
-        trailingBlockHeight:
-          Math.round(trailingBlock.getBoundingClientRect().height * 10) / 10,
-        trailingBlockToDerivedGap: Math.round(
-          wrapper.getBoundingClientRect().top -
-            trailingBlock.getBoundingClientRect().bottom,
-        ),
-        overlapsTrailingBlock:
-          wrapper.getBoundingClientRect().top <
-          trailingBlock.getBoundingClientRect().bottom,
-        derivedOwnsHandle:
-          wrapper.querySelector(".brain-block-handle") !== null,
-      };
-    },
-    { authoredId: authoredChild.id },
-  );
-  expect(integratedLayout).toMatchObject({
-    trailingBlockIsWritableParagraph: true,
-    trailingBlockToDerivedGap: 24,
-    overlapsTrailingBlock: false,
-    derivedOwnsHandle: false,
-  });
-  expect(integratedLayout?.trailingBlockHeight).toBeGreaterThanOrEqual(20);
-
-  let parentBodyWrites = 0;
-  page.on("request", (request) => {
-    if (
-      request.method() === "PUT" &&
-      new URL(request.url()).pathname === `/api/page/${parent.id}`
-    ) {
-      parentBodyWrites += 1;
-    }
-  });
-  await derived.click({ button: "right" });
-  await expect(page.getByRole("menuitem", { name: "Move to trash" })).toBeVisible();
-  await expect(page.getByRole("menuitem", { name: "Remove reference" })).toHaveCount(0);
-  await page.getByRole("menuitem", { name: "Rename" }).click();
-  const rename = page.getByRole("dialog", { name: "Rename page" });
-  await expect(rename.getByLabel("Page title")).toHaveValue(derivedTitle);
-  await rename.getByRole("button", { name: "Cancel" }).click();
-  await expect(rename).toBeHidden();
-  expect(parentBodyWrites).toBe(0);
-
-  const desktopViewport = page.viewportSize();
+  const parent = await create("Child links parent");
+  const destination = await create("Child links destination");
+  await page.goto(`/p/${parent.id}`);
+  await expect(page.locator(".ProseMirror")).toBeVisible();
+  const child = await create("A child in the document", parent.id);
+  const link = page.locator(`.ProseMirror a[data-page-ref="${child.id}"]`);
+  await expect(link).toHaveCount(1);
+  await expect(page.locator("[data-derived-page-refs]")).toHaveCount(0);
+  const read = await browserJson(page, `/api/page/${parent.id}`);
+  expect((read.body as { markdown: string }).markdown).toBe(`[${child.icon} ${child.title}](/p/${child.id})`);
+  expect((await browserJson(page, "/api/move", { method: "POST", body: { id: child.id, newParentId: destination.id } })).ok).toBe(true);
+  await expect(link).toHaveCount(0);
+  await page.goto(`/p/${destination.id}`);
+  await expect(link).toHaveCount(1);
+  const beforeReorder = (await browserJson(page, `/api/page/${destination.id}`)).body;
+  expect((await browserJson(page, "/api/move", { method: "POST", body: { id: child.id, newParentId: destination.id } })).ok).toBe(true);
+  expect((await browserJson(page, `/api/page/${destination.id}`)).body).toEqual(beforeReorder);
+  expect((await browserJson(page, `/api/page/${child.id}`, { method: "DELETE" })).ok).toBe(true);
+  await expect(link).toHaveCount(0);
+  expect((await browserJson(page, `/api/trash/${child.id}`, { method: "POST" })).ok).toBe(true);
+  await expect(link).toHaveCount(1);
   await page.setViewportSize({ width: 320, height: 720 });
-  const authoredNarrow = await pageRefStyle(authored);
-  const derivedNarrow = await pageRefStyle(derived);
-  expectOneEntity(derivedNarrow, authoredNarrow);
-  expect(authoredNarrow).toMatchObject({
-    fontSize: "16px",
-    fontWeight: "500",
-    lineHeight: "24px",
-    whiteSpace: "normal",
-    overflowWrap: "anywhere",
-  });
-  expect(
-    await page.evaluate(
-      ({ authoredId, derivedId }) => {
-        const links = [authoredId, derivedId].map((id) =>
-          document.querySelector<HTMLElement>(`a[data-page-ref="${id}"]`),
-        );
-        return {
-          documentFits: document.documentElement.scrollWidth <= window.innerWidth,
-          linksFit: links.every((link) => {
-            const rect = link?.getBoundingClientRect();
-            return !!rect && rect.left >= 0 && rect.right <= window.innerWidth;
-          }),
-        };
-      },
-      { authoredId: authoredChild.id, derivedId: derivedChild.id },
-    ),
-  ).toEqual({ documentFits: true, linksFit: true });
-
-  expect(
-    (
-      await browserJson(page, `/api/page/${parent.id}`, {
-        method: "PATCH",
-        body: { smallText: true },
-      })
-    ).ok,
-  ).toBe(true);
-  await page.reload();
-  // Small text is a desktop register. Under 767px the setting deliberately
-  // keeps the body at 16px so iOS does not zoom a focused editable
-  // (`milkdown.css`), and this test was still standing at 320px — it was
-  // reading that guard and calling it the 14px register. Assert the guard
-  // where we are, then measure the register on the desktop it belongs to.
-  expect((await pageRefStyle(authored)).fontSize).toBe("16px");
-  if (desktopViewport) await page.setViewportSize(desktopViewport);
-  const authoredSmall = await pageRefStyle(authored);
-  const derivedSmall = await pageRefStyle(derived);
-  expectOneEntity(derivedSmall, authoredSmall);
-  expect(authoredSmall).toMatchObject({
-    fontSize: "14px",
-    fontWeight: "500",
-    lineHeight: "21px",
-    whiteSpace: "nowrap",
-    overflowWrap: "break-word",
-  });
-  const persisted = await browserJson(page, `/api/page/${parent.id}`);
-  expect((persisted.body as { markdown: string }).markdown).toBe(explicitRef);
+  await expect(link).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
 });
 
 test("the synthesized direct-child API nests without materializing parent refs", async ({
@@ -2178,6 +1914,7 @@ test("the synthesized direct-child API nests without materializing parent refs",
   });
   const source = sourceResponse.body as { id: string };
   const target = targetResponse.body as { id: string };
+  await browserJson(page, `/api/page/${parent.id}`, { method: "PUT", body: { markdown: "" } });
   const before = await browserJson(page, `/api/page/${parent.id}`);
   expect((before.body as { markdown: string }).markdown).toBe("");
   const nested = await browserJson(page, "/api/page-ref/nest", {
@@ -2385,19 +2122,13 @@ test("delayed nesting stays frozen across navigation and only the composite chan
   const source = sourceResponse.body as { id: string };
   const target = targetResponse.body as { id: string };
   const before = await browserJson(page, `/api/page/${parent.id}`);
-  expect((before.body as { markdown: string }).markdown).toBe("");
+  // Child creation has already filed these rows. The delayed composite is
+  // the only operation allowed to change this baseline during nesting.
   const initialMarkdown = [
-    `[Delayed synthesized source](/p/${source.id})`,
-    `[Delayed synthesized target](/p/${target.id})`,
+    `[📄 Delayed synthesized source](/p/${source.id})`,
+    `[📄 Delayed synthesized target](/p/${target.id})`,
   ].join("\n\n");
-  const seeded = await browserJson(page, `/api/page/${parent.id}`, {
-    method: "PUT",
-    body: {
-      markdown: initialMarkdown,
-      rev: (before.body as { rev: string }).rev,
-    },
-  });
-  expect(seeded.ok).toBe(true);
+  expect((before.body as { markdown: string }).markdown).toBe(initialMarkdown);
   await page.goto(`/p/${parent.id}`);
 
   let releaseSuccess!: () => void;
@@ -2432,6 +2163,8 @@ test("delayed nesting stays frozen across navigation and only the composite chan
   await page.keyboard.type("must not race the move");
   await expect(editor).not.toContainText("must not race the move");
   expect(parentBodyPuts).toBe(0);
+  const frozenParent = await browserJson(page, `/api/page/${parent.id}`);
+  expect(frozenParent.body).toEqual(before.body);
 
   releaseSuccess();
   await expect(
@@ -2444,14 +2177,14 @@ test("delayed nesting stays frozen across navigation and only the composite chan
       const response = await browserJson(page, `/api/page/${parent.id}`);
       return (response.body as { markdown: string }).markdown;
     })
-    .toBe(`[Delayed synthesized target](/p/${target.id})`);
+    .toBe(`[📄 Delayed synthesized target](/p/${target.id})`);
   expect(parentBodyPuts).toBe(0);
 
   await page.unroute("**/api/page-ref/nest");
   await page.unroute(`**/api/page/${parent.id}`);
 });
 
-test("nesting removes the exact dragged duplicate page-ref occurrence", async ({
+test("nesting validates the dragged occurrence and removes every old-parent child row", async ({
   page,
 }) => {
   await login(page);
@@ -2501,7 +2234,6 @@ test("nesting removes the exact dragged duplicate page-ref occurrence", async ({
     })
     .toBe(
       [
-        duplicateFingerprint,
         uniqueProse,
         `[Duplicate target](/p/${target.id})`,
       ].join("\n\n"),
@@ -2509,13 +2241,13 @@ test("nesting removes the exact dragged duplicate page-ref occurrence", async ({
   await expect(page.getByText(uniqueProse)).toBeVisible();
   await expect(
     page.locator(`a.brain-page-ref[data-page-ref="${source.id}"]`),
-  ).toHaveCount(1);
+  ).toHaveCount(0);
 
   await page.reload();
   await expect(page.getByText(uniqueProse)).toBeVisible();
   await expect(
     page.locator(`a.brain-page-ref[data-page-ref="${source.id}"]`),
-  ).toHaveCount(1);
+  ).toHaveCount(0);
   await page.unroute("**/api/page-ref/nest");
 });
 
@@ -3732,8 +3464,9 @@ test("Apply commits, and the page takes the sort from there", async ({
   });
 
   await page.goto(`/p/${parent.id}`);
-  // The four children are unmentioned by the body, so the tail is standing.
-  await expect(page.locator("[data-derived-page-refs]")).toBeVisible();
+  // Creation has already filed all four children as ordinary document blocks.
+  await expect(page.locator(".ProseMirror a.brain-page-ref")).toHaveCount(4);
+  await expect(page.locator("[data-derived-page-refs]")).toHaveCount(0);
 
   await page.getByRole("button", { name: "Smart sort" }).click();
   const dialog = page.getByRole("dialog", { name: "Smart sort" });
@@ -3801,8 +3534,7 @@ test("Apply commits, and the page takes the sort from there", async ({
   ).toEqual(["0s,0.03s", "0.06s,0.09s"]);
   await expectDialogLayerReleased(page);
 
-  // The body now names every child, so the tail leaves; the way back rises
-  // with its deadline drawn on it.
+  // The way back rises with its deadline drawn on it.
   await expect(page.locator("[data-derived-page-refs]")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Undo" })).toBeVisible();
   await expect(page.locator("[data-toast-ring]")).toBeVisible();
@@ -7042,7 +6774,7 @@ test("failed slash parent save keeps the inserted link in a local draft", async 
 
   const parentResponse = await browserJson(page, "/api/page", {
     method: "POST",
-    body: { title: "Slash save failure" },
+    body: { title: "Slash save failure", markdown: "Before\n\nAfter" },
   });
   expect(parentResponse.ok).toBeTruthy();
   const parent = parentResponse.body as { id: string };
@@ -7067,6 +6799,20 @@ test("failed slash parent save keeps the inserted link in a local draft", async 
   const content = page.getByRole("textbox", { name: "Page content" });
   await expect(content).toBeVisible();
   await content.focus();
+  // Place the link between saved paragraphs, so the cursor placement still
+  // differs from the automatic append even though both contain the child id.
+  await content.locator("p").filter({ hasText: /^Before$/ }).evaluate((element) => {
+    const text = element.firstChild;
+    if (!text) throw new Error("Before paragraph has no text node");
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.setStart(text, text.textContent?.length ?? 0);
+    range.collapse(true);
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+  });
+  await page.keyboard.press("Enter");
   await page.keyboard.type("/");
   await expect(page.getByTestId("slash-menu")).toBeVisible();
 
@@ -7098,8 +6844,13 @@ test("failed slash parent save keeps the inserted link in a local draft", async 
     .getByTestId("slash-menu")
     .getByRole("button", { name: "New page", exact: true })
     .click();
-  const created = (await (await createdResponse).json()) as { id: string };
-  await failedSave;
+  const created = (await (await createdResponse).json()) as {
+    id: string;
+    title: string;
+    icon?: string;
+  };
+  const rejectedSave = await failedSave;
+  const rejectedBody = rejectedSave.request().postDataJSON() as { markdown: string };
 
   await expect(page).toHaveURL(`/p/${parent.id}`);
   await expect(content).toHaveAttribute("contenteditable", "true");
@@ -7123,9 +6874,15 @@ test("failed slash parent save keeps the inserted link in a local draft", async 
     return key ? localStorage.getItem(key) : null;
   }, parent.id);
   expect(draft).toContain(`/p/${created.id}`);
+  const localMarkdown = (JSON.parse(draft!) as { markdown: string }).markdown;
+  const childLink = `[${created.icon || "📄"} ${created.title}](/p/${created.id})`;
+  expect(localMarkdown).toBe(rejectedBody.markdown);
+  expect(localMarkdown.trim()).toBe(["Before", childLink, "After"].join("\n\n"));
   const serverParent = await browserJson(page, `/api/page/${parent.id}`);
-  expect((serverParent.body as { markdown?: string }).markdown).not.toContain(
-    `/p/${created.id}`,
+  // Creation persisted the append, but the failed save must leave the exact
+  // cursor placement recoverable only in the draft.
+  expect((serverParent.body as { markdown: string }).markdown).toBe(
+    ["Before", "After", childLink].join("\n\n"),
   );
 });
 
@@ -8163,6 +7920,8 @@ test("sidebar structure stays frozen around a conflicted source and its parents"
   await page.goto(`/p/${source.id}`);
   const content = page.getByRole("textbox", { name: "Page content" });
   await expect(content).toBeVisible();
+  const childLink = content.locator(`a.brain-page-ref[data-page-ref="${child.id}"]`);
+  await expect(childLink).toHaveCount(1);
   await page.route(`**/api/page/${source.id}`, async (route) => {
     if (route.request().method() === "PUT") {
       await route.fulfill({ status: 409, contentType: "application/json", body: "{}" });
@@ -8172,14 +7931,27 @@ test("sidebar structure stays frozen around a conflicted source and its parents"
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ markdown: "Remote source", rev: "abcdef123456" }),
+        body: JSON.stringify({
+          markdown: `Remote source\n\n[📄 Guarded child](/p/${child.id})`,
+          rev: "abcdef123456",
+        }),
       });
       return;
     }
     await route.continue();
   });
-  await content.fill("Local conflicted source");
+  const rejectedSave = page.waitForResponse((response) =>
+    response.request().method() === "PUT" &&
+    new URL(response.url()).pathname === `/api/page/${source.id}` &&
+    response.status() === 409,
+  );
+  // A whole-editor fill would also remove the child row and trigger its
+  // removal confirmation before any save. Edit just the source's prose.
+  await content.locator("p").filter({ hasText: /^Source base$/ }).fill("Local conflicted source");
+  await rejectedSave;
   await expect(page.getByRole("button", { name: "Save a copy" })).toBeVisible();
+  await expect(content).toContainText("Local conflicted source");
+  await expect(childLink).toHaveCount(1);
 
   const sourceRow = page
     .locator("nav")

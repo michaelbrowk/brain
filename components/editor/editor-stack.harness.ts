@@ -29,7 +29,6 @@ import { loadGuard } from "./load-guard";
 import { markdownFidelity } from "./markdown-fidelity";
 import { math } from "./math";
 import { normalizeLegacy } from "./normalize";
-import { pageFiling } from "./page-filing";
 import { pageRef, setPageRefOrigin, syncLivePageInfo } from "./page-ref";
 import { createPageRefNesting } from "./page-ref-nesting";
 import { searchHighlight } from "./search-highlight";
@@ -195,7 +194,6 @@ export async function mountFullStack(markdown: string): Promise<MountedStack> {
     .use(history)
     .use(clipboard)
     .use(cursor)
-    .use(pageFiling)
     .use(createPageRefNesting(() => null, false, () => {}, () => {}))
     .use(columnDrop)
     .use(searchHighlight)

@@ -60,7 +60,6 @@ import {
   type ReparentPageRef,
   type RequestRemovePageRef,
 } from "./page-ref-nesting";
-import { pageFiling } from "./page-filing";
 import {
   clearSearchHighlight,
   searchHighlight as searchHighlightPlugin,
@@ -622,11 +621,6 @@ function Inner({
       .use(clipboard)
       .use(block)
       .use(cursor)
-      // a child the body does not link yet is dragged out of the derived tail
-      // and dropped into the document; the insertion is Milkdown's own
-      // external-drop path, this owns the refusal (said on dragover, while the
-      // reader can still act on it) and the report the tail announces
-      .use(pageFiling)
       // centre of another standalone page block → make it the new parent;
       // upper/lower edges continue through Milkdown's normal reorder pipeline
       .use(pageRefNesting)

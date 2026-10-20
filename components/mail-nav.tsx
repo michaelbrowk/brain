@@ -204,7 +204,7 @@ export function MailNav({
 
               It is scoped to this menu rather than to `.brain-menu` on
               purpose, and that is the house answer rather than a new one:
-              `subpages` caps its own list on this same variable for this same
+              the other menus cap their lists on this same variable for this same
               reason, and the emoji and category pickers keep their search
               field OUT of the scroller and roll only the list under it —
               which is what §12's "lists inside scroll under an edge-fade"

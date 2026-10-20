@@ -320,7 +320,7 @@ describe("Shell standalone page-ref removal", () => {
     ).toBe(false);
   });
 
-  it("shows structural children for an empty doc without changing or saving Markdown", async () => {
+  it("does not synthesize structural child links outside the editor", async () => {
     apiFetchMock.mockImplementation(async (input) => {
       const url = String(input);
       if (url === "/api/page/source") {
@@ -355,19 +355,7 @@ describe("Shell standalone page-ref removal", () => {
 
     expect(editorHarness.props?.value).toBe("");
     expect(host.querySelector('section[aria-label="Subpages"]')).toBeNull();
-    const derived = host.querySelector("[data-derived-page-refs]");
-    expect(derived).not.toBeNull();
-    expect(
-      [...(derived?.querySelectorAll("a.brain-page-ref") ?? [])].map((link) => ({
-        id: link.getAttribute("data-page-ref"),
-        text: link.textContent,
-        parent: link.parentElement?.classList.contains("brain-page-ref-only"),
-      })),
-    ).toEqual([
-      { id: "first", text: "1️⃣ First child", parent: true },
-      { id: "second", text: "📄 Second child", parent: true },
-    ]);
-    expect(derived?.querySelector("ul, ol, li, header, h2")).toBeNull();
+    expect(host.querySelector("[data-derived-page-refs]")).toBeNull();
     expect(
       apiFetchMock.mock.calls.some(
         ([input, init]) =>

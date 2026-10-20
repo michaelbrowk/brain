@@ -20,6 +20,7 @@ import type {
 import { redactPage } from "../store/types";
 import { Store } from "../store/store";
 import { serializePage } from "../store/frontmatter";
+import { appendStandalonePageRef } from "../page-ref-nesting";
 import { afterEach, describe, expect, it } from "vitest";
 import type {
   BrainImportClient,
@@ -59,6 +60,7 @@ interface GenericFixture {
   candidateIds: Map<string, string>;
   expectedRevs: Map<string, string>;
   prepared: ReturnType<typeof prepareGenericNotionExecution>;
+  reviewPreservedParents: () => Promise<ReturnType<typeof prepareGenericNotionExecution>>;
 }
 
 interface GenericFixtureOptions {
@@ -129,7 +131,8 @@ describe("generic Notion preserve/adopt executor", () => {
     const { journal } = await temporaryJournal();
     let token = 0;
     const tokenFactory = () => `generic_token_${String(++token).padStart(8, "0")}`;
-    const rootRev = (await fixture.store.readPage(fixture.rootId)).rev;
+    const rootBefore = await fixture.store.readPage(fixture.rootId);
+    const rootRev = rootBefore.rev;
 
     const applied = await executeNotionExecution({
       prepared: fixture.prepared,
@@ -146,7 +149,10 @@ describe("generic Notion preserve/adopt executor", () => {
     expect(client.mutationLog[0]).toBe(`adopt:${ADOPT_NOTION_ID}`);
     expect(client.mutationLog.findIndex((event) => event.startsWith("reserve")))
       .toBeGreaterThan(0);
-    expect((await fixture.store.readPage(fixture.rootId)).rev).toBe(rootRev);
+    const rootAfter = await fixture.store.readPage(fixture.rootId);
+    expect(rootAfter.rev).not.toBe(rootRev);
+    const created = await fixture.store.inspectNotionPage(CREATE_NOTION_ID);
+    expect(rootAfter.markdown).toBe(appendStandalonePageRef(rootBefore.markdown, "📄 Created", created!.id));
     expect(childTitles(fixture.store.getTree(), fixture.rootId)).toEqual([
       "Created",
       "Adopted",
@@ -160,35 +166,33 @@ describe("generic Notion preserve/adopt executor", () => {
       journal.records.filter((record) => record.event.type === "page_adopted"),
     ).toHaveLength(1);
 
+    await expect(executeNotionExecution({ prepared: fixture.prepared, client, journal, mode: "apply" }))
+      .rejects.toMatchObject({ code: "candidate_baseline_drift" });
+    const reviewedPrepared = await fixture.reviewPreservedParents();
+    const { journal: reviewedJournal } = await temporaryJournal();
     const mutationCount = client.mutationLog.length;
-    const journalCount = journal.records.length;
     const rerun = await executeNotionExecution({
-      prepared: fixture.prepared,
+      prepared: reviewedPrepared,
       client,
-      journal,
+      journal: reviewedJournal,
       mode: "apply",
       tokenFactory,
     });
     expect(rerun.remoteMutations).toEqual({
-      reserves: 0,
-      uploads: 0,
-      finalizes: 0,
-      aborts: 0,
+      reserves: 0, uploads: 0, finalizes: 0, aborts: 0,
     });
     expect(client.mutationLog).toHaveLength(mutationCount);
-    expect(
-      journal.records.slice(journalCount).map((record) => record.event),
-    ).toEqual([]);
-
+    const journalCount = reviewedJournal.records.length;
     const verified = await executeNotionExecution({
-      prepared: fixture.prepared,
+      prepared: reviewedPrepared,
       client,
-      journal,
+      journal: reviewedJournal,
       mode: "verify",
     });
     expect(verified.verified).toBe(2);
     expect(client.mutationLog).toHaveLength(mutationCount);
-    expect(journal.records).toHaveLength(journalCount);
+    expect(reviewedJournal.records).toHaveLength(journalCount);
+    await reviewedJournal.close();
     await journal.close();
   });
 
@@ -459,7 +463,7 @@ describe("generic Notion preserve/adopt executor", () => {
     },
   );
 
-  it("keeps an exact legacy preserve anchor read-only", async () => {
+  it("keeps a legacy preserve binding intact while filing new children", async () => {
     const fixture = await genericFixture(
       [
         {
@@ -475,7 +479,8 @@ describe("generic Notion preserve/adopt executor", () => {
         ]),
       },
     );
-    const rootRev = (await fixture.store.readPage(fixture.rootId)).rev;
+    const rootBefore = await fixture.store.readPage(fixture.rootId);
+    const rootRev = rootBefore.rev;
     const client = new StoreBackedBrainClient(fixture.store);
     const { journal } = await temporaryJournal();
     await expect(
@@ -486,7 +491,10 @@ describe("generic Notion preserve/adopt executor", () => {
         mode: "apply",
       }),
     ).resolves.toMatchObject({ verified: 1 });
-    expect((await fixture.store.readPage(fixture.rootId)).rev).toBe(rootRev);
+    const rootAfter = await fixture.store.readPage(fixture.rootId);
+    expect(rootAfter.rev).not.toBe(rootRev);
+    const created = await fixture.store.inspectNotionPage(CREATE_NOTION_ID);
+    expect(rootAfter.markdown).toBe(appendStandalonePageRef(rootBefore.markdown, "📄 Created", created!.id));
     await expect(
       fixture.store.inspectNotionCandidate(fixture.rootId),
     ).resolves.toMatchObject({
@@ -889,6 +897,19 @@ async function genericFixture(
     candidateIds,
     expectedRevs,
     prepared: prepareGenericNotionExecution(plan, new Map()),
+    reviewPreservedParents: async () => {
+      const entries = await Promise.all(bindings.entries.map(async (binding) =>
+        binding.disposition === "preserve"
+          ? { ...binding, expectedRev: (await store.readPage(binding.brainPageId)).rev }
+          : binding,
+      ));
+      const reviewed = parseNotionBindingsJson(JSON.stringify({
+        version: 1, snapshotFingerprint: snapshot.fingerprint, entries,
+      }));
+      return prepareGenericNotionExecution(
+        buildGenericNotionImportPlan(snapshot, reviewed, new Map()), new Map(),
+      );
+    },
   };
 }
 

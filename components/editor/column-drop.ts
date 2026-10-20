@@ -242,7 +242,7 @@ export function performColumnMove(
 }
 
 /** The element the drop indicator is appended beside, and the one drag state
- *  is flagged on so CSS can answer it (`data-col-drop`, `data-file-refused`). */
+ *  is flagged on so CSS can answer it (`data-col-drop`). */
 export function editorWrapper(view: EditorView) {
   return (view.dom.closest(".relative") as HTMLElement | null) ?? view.dom.parentElement ?? view.dom;
 }

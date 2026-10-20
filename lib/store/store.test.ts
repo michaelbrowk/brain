@@ -182,6 +182,7 @@ async function tmpStore(options: { publicOrigin?: string | null } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-"));
   const s = new Store(root, options);
   await s.init();
+  await s.whenChildLinksBackfilled();
   return { s, root };
 }
 
@@ -5213,7 +5214,6 @@ describe("Store", () => {
       let injected = false;
       rmSpy = vi.spyOn(fs, "rm").mockImplementation(async (...args) => {
         if (
-          !injected &&
           String(args[0]) === path.join(root, ".brain-move-intent.json")
         ) {
           injected = true;
@@ -5227,7 +5227,7 @@ describe("Store", () => {
           sourceHash: SOURCE_B,
           reservationToken: reserved.reservationToken,
         }),
-      ).rejects.toThrow(/synthetic clearMoveIntent failure/);
+      ).rejects.toThrow(/could not be reconciled|synthetic clearMoveIntent failure/);
       expect(injected).toBe(true);
       await expect(
         fs.readFile(path.join(root, ".brain-move-intent.json"), "utf8"),
@@ -6607,7 +6607,7 @@ describe("Store", () => {
     expect(result.parent).toEqual(authoritative);
     expect(findPlacement(s.getTree(), source.id)?.parentId).toBe(target.id);
     await expect(s.readPage(target.id)).resolves.toMatchObject({
-      markdown: `[Source](/p/${source.id})`,
+      markdown: `[📄 Source](/p/${source.id})`,
     });
     expect(s.trashList()).toEqual([]);
   });
@@ -6674,7 +6674,7 @@ describe("Store", () => {
     expect(result.parent.markdown).toBe("Intro\n\nTail");
     expect(findPlacement(s.getTree(), source.id)?.parentId).toBe(target.id);
     await expect(s.readPage(target.id)).resolves.toMatchObject({
-      markdown: `[Source](/p/${source.id})`,
+      markdown: `[📄 Existing child](/p/${existing.id})\n\n[📄 Source](/p/${source.id})`,
     });
     expect(
       s.getTree().find((node) => node.id === target.id)?.children.map((child) => child.id),
@@ -6704,7 +6704,7 @@ describe("Store", () => {
     expect(result.parent.markdown).toBe("Before\n\nAfter");
     expect(findPlacement(s.getTree(), source.id)?.parentId).toBe(target.id);
     await expect(s.readPage(target.id)).resolves.toMatchObject({
-      markdown: `[Source](/p/${source.id})`,
+      markdown: `[📄 Source](/p/${source.id})`,
     });
   });
 
@@ -6772,7 +6772,7 @@ describe("Store", () => {
     });
     const source = await s.createPage(parent.id, "Source");
     const target = await s.createPage(parent.id, "Target");
-    const before = await s.readPage(parent.id);
+    const before = await s.writePage(parent.id, "Body without persisted child references");
     const beforeRaw = await fs.readFile(
       path.join(s.resolve(parent.id), "index.md"),
       "utf8",
@@ -6836,7 +6836,7 @@ describe("Store", () => {
     expect(findPlacement(s.getTree(), source.id)?.parentId).toBe(target.id);
   });
 
-  it("removes only the exact selected page-ref occurrence", async () => {
+  it("validates the selected occurrence and removes all old-parent rows", async () => {
     const { s } = await tmpStore();
     const parent = await s.createPage(null, "Parent");
     const source = await s.createPage(parent.id, "Source");
@@ -6859,7 +6859,7 @@ describe("Store", () => {
 
     expect(result.removed).toBe(true);
     expect(result.parent.markdown).toBe(
-      `${first}\n\n[Target](/p/${target.id})`,
+      `[Target](/p/${target.id})`,
     );
   });
 
@@ -6908,9 +6908,9 @@ describe("Store", () => {
     await expect(s.readPage(source.id)).resolves.toEqual(sourceBefore);
     await expect(s.readPage(target.id)).resolves.toMatchObject({
       meta: { id: target.id, updatedBy: "me" },
-      markdown: `[Source](/p/${source.id})`,
+      markdown: `[📄 Source](/p/${source.id})`,
     });
-    expect((await s.readPage(target.id)).rev).not.toBe(targetBefore.rev);
+    expect((await s.readPage(target.id)).rev).toBe(targetBefore.rev);
     expect(s.resolve(source.id)).toBe(sourceDir);
     expect(findPlacement(s.getTree(), source.id)?.parentId).toBe(target.id);
     expect(findPlacement(s.getTree(), target.id)?.parentId).toBe(parent.id);
@@ -6943,7 +6943,7 @@ describe("Store", () => {
     expect(result.parent.markdown).toBe("");
     expect(findPlacement(s.getTree(), source.id)?.parentId).toBe(target.id);
     await expect(s.readPage(target.id)).resolves.toMatchObject({
-      markdown: `[Source](/p/${source.id})`,
+      markdown: `[📄 Source](/p/${source.id})`,
     });
     await expect(
       s.nestPageRef(
@@ -7222,6 +7222,7 @@ describe("Store", () => {
     const referenceOwner = await s.createPage(null, "Reference owner");
     const target = await s.createPage(null, "Target");
     const source = await s.createPage(target.id, "Source");
+    await s.writePage(target.id, "");
     const sourceRef = `[Stale source](/p/${source.id})`;
     const current = await s.writePage(referenceOwner.id, sourceRef);
     const targetIndex = path.join(s.resolve(target.id), "index.md");
@@ -7264,7 +7265,7 @@ describe("Store", () => {
       markdown: "",
     });
     await expect(restarted.readPage(target.id)).resolves.toMatchObject({
-      markdown: `[Source](/p/${source.id})`,
+      markdown: `[📄 Source](/p/${source.id})`,
     });
     expect(findPlacement(restarted.getTree(), source.id)?.parentId).toBe(
       target.id,
@@ -7461,7 +7462,7 @@ describe("Store", () => {
     });
     const source = await s.createPage(parent.id, "Source");
     const target = await s.createPage(parent.id, "Target");
-    const before = await s.readPage(parent.id);
+    const before = await s.writePage(parent.id, "Parent body stays byte-identical");
     const beforeRaw = await fs.readFile(
       path.join(s.resolve(parent.id), "index.md"),
       "utf8",
@@ -7519,7 +7520,7 @@ describe("Store", () => {
       });
       const source = await s.createPage(parent.id, "Source");
       const target = await s.createPage(parent.id, "Target");
-      const before = await s.readPage(parent.id);
+      const before = await s.writePage(parent.id, "Stable parent body");
       const parentIndex = path.join(s.resolve(parent.id), "index.md");
       const relativeParentIndex = path.relative(root, parentIndex);
       const beforeRaw = await fs.readFile(parentIndex, "utf8");
@@ -7854,10 +7855,8 @@ describe("Store", () => {
     });
 
     await s.movePage(moving.id, null);
-    await expect(s.readPage(parent.id)).resolves.toMatchObject({
-      markdown: parentBefore.markdown,
-      rev: parentBefore.rev,
-    });
+    const withoutMoving = `Parent body\n\n[📄 First](/p/${first.id})`;
+    await expect(s.readPage(parent.id)).resolves.toMatchObject({ markdown: withoutMoving });
     await expect(s.readPage(moving.id)).resolves.toMatchObject({
       markdown: "Moving body",
     });
@@ -7876,7 +7875,7 @@ describe("Store", () => {
     expect(
       standalonePageRefOccurrences(afterLeaving.markdown, moving.id),
     ).toHaveLength(0);
-    expect(afterLeaving.markdown).toBe(parentBefore.markdown);
+    expect(afterLeaving.markdown).toBe(withoutMoving);
 
     // Coming back writes one reference, not a second one.
     await s.movePage(moving.id, parent.id);
@@ -7955,14 +7954,14 @@ describe("Store", () => {
       ),
     ).toHaveLength(1);
 
-    // Nothing was listed in the destination's own body about a grandchild, so
-    // moving that grandchild out reports no document change at all.
+    // A manually removed row has nothing left for the move to sweep.
     const grandchild = await s.createPage(moving.id, "Grandchild");
+    await s.writePage(moving.id, "");
     const back = await s.movePageWithBodyReport(grandchild.id, null);
     expect(back.unlinkedFrom).toBe(null);
   });
 
-  it("removes the row the editor numbered, not another with the same text, past a foreign directive", async () => {
+  it("validates the numbered row past a foreign directive and sweeps all old-parent rows", async () => {
     // `:::toggle{title="T"}` came in through MCP write_page. The editor turns
     // it into literal prose and hoists its body, so the `[Source]` inside it
     // is row 0 and the one at the tail is row 1. The Store once parsed the
@@ -7991,7 +7990,6 @@ describe("Store", () => {
         "Intro",
         ':::toggle{title="T"}\n:::',
         `[Target](/p/${target.id})`,
-        row,
       ].join("\n\n"),
     );
     expect(findPlacement(s.getTree(), source.id)?.parentId).toBe(target.id);
@@ -8058,12 +8056,12 @@ describe("Store", () => {
 
     await s.movePage(first.id, fenced.id);
     expect((await s.readPage(fenced.id)).markdown).toBe(
-      `Intro\n\n\`\`\`js\nconst x = 1;\n\`\`\`\n\n[First](/p/${first.id})`,
+      `Intro\n\n\`\`\`js\nconst x = 1;\n\`\`\`\n\n[📄 First](/p/${first.id})`,
     );
 
     await s.movePage(second.id, columns.id);
     expect((await s.readPage(columns.id)).markdown).toBe(
-      `::::cols\n:::col\n## Left\n\n[Other](/p/other)\n:::\n::::\n\n[Second](/p/${second.id})`,
+      `::::cols\n:::col\n## Left\n\n[Other](/p/other)\n:::\n::::\n\n[📄 Second](/p/${second.id})`,
     );
   });
 
@@ -9003,13 +9001,13 @@ describe("Store", () => {
     const s1 = new Store(root);
     await s1.init();
     const a = await s1.createPage(null, "Persisted", { markdown: "body" });
-    await s1.createPage(a.id, "Kid");
+    const kid = await s1.createPage(a.id, "Kid");
     const s2 = new Store(root); // fresh instance, same dir
     await s2.init();
     const tree = s2.getTree();
     expect(tree[0].title).toBe("Persisted");
     expect(tree[0].children[0].title).toBe("Kid");
-    expect((await s2.readPage(a.id)).markdown).toBe("body");
+    expect((await s2.readPage(a.id)).markdown).toBe(`body\n\n[📄 Kid](/p/${kid.id})`);
   });
 });
 

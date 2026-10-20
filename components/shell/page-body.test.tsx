@@ -82,21 +82,20 @@ function baseProps(overrides: Partial<PageBodyProps> = {}): PageBodyProps {
     onReparentPageRef: vi.fn(() => null),
     onRequestRemovePageRef: vi.fn(),
     onCreatePageAtCursor: vi.fn(async () => {}),
-    subpages: [],
     ...overrides,
   };
 }
 
 /** The editor element inside the tree PageBody returns for a plain page:
- *  PageContextMenu → div → [MilkdownEditor, Subpages]. */
+ *  PageContextMenu → div → MilkdownEditor. */
 function editorElement(props: PageBodyProps): ReactElement<
   Record<string, unknown>
 > {
   const menu = PageBody(props) as ReactElement<{ children: ReactElement }>;
   const host = menu.props.children as ReactElement<{
-    children: ReactElement[];
+    children: ReactElement;
   }>;
-  const [editor] = host.props.children;
+  const editor = host.props.children;
   if (!isValidElement(editor)) throw new Error("editor element missing");
   return editor as ReactElement<Record<string, unknown>>;
 }

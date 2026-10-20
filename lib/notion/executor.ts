@@ -1,6 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { notionAttachmentUrl } from "../attachments.ts";
+import { appendStandalonePageRef } from "../page-ref-nesting.ts";
+import { referencedPageIds } from "../derived-page-refs.ts";
 import type {
   CollectionDefinition,
   CollectionRow,
@@ -1514,7 +1516,10 @@ async function reconcileCompletedFinalizes(
       continue;
     }
     const read = await client.readPage(status.id);
-    assertCanonicalRemotePage(page, target, status, read);
+    assertCanonicalRemotePage(
+      page, target, status, read,
+      childLinkedMarkdown(plan, page, target, read, initial, desired),
+    );
     await verifyFinalizedAttachments(page, target, client);
     await journal.append({
       type: "page_finalized",
@@ -1549,7 +1554,10 @@ async function verifyPages(
       throw new Error("Channel pilot verification found id drift");
     }
     const read = await client.readPage(status.id);
-    assertCanonicalRemotePage(page, target, status, read);
+    assertCanonicalRemotePage(
+      page, target, status, read,
+      childLinkedMarkdown(plan, page, target, read, undefined, desired, pageIds),
+    );
     for (const attachment of target.attachments.values()) {
       if (
         attachment.url !== target.cover &&
@@ -1582,11 +1590,48 @@ async function verifyPages(
   return verified;
 }
 
+/** A child finalized later appends its row to an ordinary imported parent.
+ * Only known direct children, in plan/tree order, can explain the difference
+ * from the canonical source. Integrity checks below still refuse author edits.
+ * The source-only form also supports servers predating automatic child links. */
+function childLinkedMarkdown(
+  plan: NotionExecutionPlan,
+  page: NotionExecutionPage,
+  target: DesiredPage,
+  read: Awaited<ReturnType<BrainImportClient["readPage"]>>,
+  completed: ReadonlyMap<string, NotionImportStatus | null> | undefined,
+  desired: ReadonlyMap<string, DesiredPage>,
+  pageIds?: ReadonlyMap<string, string>,
+): string {
+  if (read.meta.view === "board" || read.meta.kind === "app" || read.meta.collection || read.meta.collectionRow) {
+    return target.markdown;
+  }
+  let markdown = target.markdown;
+  const referenced = referencedPageIds(markdown, null);
+  const children = plan.pages
+    .filter((child) => child.parentNotionId === page.notionId)
+    .sort((a, b) => a.position - b.position);
+  for (const child of children) {
+    if (child.collectionRow) continue;
+    const status = completed?.get(child.notionId);
+    const childTarget = desired.get(child.notionId);
+    if (completed && (!childTarget || !isComplete(status ?? null, child, childTarget))) continue;
+    const id = pageIds?.get(child.notionId) ?? status?.id;
+    if (!id || referenced.has(id)) continue;
+    markdown = appendStandalonePageRef(
+      markdown, `${child.document.icon || "📄"} ${child.document.title}`, id,
+    );
+    referenced.add(id);
+  }
+  return markdown;
+}
+
 function assertCanonicalRemotePage(
   page: NotionExecutionPage,
   target: DesiredPage,
   status: NotionImportStatus,
   read: Awaited<ReturnType<BrainImportClient["readPage"]>>,
+  linkedMarkdown: string,
 ): void {
   if (
     !isComplete(status, page, target) ||
@@ -1605,7 +1650,7 @@ function assertCanonicalRemotePage(
     read.meta.notionTargetOrder !== status.trackedBaseline?.order ||
     typeof read.meta.notionTargetRev !== "string" ||
     read.meta.notionTargetRev.length === 0 ||
-    read.markdown !== target.markdown ||
+    (read.markdown !== target.markdown && read.markdown !== linkedMarkdown) ||
     !read.rev
   ) {
     throw new Error("Channel pilot read-back does not match the canonical target");

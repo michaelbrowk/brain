@@ -374,7 +374,7 @@ export const pageRefView = $view(pageRefSchema.node, () => ((initial: ProseNode)
 }) satisfies NodeViewConstructor);
 
 /** Whether a paragraph is one page row: its whole content is one page-ref
- *  atom. `page-filing.ts` files that shape, and the tail's menu names it. */
+ *  atom. the serializer preserves that shape. */
 function isPageRefOnly(node: ProseNode): boolean {
   return node.childCount === 1 && node.firstChild?.type.name === "page_ref";
 }

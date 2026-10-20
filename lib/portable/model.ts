@@ -719,6 +719,7 @@ export async function applyPortableBundle(
         ? created.get(page.parentSourceId)!
         : (options.parentId ?? null);
       const meta = await store.createPage(parentId, page.meta.title, {
+        deferParentLink: true,
         icon: page.meta.icon,
         cover: page.meta.coverAsset
           ? assetUrls.get(page.meta.coverAsset)
@@ -888,6 +889,9 @@ export async function applyPortableBundle(
     for (const pageId of landedPages) {
       await store.reconcileTasksForPage(pageId, options.src);
     }
+    await store.fileChildPages([
+      ...created.values(), ...(options.parentId ? [options.parentId] : []),
+    ], "me", [...created.values()]);
     return { rootIds, created: created.size, tasks: createdTasks.length };
   } catch (error) {
     for (const taskId of createdTasks) {

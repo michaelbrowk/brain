@@ -223,7 +223,7 @@ export async function scheduleDirtyCommit(root: string): Promise<boolean> {
  *  make. */
 const COMMIT_EXCLUDES = [":(exclude,glob)**/.app-next", ":(exclude,glob)**/.app-next/**", ":(exclude,glob)**/.app-next-old", ":(exclude,glob)**/.app-next-old/**"];
 
-async function commit(root: string): Promise<void> {
+async function commit(root: string, message = `auto ${new Date().toISOString()}`): Promise<void> {
   if (!fs.existsSync(path.join(/*turbopackIgnore: true*/ root, ".git"))) {
     await runGit(root, ["init", "-q"]);
   }
@@ -234,10 +234,30 @@ async function commit(root: string): Promise<void> {
       "commit",
       "-q",
       "-m",
-      `auto ${new Date().toISOString()}`,
+      message,
     ]);
   }
   failures.delete(root);
+}
+
+/** An awaited snapshot while the caller holds the Store lock and a Git
+ * barrier. A migration's success marker must follow its named commit. */
+export async function commitSnapshot(root: string, message: string): Promise<void> {
+  const timer = timers.get(root);
+  if (timer) clearTimeout(timer);
+  timers.delete(root);
+  const active = running.get(root);
+  if (active) await active;
+  try {
+    await commit(root, message);
+  } catch (error) {
+    // Awaited maintenance snapshots have their own structured failure log,
+    // but readiness must retain the same sticky failure as background saves.
+    failures.set(root, error instanceof Error ? error : new Error(String(error)));
+    throw error;
+  }
+  pending.delete(root);
+  deferred.delete(root);
 }
 
 function startCommit(root: string): void {

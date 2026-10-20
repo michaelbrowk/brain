@@ -1,4 +1,4 @@
-import { internalPageLinkId } from "./internal-page-link";
+import { internalPageLinkId } from "./internal-page-link.ts";
 import { fromMarkdown } from "mdast-util-from-markdown";
 
 interface MarkdownNode {
@@ -11,11 +11,9 @@ interface MarkdownNode {
 /** Collect semantic Markdown links, ignoring page-looking text in code.
  *
  *  This is the one answer to "does this body already link that page": a
- *  standalone row and a mention inside a sentence both count. The derived tail
- *  below the editor hides a child the body links anywhere, the editor refuses
- *  to file a page the body links anywhere, and a move or a nesting gesture
- *  appends a row only when the body links the page nowhere — so no path ever
- *  writes a second reference into a document that already has one. Without
+ *  standalone row and a mention inside a sentence both count. The shared-page
+ *  child list hides linked children, and Store creation, move, restore and
+ *  backfill append only when the body links the child nowhere. Without
  *  an origin only relative `/p/<id>` links can be recognised. */
 export function referencedPageIds(
   markdown: string,

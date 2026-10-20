@@ -2,6 +2,7 @@
 
 import { useEffect, useSyncExternalStore } from "react";
 import { apiFetch } from "@/lib/client";
+import { isUnreadNotification, type AgentDigest } from "@/lib/notifications/agent-digest";
 
 /** ONE FETCH OF THE CENTRE, READ BY EVERYTHING THAT DRAWS IT.
  *
@@ -43,6 +44,7 @@ export interface NotificationRow {
   readonly body?: string;
   readonly href: string;
   readonly readAt?: string;
+  readonly digest?: AgentDigest;
 }
 
 export interface NotificationsState {
@@ -99,7 +101,7 @@ function set(patch: Partial<NotificationsState>): void {
  *  reason the two live in one module. */
 function commit(rows: readonly NotificationRow[]): void {
   const next = new Set<string>();
-  for (const item of rows) if (item.readAt === undefined) next.add(item.id);
+  for (const item of rows) if (isUnreadNotification(item)) next.add(item.id);
   unreadIds = next;
   set({ notifications: rows, unread: next.size, loading: false, error: null });
   // EVERY ANSWER, WHILE MAIL IS ON SCREEN. The mount that arrived before the

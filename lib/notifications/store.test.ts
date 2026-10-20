@@ -363,7 +363,7 @@ describe("appending, or folding into what is already there", () => {
       at: "2026-09-14T12:01:00.000Z",
       title: "Claude archived 2 threads",
     });
-    expect(await unreadNotificationCount(dir)).toBe(1);
+    expect(await unreadNotificationCount(dir)).toBe(0);
   });
 
   it("appends when the row it would fold into is gone", async () => {
@@ -393,7 +393,7 @@ describe("appending, or folding into what is already there", () => {
     expect(outcome).toBe("appended");
     const rows = await listNotifications(dir);
     expect(rows.map((held) => held.id)).toEqual(["agent-2", "agent-1"]);
-    expect(await unreadNotificationCount(dir)).toBe(1);
+    expect(await unreadNotificationCount(dir)).toBe(0);
   });
 
   it("appends plainly when there is nothing to fold into at all", async () => {
@@ -532,5 +532,33 @@ describe("a centre written by an older build", () => {
         readAt: "2026-09-14T13:00:00.000Z",
       },
     ]);
+  });
+});
+
+describe("v2 daily digest migration", () => {
+  it("folds recoverable v1 actions by agent and owner day, retaining ambiguous rows", async () => {
+    const legacy = (id: string, at: string, title: string, href: string): BrainNotification => ({ id, kind: "agent-action", at, title, href, body: "Meeting notes" });
+    await seed(dir, [
+      legacy("agent:2026-09-14T19:00:00.000Z:write_page:1111", "2026-09-14T19:00:00.000Z", "Claude wrote a page", "/p/one"),
+      legacy("agent:2026-09-14T19:30:00.000Z:append_page:2222", "2026-09-14T19:30:00.000Z", "Claude added to a page", "/p/one"),
+      legacy("agent:2026-09-14T20:00:00.000Z:create_page:3333", "2026-09-14T20:00:00.000Z", "Claude created a page", "/p/two"),
+      legacy("unknown", "2026-09-14T19:00:00.000Z", "Unknown old format", "/"),
+      legacy("aggregate", "2026-09-14T19:00:00.000Z", "Claude wrote 7 pages", "/"),
+      row("reminder", "2026-09-14T19:00:00.000Z"),
+    ]);
+    const rows = await listNotifications(dir, "Asia/Dubai");
+    expect(rows.filter((r) => r.digest).map((r) => [r.digest!.day, r.title])).toEqual([
+      ["2026-09-15", "Claude · 1 page"], ["2026-09-14", "Claude · 1 page"],
+    ]);
+    expect(rows.map((r) => r.id)).toEqual(expect.arrayContaining(["unknown", "aggregate", "reminder"]));
+    await markAllNotificationsRead("2026-09-15T12:00:00.000Z", dir);
+    const saved = JSON.parse(await readFile(path.join(dir, NOTIFICATIONS_FILE), "utf8"));
+    expect(saved.version).toBe(2);
+    expect((await listNotifications(dir)).filter((r) => r.digest)).toHaveLength(2);
+  });
+
+  it("excludes every agent row from the badge, including legacy rows", async () => {
+    await seed(dir, [row("reminder", "2026-09-14T12:00:00.000Z"), { id: "old", kind: "agent-action", at: "2026-09-14T12:00:00.000Z", title: "Old action", href: "/" }]);
+    expect(await unreadNotificationCount(dir)).toBe(1);
   });
 });

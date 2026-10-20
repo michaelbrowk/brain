@@ -1,21 +1,14 @@
 import { z } from "zod";
+import { DIGEST_ID_CAP, DIGEST_KINDS, DIGEST_TARGET_CAP } from "./agent-digest";
 
-/** THE CENTRE'S MODEL, GENERIC ON PURPOSE.
- *
- *  Four kinds. The shape carries nothing about a task, a letter or a tool
- *  call, so a backup failure joins later without a second store and without a
- *  migration: `agent-action` joined on exactly that promise and cost the enum
- *  one word.
- *
- *  Nothing here reads the clock, the filesystem or a Store.
- */
+/** Four kinds. Agent rows optionally carry a structured daily digest;
+ * legacy rows without recoverable targets remain readable verbatim. */
 
 export const NOTIFICATION_KINDS = [
   "task-reminder",
   "task-missed",
   "mail-new",
-  /** One mutation an agent made through MCP and the log line recorded as
-   *  `ok` (`lib/notifications/agent-producer.ts`). */
+  /** One agent's successful MCP mutations on one owner-local day. */
   "agent-action",
 ] as const;
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
@@ -28,8 +21,8 @@ export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
  *  let them evict the thing that wanted the reader at 13:00. A kind can now
  *  only ever push out its own.
  *
- *  The file is still read whole on every request, so it still has to stay a few
- *  hundred kilobytes: four kinds of two hundred is what bounds it. */
+ *  The file is still read whole on every request. Four kinds of two hundred,
+ *  plus the per-digest id and detail bounds below, bound its size. */
 export const NOTIFICATION_KIND_CAP = 200;
 
 /** Every kind at its own bound, which is the most the file can hold. Nothing
@@ -110,6 +103,21 @@ export const notificationSchema = z
     body: z.string().min(1).max(400).optional(),
     href: hrefField,
     readAt: instantField.optional(),
+    digest: z.object({
+      agent: z.string().min(1).max(200),
+      day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(isCalendarDay),
+      ids: z.object({
+        page: z.array(z.string().min(1).max(64)).max(DIGEST_ID_CAP),
+        task: z.array(z.string().min(1).max(64)).max(DIGEST_ID_CAP),
+        thread: z.array(z.string().min(1).max(64)).max(DIGEST_ID_CAP),
+        message: z.array(z.string().min(1).max(64)).max(DIGEST_ID_CAP),
+      }).strict(),
+      saturated: z.array(z.enum(DIGEST_KINDS)).max(DIGEST_KINDS.length),
+      targets: z.array(z.object({
+        id: z.string().min(1).max(64), kind: z.enum(DIGEST_KINDS),
+        title: z.string().min(1).max(200), href: hrefField, at: instantField,
+      }).strict()).max(DIGEST_TARGET_CAP),
+    }).strict().optional(),
   })
   .strict();
 

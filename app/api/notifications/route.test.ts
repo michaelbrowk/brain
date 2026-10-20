@@ -58,6 +58,15 @@ describe("GET /api/notifications", () => {
     expect(body.unread).toBe(2);
   });
 
+  it("excludes agent history from the API badge while preserving mail and tasks", async () => {
+    await appendNotification({ ...row("agent-old", "2026-09-14T09:00:00.000Z"), kind: "agent-action" }, dirHolder.current);
+    await appendNotification(row("reminder", "2026-09-14T09:00:00.000Z"), dirHolder.current);
+    await appendNotification({ ...row("mail-new:2026-09-14T09:00:00.000Z", "2026-09-14T09:00:00.000Z"), kind: "mail-new", title: "1 new message", href: "/mail" }, dirHolder.current);
+    const body = await (await GET()).json();
+    expect(body.notifications).toHaveLength(3);
+    expect(body.unread).toBe(2);
+  });
+
   it("answers an empty centre without failing", async () => {
     const body = await (await GET()).json();
     expect(body).toEqual({ notifications: [], unread: 0 });

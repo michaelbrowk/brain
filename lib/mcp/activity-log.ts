@@ -1,16 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import {
-  AGENT_FOLD_WINDOW_MS,
-  agentActionFold,
-  agentActionFoldKey,
-  agentActionNotification,
-  type AgentFold,
-} from "@/lib/notifications/agent-producer";
-import {
-  appendOrFoldNotification,
-  notificationStateDirectory,
-} from "@/lib/notifications/store";
+import { agentActionNotification } from "@/lib/notifications/agent-producer";
+import { upsertAgentDigest } from "@/lib/notifications/store";
+import { readTimeZone } from "@/lib/owner-settings";
 import { atomicWrite } from "@/lib/store/atomic";
 import { mcpStateDirectory } from "./state-dir";
 
@@ -111,7 +103,7 @@ export interface McpActivityEntry {
  *  The entry above is the redaction and stays it: nothing here is written to
  *  disk beside the line. `label` is a title the call site already had in hand
  *  out of the owner's own store, the task it just wrote or the note the file
- *  landed in, and it becomes the row's body so a reader knows which task.
+ *  landed in, and it labels the digest target so a reader knows which task.
  *  Never a string the agent handed in.
  */
 export interface McpActivityNotice {
@@ -263,7 +255,7 @@ async function rewrite(dir: string, lines: string[]): Promise<void> {
 
 /** One writer at a time, the way `OAuthStateStore` serialises its own file.
  *  Two tools finishing together would otherwise read the same tail and one
- *  would write the other's line away. Also what makes the cache below safe
+ *  would write the other's line away. Also what makes the log cache below safe
  *  to read and write without its own lock: every turn that touches it runs
  *  to completion before the next one starts. */
 let queue: Promise<void> = Promise.resolve();
@@ -427,61 +419,6 @@ export async function appendMcpActivity(
   await noteInCentre(entry, notice);
 }
 
-/** THIS PROCESS'S BELIEF ABOUT THE BURST IN PROGRESS, one entry per shape of
- *  action (`agentActionFoldKey`: the client, the tool and the change).
- *
- *  It is a memo, not a source of truth. The file decides: a fold it proposes
- *  for a row the centre no longer holds, or has had read, is answered with a
- *  plain append and the memo starts again from that row. A restart, or a
- *  second process on the same state directory, simply starts a new row, which
- *  is the honest thing for a count this process cannot vouch for.
- *
- *  Keyed by the centre's directory as well, the way `directoryState` above is.
- *  A row id is derived from the line, so the same line written into two
- *  different centres has one id, and a memo that ignored the directory would
- *  answer a question about one file with what it knows about another.
- *
- *  `lines` is the ids a fold has already swallowed. Those rows are not in the
- *  file under their own ids any more, so the centre's own duplicate check
- *  cannot see them, and a replay of the log would otherwise count one action
- *  twice.
- */
-interface FoldMemo {
-  fold: AgentFold;
-  lines: Set<string>;
-}
-
-const agentFolds = new Map<string, FoldMemo>();
-
-/** The separator between the directory and the shape in a memo key, the same
- *  NUL `agentActionFoldKey` joins its own fields with. */
-const FOLD_KEY_SEPARATOR = "\u0000";
-
-/** The ids one memo remembers. A burst of thousands is bounded here rather
- *  than left to grow: past this the dedupe degrades to the file's own check,
- *  which is the pre-fold behaviour and not a leak. */
-const MAX_REMEMBERED_LINES = 500;
-
-function remember(lines: Set<string> | undefined, id: string): Set<string> {
-  const next = lines ?? new Set<string>();
-  if (next.size < MAX_REMEMBERED_LINES) next.add(id);
-  return next;
-}
-
-/** Entries older than one window can never be folded into again, and a process
- *  that runs for months would otherwise hold one per client, tool and change it
- *  has ever seen. Swept on every write, because the map is a handful of keys
- *  and a timer for it would be a timer to shut down. */
-function pruneFolds(now: string): void {
-  const floor = Date.parse(now) - AGENT_FOLD_WINDOW_MS;
-  if (!Number.isFinite(floor)) return;
-  for (const [key, memo] of agentFolds) {
-    // On the row's first line, which is what the window is measured against:
-    // a memo whose box has closed can never be folded into again.
-    if (Date.parse(memo.fold.first) < floor) agentFolds.delete(key);
-  }
-}
-
 /** THE ROW THE BELL SHOWS, OFF THE SAME CALL AS THE LINE.
  *
  *  After the line, not beside it: a log this process could not append throws
@@ -508,36 +445,8 @@ async function noteInCentre(
   notice: McpActivityNotice | undefined,
 ): Promise<void> {
   try {
-    const row = agentActionNotification(entry, notice?.label);
-    if (row === null) return;
-    // Read once and passed on, rather than read here and again inside the
-    // store's default argument: the memo and the file have to be talking about
-    // the same centre even if the environment moves between two lines.
-    const centre = notificationStateDirectory();
-    const key = `${centre}${FOLD_KEY_SEPARATOR}${agentActionFoldKey(entry)}`;
-    const held = agentFolds.get(key);
-    // A line this fold has already swallowed is not counted again. It is no
-    // longer in the file under its own id, so the centre's own duplicate check
-    // cannot see it, and a replay of the log would otherwise inflate the count.
-    if (held?.lines.has(row.id)) return;
-    const folded = held === undefined ? null : agentActionFold(entry, row, held.fold);
-    const done = await appendOrFoldNotification(row, folded?.row ?? null, centre);
-    if (done === "folded" && folded !== null) {
-      agentFolds.set(key, { fold: folded.fold, lines: remember(held?.lines, row.id) });
-    } else if (done === "appended") {
-      agentFolds.set(key, {
-        fold: {
-          id: row.id,
-          first: row.at,
-          at: row.at,
-          count: 1,
-          href: row.href,
-          ...(row.body !== undefined ? { body: row.body } : {}),
-        },
-        lines: new Set([row.id]),
-      });
-    }
-    pruneFolds(row.at);
+    const row = agentActionNotification(entry, notice?.label, (await readTimeZone()) ?? "UTC");
+    if (row !== null) await upsertAgentDigest(row);
   } catch (cause) {
     const reason = cause instanceof Error ? cause.message : String(cause);
     console.warn(`[brain/mcp] agent notification dropped: ${reason}`);

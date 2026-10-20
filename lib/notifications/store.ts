@@ -2,6 +2,9 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { atomicWrite } from "@/lib/store/atomic";
 import { emitStore } from "@/lib/store/events";
+import { readTimeZone } from "@/lib/owner-settings";
+import { isUnreadNotification } from "./agent-digest";
+import { mergeAgentDigests, migrateAgentRows } from "./agent-producer";
 import { foldLegacyMailRows } from "./mail-rows";
 import {
   NOTIFICATION_KIND_CAP,
@@ -30,7 +33,7 @@ export { notificationStateDirectory } from "./state-dir";
 export const NOTIFICATIONS_FILE = "notifications.json";
 
 interface StoredFile {
-  version: 1;
+  version: 2;
   items: BrainNotification[];
 }
 
@@ -48,7 +51,7 @@ function serialise<T>(work: () => Promise<T>): Promise<T> {
   return run;
 }
 
-async function readAll(dir: string): Promise<BrainNotification[]> {
+async function readAll(dir: string, zone?: string): Promise<BrainNotification[]> {
   let raw: string;
   try {
     raw = await fs.readFile(path.join(dir, NOTIFICATIONS_FILE), "utf8");
@@ -66,7 +69,7 @@ async function readAll(dir: string): Promise<BrainNotification[]> {
   if (
     typeof parsed !== "object" ||
     parsed === null ||
-    (parsed as StoredFile).version !== 1 ||
+    ![1, 2].includes((parsed as StoredFile).version) ||
     !Array.isArray((parsed as StoredFile).items)
   ) {
     return [];
@@ -76,17 +79,22 @@ async function readAll(dir: string): Promise<BrainNotification[]> {
     const row = notificationSchema.safeParse(item);
     if (row.success) rows.push(row.data);
   }
-  // The one shape this file reads differently from the way it was written: a
-  // centre from before 0.12.2 holds one mail row per thread, and they are
-  // folded into the single counted row on the way out. Every write below
-  // starts from this answer, so the first one persists the fold.
-  return [...foldLegacyMailRows(rows)];
+  // Preserve the existing mail migration, then upgrade recoverable v1 agent
+  // rows. Every caller holds the queue, including list reads: a migration
+  // cannot overwrite an append, and its owner-local day survives restarts.
+  const mailFolded = [...foldLegacyMailRows(rows)];
+  if ((parsed as { version: number }).version === 1) {
+    const migrated = migrateAgentRows(mailFolded, zone ?? (await readTimeZone()) ?? "UTC");
+    await writeAll(dir, capped(migrated));
+    return capped(migrated);
+  }
+  return mailFolded;
 }
 
 async function writeAll(dir: string, items: BrainNotification[]): Promise<void> {
   await fs.mkdir(/* turbopackIgnore: true */ dir, { recursive: true, mode: 0o700 });
   const file = path.join(dir, NOTIFICATIONS_FILE);
-  const payload: StoredFile = { version: 1, items };
+  const payload: StoredFile = { version: 2, items };
   await atomicWrite(file, JSON.stringify(payload) + "\n");
   // atomicWrite opens the temp file with the process umask, which on a
   // developer machine is 0022. The systemd unit sets UMask=0077 so production
@@ -121,14 +129,15 @@ function capped(items: BrainNotification[]): BrainNotification[] {
 
 export async function listNotifications(
   dir = notificationStateDirectory(),
+  zone?: string,
 ): Promise<BrainNotification[]> {
-  return sorted(await readAll(dir));
+  return serialise(async () => sorted(await readAll(dir, zone)));
 }
 
 export async function unreadNotificationCount(
   dir = notificationStateDirectory(),
 ): Promise<number> {
-  return (await readAll(dir)).filter((row) => row.readAt === undefined).length;
+  return (await listNotifications(dir)).filter(isUnreadNotification).length;
 }
 
 /** `true` only when the row is in the file after the call, and the event fires
@@ -163,6 +172,25 @@ export async function appendNotification(
   });
   if (taken) emitStore({ type: "notification", id: notification.id });
   return taken;
+}
+
+/** Atomically merge against persisted state, including rows already read.
+ * The file's distinct id sets are the only counting state. */
+export async function upsertAgentDigest(
+  row: BrainNotification,
+  dir = notificationStateDirectory(),
+): Promise<void> {
+  const written = await serialise(async () => {
+    const parsed = notificationSchema.safeParse(row);
+    if (!parsed.success || !parsed.data.digest || row.kind !== "agent-action") return false;
+    const items = await readAll(dir);
+    const held = items.find((item) => item.id === row.id && item.digest);
+    const next = capped([...items.filter((item) => item.id !== row.id), held ? mergeAgentDigests(held, parsed.data) : parsed.data]);
+    if (!next.some((item) => item.id === row.id)) return false;
+    await writeAll(dir, next);
+    return true;
+  });
+  if (written) emitStore({ type: "notification", id: row.id });
 }
 
 /** WHAT AN APPEND DID, when the caller has a second row it would rather write.

@@ -495,12 +495,13 @@ export function registerMailTools(server: McpToolServer): void {
       // every field here small), so the wait this adds to a triage call is
       // the cost of one write, not the read-and-rewrite the log used to pay
       // near its cap.
-      const log = (outcome: string, change?: string) =>
+      const log = (outcome: string, change?: string, label?: string) =>
         logMailActivity(
           extra,
           TRIAGE_TOOL,
           change === undefined ? { accountId, threadId } : { accountId, threadId, change },
           outcome,
+          label,
         ).catch(() => undefined);
 
       // `trash` and `restore` mean one thing each. `false` is refused here,
@@ -563,7 +564,7 @@ export function registerMailTools(server: McpToolServer): void {
           );
         }
         const result = await client.updateThread(threadId, mutation);
-        await log("ok", change);
+        await log("ok", change, result.thread.subject ?? undefined);
         return text({ thread: result.thread });
       } catch (error) {
         await log(mailOutcome(error), change);

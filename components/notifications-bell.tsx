@@ -7,16 +7,15 @@
 // menu: a short list of things that happened, each one a way into the place it
 // happened. Nothing here is a surface of its own and nothing here is a dialog.
 //
-// THE ROWS ARE ONE LINE EACH. `.brain-menu-item` is 32 tall across the whole
-// product and the body sits after the title in quiet ink rather than under it,
-// which is the arrangement Home's mail rows already use for a sender and a
-// subject. A second line here would be a second row height in a menu system
-// that has exactly one.
+// Mail and reminder rows keep the menu's single-line arrangement. Daily
+// agent summaries may wrap, and disclose their target links underneath.
 
+import { useId, useState } from "react";
+import { digestTargetCount, isUnreadNotification } from "@/lib/notifications/agent-digest";
 import * as Dropdown from "@radix-ui/react-dropdown-menu";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { formatAgo } from "@/lib/format-ago";
-import { DUR } from "@/lib/motion";
+import { DUR, SPRING_SELECT } from "@/lib/motion";
 import { decodeAgentMailHref, decodeTaskNotificationId } from "@/lib/notifications/ids";
 import { monthName } from "@/lib/tasks/calendar";
 import { requestOpenThread } from "./mail-surface-client";
@@ -124,6 +123,76 @@ export function openNotificationRow(
   onNavigate(notificationHref(row));
 }
 
+/** A header discloses; only a target navigates. Radix keeps the menu open
+ * on disclosure and includes the revealed links in its arrow-key collection. */
+function DigestRow({ row, onNavigate }: {
+  row: NotificationRow;
+  onNavigate: (href: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const region = useId();
+  const reduce = useReducedMotion() ?? false;
+  const digest = row.digest!;
+  const more = Math.max(0, digestTargetCount(digest) - digest.targets.length);
+  return (
+    <Dropdown.Group>
+      <Dropdown.Item
+        className="brain-menu-item brain-digest-header"
+        aria-label={row.title}
+        aria-expanded={expanded}
+        aria-controls={region}
+        onSelect={(event) => {
+          event.preventDefault();
+          setExpanded((value) => !value);
+        }}
+      >
+        <Icon name={KIND_GLYPH[row.kind]} size={16} className="brain-menu-icon" />
+        <span data-notification-title="" className="min-w-0 flex-1 text-ink-2">{row.title}</span>
+        <motion.span
+          data-digest-chevron=""
+          className="flex shrink-0 text-ink-2"
+          animate={{ rotate: !reduce && expanded ? 90 : 0 }}
+          transition={reduce ? { duration: 0 } : SPRING_SELECT}
+        >
+          <Icon name={reduce && expanded ? "alt-arrow-down-linear" : "alt-arrow-right-linear"} size={14} />
+        </motion.span>
+      </Dropdown.Item>
+      <div id={region} inert={!expanded}>
+        <AnimatePresence initial={false}>
+          {expanded && (
+            <motion.div
+              key="targets" data-digest-disclosure=""
+              className="overflow-hidden"
+              initial={reduce ? { opacity: 0 } : { height: 0, opacity: 0 }}
+              animate={reduce ? { opacity: 1 } : { height: "auto", opacity: 1 }}
+              exit={reduce ? { opacity: 0 } : { height: 0, opacity: 0 }}
+              transition={reduce ? { duration: DUR.fast } : SPRING_SELECT}
+            >
+              <div className="brain-digest-day text-caption text-ink-2">{digest.day}</div>
+              {digest.targets.map((target) => (
+                <Dropdown.Item key={`${target.kind}:${target.id}`} asChild>
+                  <a
+                    data-digest-target=""
+                    className="brain-menu-item brain-digest-target"
+                    href={notificationHref({ ...row, href: target.href })}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      openNotificationRow({ ...row, href: target.href }, onNavigate);
+                    }}
+                  >
+                    <span className="truncate text-ink-2">{target.title}</span>
+                  </a>
+                </Dropdown.Item>
+              ))}
+              {more > 0 && <div className="brain-digest-more text-caption text-ink-2">{digest.saturated.length > 0 ? `${more}+ more` : `+${more} more`}</div>}
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    </Dropdown.Group>
+  );
+}
+
 export function NotificationsBell({
   onNavigate,
   refreshToken = 0,
@@ -131,6 +200,7 @@ export function NotificationsBell({
   onNavigate: (href: string) => void;
   refreshToken?: number;
 }) {
+  const [open, setOpen] = useState(false);
   const reduce = useReducedMotion() ?? false;
   const { notifications, unread } = useNotifications(refreshToken);
   const badge = unread > BADGE_CAP ? `${BADGE_CAP}+` : String(unread);
@@ -139,7 +209,7 @@ export function NotificationsBell({
   const openRow = (row: NotificationRow) => openNotificationRow(row, onNavigate);
 
   return (
-    <Dropdown.Root>
+    <Dropdown.Root open={open} onOpenChange={setOpen}>
       <Dropdown.Trigger asChild>
         {/* 34, WHICH IS NEW PAGE'S SIZE. It stood at 28 beside a 34 circle
             with 4px between them, so the head's two controls differed in size
@@ -219,11 +289,13 @@ export function NotificationsBell({
               </div>
             ) : (
               <>
-                {notifications.map((row) => (
+                {notifications.map((row) => row.digest ? (
+                  <DigestRow key={row.id} row={row} onNavigate={(href) => { setOpen(false); onNavigate(href); }} />
+                ) : (
                   <Dropdown.Item
                     key={row.id}
                     className="brain-menu-item"
-                    data-unread={row.readAt === undefined ? "" : undefined}
+                    data-unread={isUnreadNotification(row) ? "" : undefined}
                     onSelect={() => openRow(row)}
                   >
                     <Icon
@@ -243,7 +315,7 @@ export function NotificationsBell({
                     <span
                       data-notification-title=""
                       className={`min-w-0 flex-1 truncate ${
-                        row.readAt === undefined ? "text-ink" : "text-ink-3"
+                        isUnreadNotification(row) ? "text-ink" : "text-ink-3"
                       }`}
                     >
                       {row.title}

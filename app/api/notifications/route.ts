@@ -1,3 +1,4 @@
+import { isUnreadNotification } from "@/lib/notifications/agent-digest";
 import { NextResponse } from "next/server";
 import { listNotifications } from "@/lib/notifications/store";
 
@@ -21,7 +22,7 @@ export async function GET() {
   return NextResponse.json(
     {
       notifications,
-      unread: notifications.filter((row) => row.readAt === undefined).length,
+      unread: notifications.filter(isUnreadNotification).length,
     },
     { headers: HEADERS },
   );

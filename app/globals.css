@@ -2167,6 +2167,16 @@ html[data-kbd] [contenteditable]:focus-visible {
   user-select: none;
   transition: background-color 160ms var(--ease-out);
 }
+/* Daily agent history shares the menu's registers and spacing. The summary
+   may wrap so distinct counts stay readable on a 390px phone. */
+.brain-digest-header {
+  height: auto;
+  min-height: 32px;
+  padding-block: 8px;
+  line-height: 1.35;
+}
+.brain-digest-target { padding-left: 34px; }
+.brain-digest-more { padding: 4px 8px 4px 34px; }
 .brain-menu-item[data-highlighted],
 .brain-menu-item:active {
   background-color: var(--fill-glass-hover);

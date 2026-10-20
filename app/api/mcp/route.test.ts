@@ -2427,9 +2427,8 @@ describe("the task write tools", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       kind: "agent-action",
-      title: "Unknown app created a task",
-      body: "Water the plants",
-      href: `/tasks?task=${TASK_ID}`,
+      title: "Unknown app · 1 task",
+      digest: { targets: [{ title: "Water the plants", href: `/tasks?task=${TASK_ID}` }] },
     });
     expect(rows[0].readAt).toBeUndefined();
   });
@@ -2448,9 +2447,8 @@ describe("the task write tools", () => {
     expect(await listNotifications(centreRoot)).toMatchObject([
       {
         kind: "agent-action",
-        title: "Unknown app completed a task",
-        body: "Water the plants",
-        href: `/tasks?task=${TASK_ID}`,
+        title: "Unknown app · 1 task",
+        digest: { targets: [{ title: "Water the plants", href: `/tasks?task=${TASK_ID}` }] },
       },
     ]);
   });
@@ -2468,9 +2466,8 @@ describe("the task write tools", () => {
 
     expect(await listNotifications(centreRoot)).toMatchObject([
       {
-        title: "Unknown app deleted a task",
-        body: "Water the plants",
-        href: "/tasks",
+        title: "Unknown app · 1 task",
+        digest: { targets: [{ title: "Water the plants", href: "/tasks" }] },
       },
     ]);
   });
@@ -3903,9 +3900,8 @@ describe("save_mail_attachment", () => {
     expect(await listNotifications(centreRoot)).toMatchObject([
       {
         kind: "agent-action",
-        title: "API token saved an attachment",
-        body: "Meeting notes",
-        href: "/p/page-one",
+        title: "API token · 1 page",
+        digest: { targets: [{ title: "Meeting notes", href: "/p/page-one" }] },
       },
     ]);
   });
@@ -4864,8 +4860,7 @@ describe("update_mail_thread", () => {
 
   /** The row says which way the thread went and carries the thread itself in
    *  the href, because Mail has no per-thread route and an `agent-action` id
-   *  is a digest with nothing to read back out of it. No subject: the log
-   *  never held one, so the centre cannot either. */
+   *  is a digest with nothing to read back out of it. The subject rides beside the redacted log into the target label. */
   it("puts one row in the centre naming the change and the thread", async () => {
     mocks.createBrainMailClient.mockReturnValue(
       createMailClientFake({
@@ -4888,14 +4883,14 @@ describe("update_mail_thread", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       kind: "agent-action",
-      title: "API token archived a thread",
+      title: "API token · 1 thread",
     });
     expect(rows[0].body).toBeUndefined();
-    expect(decodeAgentMailHref(rows[0].href)).toEqual({
+    expect(decodeAgentMailHref(rows[0].digest!.targets[0].href)).toEqual({
       accountId: FAKE_ACCOUNT_ID,
       threadId: "thread-alpha",
     });
-    expect(JSON.stringify(rows)).not.toContain("Quarterly");
+    expect(rows[0].digest!.targets[0].title).toBe("Quarterly invoice");
   });
 
   it("logs the refusal reason when the service refuses", async () => {
@@ -5127,8 +5122,7 @@ describe("the mail send tools", () => {
   });
 
   /** A MESSAGE LEFT IN THE OWNER'S NAME, so the bell says so. The row carries
-   *  no recipient and no subject: the log line holds ids only, by design, and
-   *  the centre is downstream of it. */
+   *  no recipient; its subject labels the digest target while the log holds ids only. */
   it("puts one row in the centre for a message that went out", async () => {
     mocks.createBrainMailClient.mockReturnValue(createMailClientFake().client);
 
@@ -5150,11 +5144,11 @@ describe("the mail send tools", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       kind: "agent-action",
-      title: "API token sent a message",
-      href: "/mail",
+      title: "API token · 1 message sent",
+      digest: { targets: [{ title: "Hello", href: "/mail" }] },
     });
     expect(JSON.stringify(rows)).not.toContain("friend@example.net");
-    expect(JSON.stringify(rows)).not.toContain("Hello");
+    expect(rows[0].digest!.targets[0].title).toBe("Hello");
   });
 
   it("sends with origin mcp, no agent line, and no attachments yet", async () => {
@@ -7585,9 +7579,8 @@ describe("the page write tools", () => {
     expect(await listNotifications(centreRoot)).toMatchObject([
       {
         kind: "agent-action",
-        title: write.title,
-        body: "Meeting notes",
-        href: write.href,
+        title: "API token · 1 page",
+        digest: { targets: [{ title: "Meeting notes", href: write.href }] },
       },
     ]);
   });
@@ -7612,7 +7605,7 @@ describe("the page write tools", () => {
     const [entry] = await readMcpActivity(1);
     expect(entry).toMatchObject({ client: "Claude", tool: "create_page" });
     expect(await listNotifications(centreRoot)).toMatchObject([
-      { kind: "agent-action", title: "Claude created a page" },
+      { kind: "agent-action", title: "Claude · 1 page" },
     ]);
   });
 
@@ -7629,7 +7622,7 @@ describe("the page write tools", () => {
     const [entry] = await readMcpActivity(1);
     expect(entry).toMatchObject({ client: "API token" });
     expect(await listNotifications(centreRoot)).toMatchObject([
-      { title: "API token created a page" },
+      { title: "API token · 1 page" },
     ]);
   });
 

@@ -574,13 +574,13 @@ export function registerMailSendTools(server: McpToolServer): void {
       // A state directory that cannot be written must never turn a completed
       // send into a failed tool call, so every call site swallows its own
       // failure.
-      const log = (outcome: string, operationId?: string) => {
+      const log = (outcome: string, operationId?: string, label?: string) => {
         const target: SendActivityTarget = {
           accountId,
           ...marks,
           ...(operationId ? { operationId } : {}),
         };
-        return logMailActivity(extra, SEND_TOOL, target, outcome).catch(
+        return logMailActivity(extra, SEND_TOOL, target, outcome, label).catch(
           () => undefined,
         );
       };
@@ -679,7 +679,7 @@ export function registerMailSendTools(server: McpToolServer): void {
         const result = carried.result;
         forgetUnknownSend(fingerprint);
         await recordSend(extra, accountId, result.operationId);
-        await log("ok", result.operationId);
+        await log("ok", result.operationId, subject);
         return text({
           operationId: result.operationId,
           created: result.created,
@@ -737,14 +737,14 @@ export function registerMailSendTools(server: McpToolServer): void {
       }
       const refs: readonly OutgoingAttachmentRef[] = attachmentRefs ?? [];
       let marks = attachmentActivityFields(refs, { named: false });
-      const log = (outcome: string, operationId?: string) => {
+      const log = (outcome: string, operationId?: string, label?: string) => {
         const target: SendActivityTarget = {
           accountId,
           threadId,
           ...marks,
           ...(operationId ? { operationId } : {}),
         };
-        return logMailActivity(extra, REPLY_TOOL, target, outcome).catch(
+        return logMailActivity(extra, REPLY_TOOL, target, outcome, label).catch(
           () => undefined,
         );
       };
@@ -871,7 +871,7 @@ export function registerMailSendTools(server: McpToolServer): void {
         const result = carried.result;
         forgetUnknownSend(fingerprint);
         await recordSend(extra, accountId, result.operationId);
-        await log("ok", result.operationId);
+        await log("ok", result.operationId, subject);
         return text({
           operationId: result.operationId,
           created: result.created,

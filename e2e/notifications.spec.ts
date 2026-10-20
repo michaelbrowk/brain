@@ -10,6 +10,8 @@
 //
 // @release, because a worker that fails to register is invisible until
 // somebody's phone stops ringing.
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { expect, test, type Page } from "playwright/test";
 import { freshNotes } from "./fresh-notes";
 
@@ -130,4 +132,36 @@ test("@release the bell opens the centre and says when nothing is waiting", asyn
   await bell.click();
   await expect(page.getByRole("menu")).toBeVisible();
   await expect(page.getByText("Nothing waiting")).toBeVisible();
+});
+
+// Shared with the disk-seeded screenshot review; the browser test intercepts
+// only this read so it needs neither real mail nor a background producer.
+test("@release daily digests disclose targets without adding to the badge", async ({ page }) => {
+  const fixture = JSON.parse(
+    readFileSync(path.join(process.cwd(), "e2e", "fixtures", "notification-digests.json"), "utf8"),
+  );
+  await page.route("**/api/notifications", (route) => route.fulfill({
+    json: { notifications: fixture.items, unread: 1 },
+  }));
+  await login(page);
+  const bell = page.getByRole("button", { name: "Notifications, 1 unread" });
+  await expect(bell).toBeVisible();
+  await bell.click();
+  const digest = page.getByRole("menuitem", { name: "ChatGPT · 3 pages, 1 task, 1 thread", exact: true });
+  await expect(digest).toHaveAttribute("aria-expanded", "false");
+  await digest.click();
+  await expect(digest).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByRole("menu")).toBeVisible();
+  const targets = page.locator("[data-digest-target]");
+  await expect(targets).toHaveText(["Weekly planning", "Review the launch notes", "Design review · Thursday", "Project journal", "Ideas for the next release"]);
+  await expect(targets.nth(0)).toHaveAttribute("href", "/p/planning");
+  await digest.press("Enter");
+  await expect(digest).toHaveAttribute("aria-expanded", "false");
+  await expect(targets).toHaveCount(0);
+  await digest.press("Enter");
+  await digest.press("ArrowDown");
+  await expect(targets.first()).toBeFocused();
+  await targets.nth(1).click();
+  await expect(page).toHaveURL(/\/tasks/);
+  await expect(page.getByRole("menu")).toHaveCount(0);
 });

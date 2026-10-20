@@ -1,0 +1,44 @@
+{
+  "version": 2,
+  "items": [
+    {
+      "id": "agent-digest:2026-10-20:chatgpt",
+      "kind": "agent-action",
+      "at": "2026-10-20T12:00:00.000Z",
+      "title": "ChatGPT · 3 pages, 1 task, 1 thread",
+      "href": "/",
+      "digest": {
+        "agent": "ChatGPT",
+        "day": "2026-10-20",
+        "ids": { "page": ["p1", "p2", "p3"], "task": ["t1"], "thread": ["m1"], "message": [] },
+        "saturated": [],
+        "targets": [
+          { "id": "p1", "kind": "page", "title": "Weekly planning", "href": "/p/planning", "at": "2026-10-20T12:00:00.000Z" },
+          { "id": "t1", "kind": "task", "title": "Review the launch notes", "href": "/tasks?task=review", "at": "2026-10-20T11:59:00.000Z" },
+          { "id": "m1", "kind": "thread", "title": "Design review · Thursday", "href": "/mail?account=account-a1&thread=726576696577", "at": "2026-10-20T11:58:00.000Z" },
+          { "id": "p2", "kind": "page", "title": "Project journal", "href": "/p/journal", "at": "2026-10-20T11:57:00.000Z" },
+          { "id": "p3", "kind": "page", "title": "Ideas for the next release", "href": "/p/ideas", "at": "2026-10-20T11:56:00.000Z" }
+        ]
+      }
+    },
+    {
+      "id": "agent-digest:2026-10-20:claude",
+      "kind": "agent-action",
+      "at": "2026-10-20T11:40:00.000Z",
+      "title": "Claude · 2 pages, 1 message sent",
+      "href": "/",
+      "digest": {
+        "agent": "Claude",
+        "day": "2026-10-20",
+        "ids": { "page": ["p4", "p5"], "task": [], "thread": [], "message": ["s1"] },
+        "saturated": [],
+        "targets": [
+          { "id": "p4", "kind": "page", "title": "Research notes", "href": "/p/research", "at": "2026-10-20T11:40:00.000Z" },
+          { "id": "s1", "kind": "message", "title": "Notes from our call", "href": "/mail", "at": "2026-10-20T11:39:00.000Z" },
+          { "id": "p5", "kind": "page", "title": "Reading list", "href": "/p/reading", "at": "2026-10-20T11:38:00.000Z" }
+        ]
+      }
+    },
+    { "id": "mail-new:2026-10-20T11:30:00.000Z", "kind": "mail-new", "at": "2026-10-20T11:30:00.000Z", "title": "3 new messages", "href": "/mail" }
+  ]
+}

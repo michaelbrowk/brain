@@ -19,6 +19,8 @@ import {
   markNotificationsRead,
 } from "@/lib/notifications/store";
 
+vi.mock("@/lib/owner-settings", () => ({ readTimeZone: async () => "Asia/Dubai" }));
+
 const ACCOUNT = "account-a00000000000000000000000000000000";
 
 let root: string;
@@ -524,8 +526,8 @@ describe("the row a mutation leaves in the centre", () => {
     const centreRows = await rows();
     expect(centreRows).toHaveLength(1);
     expect(centreRows[0].kind).toBe("agent-action");
-    expect(centreRows[0].title).toBe("Claude created a task");
-    expect(centreRows[0].body).toBe("Water the plants");
+    expect(centreRows[0].title).toBe("Claude · 1 task");
+    expect(centreRows[0].digest!.targets[0].title).toBe("Water the plants");
     expect(centreRows[0].readAt).toBeUndefined();
   });
 
@@ -594,157 +596,40 @@ describe("the row a mutation leaves in the centre", () => {
   });
 });
 
-/** A BURST IS ONE ROW (Michael's ruling).
- *
- *  An agent working through a mailbox left one row per thread, and two hundred
- *  of them are the whole share its kind has: the burst was pushing its own
- *  history out of the bell one thread at a time. The same client, tool and
- *  change inside five minutes is one row with a count.
- */
-describe("what a burst of the same action leaves in the centre", () => {
-  const archive = (at: string, thread: string, client = "Claude") =>
-    appendMcpActivity({
-      at,
-      client,
-      tool: "update_mail_thread",
-      accountId: ACCOUNT,
-      threadId: thread,
-      change: "archive",
-      outcome: "ok",
-    });
+describe("the persisted daily digest", () => {
+  const write = (page: string, at = "2026-09-14T09:00:00.000Z", tool = "write_page") =>
+    appendMcpActivity({ at, client: "Claude", tool, page, outcome: "ok" }, { label: page });
 
-  it("counts three inside the window and starts again after it", async () => {
-    await archive("2026-09-14T09:00:00.000Z", "thread-1");
-    await archive("2026-09-14T09:01:00.000Z", "thread-2");
-    await archive("2026-09-14T09:02:00.000Z", "thread-3");
-
-    const folded = await listNotifications(centre);
-    expect(folded).toHaveLength(1);
-    expect(folded[0]).toMatchObject({
-      title: "Claude archived 3 threads",
-      at: "2026-09-14T09:02:00.000Z",
-      // The destination stops naming one thread the moment the row stops being
-      // about one thread.
-      href: "/mail",
-    });
-
-    // Six minutes after the third, which is past the window.
-    await archive("2026-09-14T09:08:00.000Z", "thread-4");
-    const rows = await listNotifications(centre);
-    expect(rows).toHaveLength(2);
-    expect(rows.map((row) => row.title)).toEqual([
-      "Claude archived a thread",
-      "Claude archived 3 threads",
-    ]);
-    // Every line is still its own line. The fold is the bell's, not the log's.
-    expect(await readMcpActivity(10)).toHaveLength(4);
-  });
-
-  /** THE WINDOW IS FIXED, NOT SLIDING (Michael's ruling): a row lives five
-   *  minutes from its FIRST line, whatever has landed in it since. The two
-   *  cases below are the ones that tell the two readings apart. */
-  it("ends the row five minutes after its first line, not after its newest", async () => {
-    await archive("2026-09-14T12:00:00.000Z", "thread-1");
-    await archive("2026-09-14T12:03:00.000Z", "thread-2");
-    // Four minutes after the newest line and seven after the first. A sliding
-    // window folds this; a fixed one starts a row.
-    await archive("2026-09-14T12:07:00.000Z", "thread-3");
-
-    const rows = await listNotifications(centre);
-    expect(rows.map((row) => row.title)).toEqual([
-      "Claude archived a thread",
-      "Claude archived 2 threads",
-    ]);
-  });
-
-  it("folds everything that lands inside the five minutes", async () => {
-    await archive("2026-09-14T12:00:00.000Z", "thread-1");
-    await archive("2026-09-14T12:04:00.000Z", "thread-2");
-    await archive("2026-09-14T12:04:30.000Z", "thread-3");
-
+  it("folds the whole day, across tools and after reading", async () => {
+    await write("one");
+    const [first] = await listNotifications(centre);
+    await markNotificationsRead([first.id], "2026-09-14T09:01:00.000Z", centre);
+    await write("two", "2026-09-14T19:00:00.000Z", "create_page");
+    await write("one", "2026-09-14T19:01:00.000Z", "move_page");
     const rows = await listNotifications(centre);
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({
-      title: "Claude archived 3 threads",
-      at: "2026-09-14T12:04:30.000Z",
-    });
+    expect(rows[0]).toMatchObject({ id: first.id, title: "Claude · 2 pages", readAt: "2026-09-14T09:01:00.000Z" });
+    expect(await readMcpActivity(10)).toHaveLength(3);
   });
 
-  it("keeps one grant's burst apart from another's", async () => {
-    await archive("2026-09-14T09:00:00.000Z", "thread-1", "Claude");
-    await archive("2026-09-14T09:00:30.000Z", "thread-2", "Another app");
-    const rows = await listNotifications(centre);
-    expect(rows.map((row) => row.title).sort()).toEqual([
-      "Another app archived a thread",
-      "Claude archived a thread",
-    ]);
+  it("uses the reminder scheduler's owner zone at local midnight", async () => {
+    await write("one", "2026-09-14T19:59:59.999Z");
+    await write("two", "2026-09-14T20:00:00.000Z");
+    expect((await listNotifications(centre)).map((r) => r.digest!.day)).toEqual(["2026-09-15", "2026-09-14"]);
   });
 
-  it("keeps one change apart from another of the same tool", async () => {
-    await archive("2026-09-14T09:00:00.000Z", "thread-1");
-    await appendMcpActivity({
-      at: "2026-09-14T09:00:30.000Z",
-      client: "Claude",
-      tool: "update_mail_thread",
-      accountId: ACCOUNT,
-      threadId: "thread-2",
-      change: "spam",
-      outcome: "ok",
-    });
-    expect(await listNotifications(centre)).toHaveLength(2);
+  it("survives a module restart and keeps distinct counts", async () => {
+    await write("one");
+    vi.resetModules();
+    const fresh = await import("./activity-log");
+    await fresh.appendMcpActivity({ at: "2026-09-14T12:00:00.000Z", client: "Claude", tool: "append_page", page: "one", outcome: "ok" });
+    await fresh.appendMcpActivity({ at: "2026-09-14T13:00:00.000Z", client: "Claude", tool: "write_page", page: "two", outcome: "ok" });
+    expect(await listNotifications(centre)).toMatchObject([{ title: "Claude · 2 pages" }]);
+    expect(JSON.parse(await fs.readFile(path.join(centre, "notifications.json"), "utf8")).version).toBe(2);
   });
 
-  it("does not count the same line twice when it is written twice", async () => {
-    // A replay of the log is one row, and it is one row of one. The ids a fold
-    // has already swallowed are remembered, because they are no longer in the
-    // file for the centre's own duplicate check to find.
-    await archive("2026-09-14T09:00:00.000Z", "thread-1");
-    await archive("2026-09-14T09:01:00.000Z", "thread-2");
-    await archive("2026-09-14T09:01:00.000Z", "thread-2");
-    const rows = await listNotifications(centre);
-    expect(rows).toHaveLength(1);
-    expect(rows[0].title).toBe("Claude archived 2 threads");
-  });
-
-  it("starts a new row rather than rewriting one the reader has seen", async () => {
-    await archive("2026-09-14T09:00:00.000Z", "thread-1");
-    const [row] = await listNotifications(centre);
-    await markNotificationsRead([row.id], "2026-09-14T09:00:30.000Z", centre);
-
-    await archive("2026-09-14T09:01:00.000Z", "thread-2");
-    const rows = await listNotifications(centre);
-    expect(rows).toHaveLength(2);
-    expect(rows[0].title).toBe("Claude archived a thread");
-    expect(rows[0].readAt).toBeUndefined();
-  });
-
-  it("folds a burst of task writes into one row without a body", async () => {
-    await appendMcpActivity(
-      {
-        at: "2026-09-14T09:00:00.000Z",
-        client: "Claude",
-        tool: "create_task",
-        task: "task-alpha",
-        outcome: "ok",
-      },
-      { label: "Water the plants" },
-    );
-    await appendMcpActivity(
-      {
-        at: "2026-09-14T09:00:10.000Z",
-        client: "Claude",
-        tool: "create_task",
-        task: "task-beta",
-        outcome: "ok",
-      },
-      { label: "Call the bank" },
-    );
-    const rows = await listNotifications(centre);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({
-      title: "Claude created 2 tasks",
-      href: "/tasks",
-    });
-    expect(rows[0].body).toBeUndefined();
+  it("serializes simultaneous targets without losing any", async () => {
+    await Promise.all(Array.from({ length: 7 }, (_, i) => write(`page-${i}`)));
+    expect(await listNotifications(centre)).toMatchObject([{ title: "Claude · 7 pages" }]);
   });
 });

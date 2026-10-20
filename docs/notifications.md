@@ -45,10 +45,9 @@ The mail poll beside it writes one row however many letters it found.
 
 ## The centre
 
-A row is `{ id, kind, at, title, body?, href, readAt? }`, and the kind is one of
+A row is `{ id, kind, at, title, body?, href, readAt?, digest? }`, and the kind is one of
 `task-reminder`, `task-missed`, `mail-new` and `agent-action`
-(`lib/notifications/model.ts`). Nothing in the shape is about a task, a letter
-or a tool call, so another kind can join later without a second store.
+(`lib/notifications/model.ts`). Agent rows carry the structured digest described below; other kinds keep their existing shape.
 
 - **Two hundred rows of each kind**, eight hundred in all. A kind's oldest goes
   when its two hundred and first arrives, and a kind can only ever push out its
@@ -160,58 +159,51 @@ is a change over there.
 
 ## What an agent did
 
-A mutation an agent makes through MCP produces an `agent-action` row. The
-title is the app's own name and a verb, "Claude completed a task", and the
-body after it is the thing's own name where the call already knew one, "Water
-the plants". A row whose call knew no name is the title alone, "Claude
-archived a thread".
+**One row per agent per local calendar day**, across tools and targets:
+"ChatGPT · 23 pages, 2 tasks, 4 threads, 1 message sent". The agent is the OAuth
+client name or token name already recorded by MCP. Days use the owner's IANA
+time zone from Settings → Account, the same setting reminders use, including
+DST. Before a zone is set, digests use UTC; they never use the server's zone.
+A zone change affects future actions; existing digest days stay recorded.
 
-- **Successful mutations, and nothing else.** A refusal leaves no row, a read
-  of any kind leaves none, and the `notion_*` import family and
-  `connection_check` are out by name. So is one mutation: marking a thread
-  read. It is triage, and a row about it would put the badge back to one for a
-  letter you have just had dealt with; Settings → Connections still logs it.
-  Every row comes off the one activity line the mutation already writes
-  (`lib/mcp/activity-log.ts`), so a tool that logs cannot forget to announce.
-- **No letter reaches a row.** The title is Brain's own words after the app's
-  name, one of twenty-one fixed phrases. The body is the thing's own name, read
-  out of your notes or your tasks at the moment of the call, so a row about a
-  note an agent has just made shows the title the agent gave it: that is your
-  note's name now, and the same string is already in your sidebar. What cannot
-  reach a row at all is a subject, an address, a recipient or a message body,
-  because the activity line the row comes from has no field any of them could
-  enter through.
-- **A page an agent built says so in its own words.** An app page writes
-  through the bridge under its own title, and its rows read as sentences:
-  "Trainer updated Words", "Trainer added Session log". The page's name is in
-  the title rather than under it, because an app works on the small set of
-  pages its `owns` list holds, so naming one of them is useful rather than
-  arbitrary. A burst folds the way every other burst does, "Trainer updated 3
-  pages", and the name drops away with the count. What an app keeps as its own
-  state is not a row at all: nothing in your notes moves, and a line per card
-  answered would bury the writes that did.
-- **A burst is one row.** The same app doing the same thing inside five
-  minutes is counted, not repeated: "Claude archived 12 threads". The row keeps
-  the first action's id and takes the newest one's time, so it rises to the top
-  as the burst goes on, and reading it reads the whole burst. The body drops
-  away once there is more than one thing in it, and the row opens the surface
-  rather than the twelfth thread.
+- **Distinct targets, not actions.** Seven writes and a move of one page count
+  as one page. Tasks count distinct task ids. Mail triage counts distinct
+  `(account, thread)` pairs; sends and replies count distinct outbound operation
+  ids per account (message id if no operation id is available), labelled
+  "messages sent". Saving a mail attachment counts the destination page. An
+  older caller with no target id falls back to a hash of its activity line.
+- **The header only expands or collapses.** A bare Solar chevron discloses the
+  day and the 50 most recently touched targets, newest first. Links show page
+  titles, task titles or mail subjects; a caller without a title uses "Page",
+  "Task", "Mail thread" or "Sent message". Labels come from the completed
+  operation beside the log line; the activity log itself still stores ids and
+  tokens only, never subjects, recipients or message bodies. A target opens
+  its page, selected task or mail thread. Deleted targets open their surface.
+  Opening an agent's mail target does not mark the thread read.
+- **Bounded detail and counts.** Version 2 of `notifications.json` persists
+  `digest: { agent, day, ids, saturated, targets }`. Each of the four `ids` sets
+  holds at most 200 hashed identities; counts beyond that explicitly say
+  "200+" rather than claiming precision. Target details retain the latest 50
+  independently of those sets, with "+N more" (a lower bound after saturation).
+  The existing 200 rows per kind and 800 rows total caps still apply.
+- **A quiet history.** Agent rows never contribute to the bell badge and
+  always use read styling. A later action updates the same day's row even
+  after it was read, preserves `readAt`, and announces the update over SSE.
+  Only unread mail and task reminder/missed rows count toward the badge.
+  "Mark all read" continues to clear those rows as before. Digests send no push.
+- **Successful mutations only.** Refusals, reads, the `notion_*` import family,
+  `connection_check` and mail read marks stay silent. App-page writes join
+  the same daily rule under the app's logged name. Settings → Connections
+  retains the full activity log, including refusals.
 
-  **The five minutes run from the row's first action**, not from its newest, so
-  the row closes five minutes after it opened whatever has joined it since, and
-  an afternoon of work is several rows of five minutes each rather than one row
-  that grows all day. A restart starts a new row too: the count is what this
-  server watched happen, not a claim about the file.
-- **A press opens what the row is about.** The task, selected in Tasks. The
-  note the file landed in. The thread, opened in Mail without being marked
-  read, because the row is a record of what an agent did and not a new letter.
-  A row about something deleted opens the surface it was on.
-- **No push.** Push stays the phone's signal for reminders. An agent working
-  through a list at two in the morning is not a reason to buzz a pocket.
-
-Settings → Connections still holds the full log, refusals included, and is
-unchanged by any of this. It has never logged a read, and neither does the
-bell.
+**Upgrade from version 1:** known singular agent sentences with recoverable
+page/task/thread destinations fold by agent and owner-local date. Repeated
+references to one target count once. Aggregated bursts with lost target ids,
+ambiguous app sentences and unknown formats remain verbatim, also quiet and
+excluded from the badge. No distinct count is invented for them. Migration is
+serialized and persisted atomically on the first read, so restarts preserve
+both the fold and its calendar day. Other notification kinds retain their
+existing behavior, including the older mail-row migration.
 
 ## Push
 

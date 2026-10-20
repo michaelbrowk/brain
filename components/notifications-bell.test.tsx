@@ -15,6 +15,7 @@ import { resetNotificationsStore } from "./notifications-client";
 
 const harness = {
   reduce: false,
+  disclosures: [] as MotionProps[],
   spans: [] as { motion: MotionProps; props: Record<string, unknown> }[],
 };
 
@@ -23,6 +24,7 @@ vi.mock("framer-motion", async () => {
   return createFramerMotionMock({
     reducedMotion: () => harness.reduce,
     onRender: ({ tag, motion, props }) => {
+      if (props["data-digest-disclosure"] !== undefined) harness.disclosures.push(motion);
       if (tag === "span") harness.spans.push({ motion, props });
     },
   });
@@ -50,6 +52,7 @@ beforeEach(() => {
   resetNotificationsStore();
   harness.reduce = false;
   harness.spans.length = 0;
+  harness.disclosures.length = 0;
   navigate.mockReset();
   requestOpenThread.mockReset();
   rows = [];
@@ -534,5 +537,48 @@ describe("the bell", () => {
     const items = [...document.querySelectorAll('[role="menuitem"]')];
     expect(items[0].hasAttribute("data-unread")).toBe(true);
     expect(items[1].hasAttribute("data-unread")).toBe(false);
+  });
+});
+
+describe("agent digest disclosure", () => {
+  const digest = {
+    id: "agent-digest:2026-09-14:abc", kind: "agent-action", at: "2026-09-14T12:00:00.000Z",
+    title: "ChatGPT · 2 pages, 1 thread", href: "/",
+    digest: { agent: "ChatGPT", day: "2026-09-14", ids: { page: ["p1", "p2"], task: [], thread: ["m1"], message: [] }, saturated: [], targets: [
+      { id: "m1", kind: "thread", title: "Project update", href: AGENT_MAIL_HREF, at: "2026-09-14T12:00:00.000Z" },
+      { id: "p1", kind: "page", title: "Meeting notes", href: "/p/notes", at: "2026-09-14T11:00:00.000Z" },
+    ] },
+  };
+  it.each([false, true])("toggles without navigation, lists linked targets and overflow; reduced motion=%s", async (reduce) => {
+    harness.reduce = reduce;
+    rows = [digest, { id: MAIL_ID, kind: "mail-new", at: digest.at, title: "1 new message", href: "/mail" }];
+    await render();
+    expect(badge()!.textContent).toBe("1");
+    await open();
+    const header = item(digest.title)!;
+    expect(header.hasAttribute("data-unread")).toBe(false);
+    expect(header.getAttribute("aria-expanded")).toBe("false");
+    await act(async () => header.click());
+    expect(header.getAttribute("aria-expanded")).toBe("true");
+    expect(navigate).not.toHaveBeenCalled();
+    const chevron = harness.spans.findLast((span) => span.props["data-digest-chevron"] !== undefined)!;
+    expect(chevron.motion.animate).toEqual({ rotate: reduce ? 0 : 90 });
+    const animated = harness.disclosures.at(-1)!;
+    expect(animated.animate).toEqual(reduce ? { opacity: 1 } : { height: "auto", opacity: 1 });
+    expect(animated.exit).toEqual(reduce ? { opacity: 0 } : { height: 0, opacity: 0 });
+    const links = [...document.querySelectorAll<HTMLAnchorElement>("[data-digest-target]")];
+    expect(links.map((a) => a.textContent)).toEqual(["Project update", "Meeting notes"]);
+    expect(links[1].getAttribute("href")).toBe("/p/notes");
+    expect(document.body.textContent).toContain("+1 more");
+    await act(async () => links[0].click());
+    expect(requestOpenThread).toHaveBeenCalledWith("account-adeadbeefdeadbeefdeadbeefdeadbeef", "thread-one");
+    expect(navigate).toHaveBeenCalledWith("/mail");
+  });
+  it("draws no badge or mark-all control for digests alone", async () => {
+    rows = [digest];
+    await render();
+    expect(badge()).toBeNull();
+    await open();
+    expect(item("Mark all read")).toBeUndefined();
   });
 });

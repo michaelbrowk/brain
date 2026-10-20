@@ -51,11 +51,13 @@ async function openPage(page: Page, id: string) {
   return content;
 }
 
-/** The caret at the very end of the document, as a click there would put it. */
-async function caretToEnd(content: Locator) {
+/** The caret at the very end of the document, or of its first `within` block,
+ *  as a click there would put it. */
+async function caretToEnd(content: Locator, within = ":scope") {
   await content.focus();
-  await content.evaluate((element) => {
-    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+  await content.evaluate((element, selector) => {
+    const root = element.querySelector(selector) ?? element;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     let last: Text | null = null;
     for (let node = walker.nextNode(); node; node = walker.nextNode()) {
       last = node as Text;
@@ -68,7 +70,7 @@ async function caretToEnd(content: Locator) {
     selection?.removeAllRanges();
     selection?.addRange(range);
     document.dispatchEvent(new Event("selectionchange"));
-  });
+  }, within);
 }
 
 /** A PUT that carries a full body is the ordinary save; a closing tab's save
@@ -387,7 +389,9 @@ test("Smart sort applied while a save is out and the tab hides still saves the s
 
   // A typed edit is on the wire; Smart sort queues its rewrite behind it;
   // then the tab hides and the typed edit also leaves as a closing save.
-  await caretToEnd(content);
+  // The children's links close the page, so the words go at the end of its
+  // first paragraph rather than into the last link.
+  await caretToEnd(content, "p");
   await page.keyboard.type(" typed");
   await held;
   await page.getByRole("button", { name: "Smart sort" }).click();
@@ -397,7 +401,7 @@ test("Smart sort applied while a save is out and the tab hides still saves the s
   );
   await dialog.getByRole("button", { name: "Apply" }).click();
   await hideTab(page);
-  await expect.poll(() => serverBody(page, id)).toBe("Body typed");
+  await expect.poll(() => serverBody(page, id)).toMatch(/^Body typed\n/);
   await showTab(page);
   release();
 

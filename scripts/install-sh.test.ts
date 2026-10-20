@@ -2,9 +2,14 @@ import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync, existsS
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync, type SpawnOptions, type SpawnSyncOptionsWithStringEncoding } from "node:child_process";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 
 const SCRIPT = path.join(import.meta.dirname, "..", "install.sh");
+
+// Each case runs the real script under bash a few times, about 3 s alone. A
+// loaded machine running the whole suite in parallel pushes that past the
+// 5 s default, so the timeout is the script's, not the suite's.
+vi.setConfig({ testTimeout: 30_000 });
 
 /** Every temp root the tests made, removed once the file has run. */
 const roots: string[] = [];

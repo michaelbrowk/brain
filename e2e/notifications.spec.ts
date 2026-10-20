@@ -10,6 +10,8 @@
 //
 // @release, because a worker that fails to register is invisible until
 // somebody's phone stops ringing.
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { expect, test, type Page } from "playwright/test";
 import { freshNotes } from "./fresh-notes";
 
@@ -135,7 +137,9 @@ test("@release the bell opens the centre and says when nothing is waiting", asyn
 // Shared with the disk-seeded screenshot review; the browser test intercepts
 // only this read so it needs neither real mail nor a background producer.
 test("@release daily digests disclose targets without adding to the badge", async ({ page }) => {
-  const { default: fixture } = await import("./fixtures/notification-digests.json");
+  const fixture = JSON.parse(
+    readFileSync(path.join(process.cwd(), "e2e", "fixtures", "notification-digests.json"), "utf8"),
+  );
   await page.route("**/api/notifications", (route) => route.fulfill({
     json: { notifications: fixture.items, unread: 1 },
   }));

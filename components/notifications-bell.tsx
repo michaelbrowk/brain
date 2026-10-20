@@ -147,7 +147,10 @@ function DigestRow({ row, onNavigate }: {
         }}
       >
         <Icon name={KIND_GLYPH[row.kind]} size={16} className="brain-menu-icon" />
-        <span data-notification-title="" className="min-w-0 flex-1 text-ink-2">{row.title}</span>
+        <span data-notification-title="" className="min-w-0 flex-1 truncate text-ink-2">{row.title}</span>
+        <span className="shrink-0 tabular-nums text-ink-3">
+          {formatAgo(row.at, { compact: true })}
+        </span>
         <motion.span
           data-digest-chevron=""
           className="flex shrink-0 text-ink-2"
@@ -168,7 +171,6 @@ function DigestRow({ row, onNavigate }: {
               exit={reduce ? { opacity: 0 } : { height: 0, opacity: 0 }}
               transition={reduce ? { duration: DUR.fast } : SPRING_SELECT}
             >
-              <div className="brain-digest-day text-caption text-ink-2">{digest.day}</div>
               {digest.targets.map((target) => (
                 <Dropdown.Item key={`${target.kind}:${target.id}`} asChild>
                   <a

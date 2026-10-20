@@ -2176,7 +2176,6 @@ html[data-kbd] [contenteditable]:focus-visible {
   line-height: 1.35;
 }
 .brain-digest-target { padding-left: 34px; }
-.brain-digest-day,
 .brain-digest-more { padding: 4px 8px 4px 34px; }
 .brain-menu-item[data-highlighted],
 .brain-menu-item:active {

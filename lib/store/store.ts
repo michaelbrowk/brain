@@ -672,7 +672,13 @@ export class Store {
     );
     resumeGitSnapshotsAfterRecovery(this.root);
     this.warnIfShareEditHasNoOrigin();
-    void this.backfillChildPageLinks();
+    this.childLinksBackfill = this.backfillChildPageLinks();
+  }
+
+  /** Settles once the one-time child-link backfill has run or failed. It never
+   *  rejects; only tests wait on it, so a fixture's mocks do not race it. */
+  whenChildLinksBackfilled(): Promise<void> {
+    return this.childLinksBackfill;
   }
 
   /** BRAIN_PUBLIC_ORIGIN is what every visitor write is checked against, and
@@ -4118,6 +4124,8 @@ export class Store {
     // Structural operations preflight the entire batch before changing flags.
     return edits;
   }
+
+  private childLinksBackfill: Promise<void> = Promise.resolve();
 
   private async backfillChildPageLinks(): Promise<void> {
     let phase = "marker_read";

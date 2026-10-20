@@ -182,6 +182,7 @@ async function tmpStore(options: { publicOrigin?: string | null } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-"));
   const s = new Store(root, options);
   await s.init();
+  await s.whenChildLinksBackfilled();
   return { s, root };
 }
 

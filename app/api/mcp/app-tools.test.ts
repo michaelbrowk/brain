@@ -144,6 +144,7 @@ describe("create_app_page", () => {
         "Do not build an app to work around a missing Brain feature without naming the gap; " +
         "the right move then is a page plus a note to the owner. " +
         "reason is required and is the owner's own request in one line, kept on the page so they can see why an app appeared. " +
+        "An eligible parent receives a standalone child link; app parents never receive links for their owned children. " +
         "Read docs/apps.md before the first one.",
     );
   });

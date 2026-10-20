@@ -415,7 +415,7 @@ const handler = createMcpHandler(
       {
         title: "Create a page",
         description:
-          "Create a page. parentId null/omitted = top level. Returns the new page's meta (id). Calling it twice makes two pages, and each save is committed to the notes folder's own git history.",
+          "Create a page. parentId null/omitted = top level. An eligible parent gets a standalone child link line unless it already links the child. Boards, collections, collection rows and app parents are excluded. Returns the new page's meta (id). Calling it twice makes two pages, and each save is committed to the notes folder's own git history.",
         inputSchema: {
           title: z.string(),
           parentId: z.string().nullable().optional(),
@@ -797,7 +797,8 @@ const handler = createMcpHandler(
           "standalone `[label](/p/<id>)` paragraph for the page is removed from",
           "the old parent's body, and one is appended to the new parent's body",
           "unless that body already links the page. A reorder among siblings",
-          "edits no body. Both rewritten pages record updatedBy: claude. The",
+          "edits no body. Boards, collections, collection rows and app parents are excluded.",
+          "Inline mentions stay untouched. Both rewritten pages record updatedBy: claude. The",
           "result is the moved page's metadata plus `unlinkedFrom`: the old",
           "parent whose body stopped listing the page, or null when no body",
           "changed. Both rewrites are committed to the notes folder's own git",
@@ -844,7 +845,7 @@ const handler = createMcpHandler(
       {
         title: "Move a page to Trash",
         description:
-          "Delete a page and its whole subtree. A soft delete: the pages go to Trash and are recoverable from there. Nothing is purged, only the owner empties the Trash.",
+          "Delete a page and its whole subtree. A soft delete: the pages go to Trash and are recoverable from there. Standalone child link lines are removed from its eligible parent; inline mentions remain. Boards, collections, collection rows and app parents are excluded. Nothing is purged, only the owner empties the Trash.",
         inputSchema: { id: z.string() },
         annotations: hints("write destroys idempotent local"),
       },
@@ -863,7 +864,7 @@ const handler = createMcpHandler(
           // call that is about to rewrite a whole subtree, and it is swallowed:
           // see `pageTitleFor`.
           marks.label = await pageTitleFor(store, id);
-          await store.deletePage(id);
+          await store.deletePage(id, undefined, "claude");
           return { answer: text({ ok: true }), outcome: "ok" };
         }),
     );

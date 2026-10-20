@@ -1,5 +1,7 @@
 "use client";
 
+import { appendStandalonePageRef } from "@/lib/page-ref-nesting";
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MilkdownEditor, type EditorCapabilities } from "./milkdown-editor";
 import { retryFailedAttachmentImages, setAttachmentSrcResolver } from "./attachment-src";
@@ -904,6 +906,11 @@ function ShareEditorForPage({
    *  that could change one afterwards. */
   const createSubpage = useCallback(
     async (title: string, insertPageRef: (page: PageRef) => boolean) => {
+      editorFlush.current();
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = null;
+      await queue.settled(pageId);
+      const baseBeforeCreate = base.current;
       let res: Response;
       try {
         res = await fetcher(
@@ -923,6 +930,19 @@ function ShareEditorForPage({
       } | null;
       const id = typeof created?.id === "string" ? created.id : "";
       if (!id) return refusedSubpage(SHARE_SUBPAGE_FAILED_COPY, true);
+      try {
+        const response = await fetcher(pageEndpoint);
+        if (response.ok) {
+          const parent = await response.json() as { markdown: string; rev: string };
+          if (parent.markdown === appendStandalonePageRef(baseBeforeCreate, `📄 ${title}`, id, location.origin)) {
+            revision.current = parent.rev;
+            base.current = parent.markdown;
+          }
+        }
+      } catch {
+        // Keep the old baseline on a lost read; the normal save preserves the
+        // visitor's draft and reports a conflict instead of overwriting prose.
+      }
       // The page exists from here on, so nothing below may ask for a second
       // press. It is reachable before the ref is placed, and it is saved at
       // once after, because an unsaved ref is the one way the two could part.
@@ -933,7 +953,7 @@ function ShareEditorForPage({
       }
       return { ok: true } as const;
     },
-    [fetcher, pageId, query],
+    [fetcher, pageEndpoint, pageId, query, queue],
   );
 
   /** The slash menu's contract: it holds the trigger text and the editor's

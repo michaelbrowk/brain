@@ -109,6 +109,7 @@ import {
   type BrainMailEvent,
 } from "@/lib/mail/mail-events";
 import {
+  appendStandalonePageRef,
   mapMarkdownOffset,
   removeStandalonePageRefOccurrenceWithRestore,
   restoreStandalonePageRefAtOffset,
@@ -800,6 +801,8 @@ export function Shell({
     Promise.resolve(true),
   );
   const editorFlushRef = useRef<() => void>(() => {});
+  // A slash creation places the server's new child link at the cursor.
+  const cursorPageCreationRef = useRef<string | null>(null);
   // The live editor's in-place apply of a body written elsewhere, filed under
   // the page it shows: a late answer for another page must never reach it.
   const editorExternalWriteRef = useRef<{
@@ -1422,6 +1425,7 @@ export function Shell({
       // began. It may refresh the server cache, never the wrong active editor
       // or the base revision of an unsaved draft.
       if (
+        cursorPageCreationRef.current === id ||
         pendingRef.current?.id === id ||
         editorDirtyRef.current === id ||
         coverQueueRef.current.has(id)
@@ -1732,6 +1736,7 @@ export function Shell({
       const cur = selectedIdRef.current;
       if (
         cur !== ev.id ||
+        cursorPageCreationRef.current === cur ||
         pendingRef.current?.id === cur ||
         editorDirtyRef.current === cur ||
         coverQueueRef.current.has(cur)
@@ -2872,6 +2877,68 @@ export function Shell({
     };
   }, [clearLocalRecoveryUnavailable, markLocalRecoveryUnavailable]);
 
+  /** A structure write can rewrite the destination's body, the old parent's
+   *  body, or both. Whichever of them is the open page has to be serialized
+   *  and settled first, so the composite Store write can never overtake a
+   *  draft the reader has not saved. Any other page returns true untouched. */
+  const prepareOpenPageForStructureWrite = useCallback(
+    async (destinationId: string, failureMessage = "Couldn't save this page. Move cancelled.") => {
+      if (selectedIdRef.current !== destinationId) return true;
+
+      const failClosed = () => {
+        showToast(failureMessage);
+        return false;
+      };
+      if (coverQueueRef.current.has(destinationId)) return failClosed();
+
+      // A move into the open page writes that page body on the server. First
+      // serialize and confirm the local editor so the composite Store write
+      // can never overtake an unsaved destination draft.
+      editorFlushRef.current();
+      if (!(await flushPendingRef.current())) return failClosed();
+      if (selectedIdRef.current !== destinationId) return false;
+
+      // The editor remains usable while the first PUT is in flight. Mirror the
+      // bounded History preflight: materialize once more and confirm at most
+      // one newer draft, then fail closed if edits keep arriving.
+      editorFlushRef.current();
+      if (pendingRef.current?.id === destinationId) {
+        if (!(await flushPendingRef.current())) return failClosed();
+        if (selectedIdRef.current !== destinationId) return false;
+        editorFlushRef.current();
+      }
+
+      // doSave owns the keyed queue, but an already-running operation may have
+      // started before this preflight had a pending draft to flush.
+      const queued = [...queuedSaveRef.current.values()]
+        .filter((entry) => entry.id === destinationId)
+        .map((entry) => entry.promise);
+      if (queued.length) {
+        const results = await Promise.all(queued);
+        if (results.some((saved) => !saved)) return failClosed();
+        editorFlushRef.current();
+      }
+
+      // Let the keyed queue finish retiring whatever it was already running.
+      // Without this the page reads as busy for one microtask turn after its
+      // save resolved — which is exactly the state a page is in a moment after
+      // the editor normalizes it on open.
+      await saveQueueRef.current.settled(destinationId);
+
+      if (
+        selectedIdRef.current !== destinationId ||
+        pendingRef.current?.id === destinationId ||
+        editorDirtyRef.current === destinationId ||
+        saveQueueRef.current.has(destinationId) ||
+        coverQueueRef.current.has(destinationId)
+      ) {
+        return failClosed();
+      }
+      return true;
+    },
+    [showToast],
+  );
+
   // ── mutations ───────────────────────────────────────
   const requestCreatePage = useCallback(
     async (
@@ -2928,6 +2995,9 @@ export function Shell({
         editorFlushRef.current();
         flushPendingRef.current();
       }
+      if (parentId && !(await prepareOpenPageForStructureWrite(
+        parentId, "Couldn't save this page. Page creation cancelled.",
+      ))) return null;
       const meta = await requestCreatePage(parentId, template);
       if (!meta) return null;
       await refreshTree();
@@ -2943,7 +3013,7 @@ export function Shell({
       if (!template || template.id === "blank") setFocusTitleId(meta.id);
       return meta.id;
     },
-    [blockConflictMutation, refreshTree, requestCreatePage, select],
+    [blockConflictMutation, prepareOpenPageForStructureWrite, refreshTree, requestCreatePage, select],
   );
 
   const createPageFromSlash = useCallback(
@@ -2953,76 +3023,103 @@ export function Shell({
       if (blockConflictMutation(parentId, "Save a copy before adding a child page."))
         return;
 
-      // This flow deliberately defers refreshTree: a structural refresh would
-      // auto-append the unlinked child and remount Milkdown before the slash
-      // position can be replaced.
-      const meta = await requestCreatePage(parentId);
-      if (!meta) return;
-      const refreshCreatedPage = async () => {
+      // The server appends the child immediately; this editor places that
+      // same link at the cursor. Hold remote reloads until its save settles.
+      cursorPageCreationRef.current = parentId;
+      try {
+        editorFlushRef.current();
+        if (timer.current) clearTimeout(timer.current);
+        timer.current = null;
+        await saveQueueRef.current.settled(parentId);
+        const baseBeforeCreate = baseMarkdownRef.current.get(parentId);
+        const meta = await requestCreatePage(parentId);
+        if (!meta) return;
         try {
-          await refreshTree();
-          setExpanded((current) => new Set(current).add(parentId));
-          return true;
+          const response = await apiFetch(`/api/page/${parentId}`);
+          if (response.ok && baseBeforeCreate !== undefined) {
+            const parent = await response.json() as { markdown: string; rev: string };
+            const expected = appendStandalonePageRef(
+              baseBeforeCreate, `${meta.icon || "📄"} ${meta.title}`, meta.id, window.location.origin,
+            );
+            // Adopt only our exact generated append. An unrelated remote edit
+            // keeps the old revision and meets the ordinary conflict path.
+            if (parent.markdown === canonicalPageMarkdown(expected)) {
+              revisionsRef.current.set(parentId, parent.rev);
+              baseMarkdownRef.current.set(parentId, parent.markdown);
+            }
+          }
         } catch {
-          return false;
+          // The child already exists. Preserve the local cursor placement and
+          // let its normal save/recovery path handle a failed baseline read.
         }
-      };
-      if (
-        selectedIdRef.current !== parentId ||
-        !insertPageRef(meta)
-      ) {
-        void refreshCreatedPage().then((refreshed) => {
-          if (selectedIdRef.current === parentId) {
+        const refreshCreatedPage = async () => {
+          try {
+            await refreshTree();
+            setExpanded((current) => new Set(current).add(parentId));
+            return true;
+          } catch {
+            return false;
+          }
+        };
+        if (
+          selectedIdRef.current !== parentId ||
+          !insertPageRef(meta)
+        ) {
+          void refreshCreatedPage().then((refreshed) => {
+            if (selectedIdRef.current === parentId) {
+              showToast(
+                refreshed
+                  ? "Page created, but couldn't place it at the cursor"
+                  : "Page created. Refresh to update the sidebar",
+              );
+            }
+          });
+          return;
+        }
+
+        // Serialize the inserted page-ref synchronously, then await that exact
+        // parent save before a tree refresh or navigation can tear down Milkdown.
+        editorFlushRef.current();
+        const pending =
+          pendingRef.current?.id === parentId ? pendingRef.current : null;
+        if (!pending) {
+          void refreshCreatedPage().then((refreshed) => {
             showToast(
               refreshed
-                ? "Page created, but couldn't place it at the cursor"
+                ? "Page created, but couldn't save its link"
                 : "Page created. Refresh to update the sidebar",
             );
+          });
+          return;
+        }
+        if (timer.current) clearTimeout(timer.current);
+        timer.current = null;
+        const saved = await doSave(
+          parentId,
+          pending.md,
+          pending.operationId,
+        );
+        if (!saved) {
+          showToast(
+            localRecoveryUnavailableRef.current.has(parentId)
+              ? LOCAL_RECOVERY_UNAVAILABLE
+              : "Page created. Its link is safe in your local draft",
+          );
+          void refreshCreatedPage();
+          return;
+        }
+        if (selectedIdRef.current === parentId) {
+          select(meta.id);
+          setFocusTitleId(meta.id);
+        }
+        void refreshCreatedPage().then((refreshed) => {
+          if (!refreshed) {
+            showToast("Page created. Refresh to update the sidebar");
           }
         });
-        return;
+      } finally {
+        cursorPageCreationRef.current = null;
       }
-
-      // Serialize the inserted page-ref synchronously, then await that exact
-      // parent save before a tree refresh or navigation can tear down Milkdown.
-      editorFlushRef.current();
-      const pending =
-        pendingRef.current?.id === parentId ? pendingRef.current : null;
-      if (!pending) {
-        void refreshCreatedPage().then((refreshed) => {
-          showToast(
-            refreshed
-              ? "Page created, but couldn't save its link"
-              : "Page created. Refresh to update the sidebar",
-          );
-        });
-        return;
-      }
-      if (timer.current) clearTimeout(timer.current);
-      timer.current = null;
-      const saved = await doSave(
-        parentId,
-        pending.md,
-        pending.operationId,
-      );
-      if (!saved) {
-        showToast(
-          localRecoveryUnavailableRef.current.has(parentId)
-            ? LOCAL_RECOVERY_UNAVAILABLE
-            : "Page created. Its link is safe in your local draft",
-        );
-        void refreshCreatedPage();
-        return;
-      }
-      if (selectedIdRef.current === parentId) {
-        select(meta.id);
-        setFocusTitleId(meta.id);
-      }
-      void refreshCreatedPage().then((refreshed) => {
-        if (!refreshed) {
-          showToast("Page created. Refresh to update the sidebar");
-        }
-      });
     },
     [
       blockConflictMutation,
@@ -3260,68 +3357,6 @@ export function Shell({
     );
     deleteTimer.current = setTimeout(() => commitDelete(), countdown * 1000);
   }, [pendingDelete, countdown, commitDelete]);
-
-  /** A structure write can rewrite the destination's body, the old parent's
-   *  body, or both. Whichever of them is the open page has to be serialized
-   *  and settled first, so the composite Store write can never overtake a
-   *  draft the reader has not saved. Any other page returns true untouched. */
-  const prepareOpenPageForStructureWrite = useCallback(
-    async (destinationId: string) => {
-      if (selectedIdRef.current !== destinationId) return true;
-
-      const failClosed = () => {
-        showToast("Couldn't save this page. Move cancelled.");
-        return false;
-      };
-      if (coverQueueRef.current.has(destinationId)) return failClosed();
-
-      // A move into the open page writes that page body on the server. First
-      // serialize and confirm the local editor so the composite Store write
-      // can never overtake an unsaved destination draft.
-      editorFlushRef.current();
-      if (!(await flushPendingRef.current())) return failClosed();
-      if (selectedIdRef.current !== destinationId) return false;
-
-      // The editor remains usable while the first PUT is in flight. Mirror the
-      // bounded History preflight: materialize once more and confirm at most
-      // one newer draft, then fail closed if edits keep arriving.
-      editorFlushRef.current();
-      if (pendingRef.current?.id === destinationId) {
-        if (!(await flushPendingRef.current())) return failClosed();
-        if (selectedIdRef.current !== destinationId) return false;
-        editorFlushRef.current();
-      }
-
-      // doSave owns the keyed queue, but an already-running operation may have
-      // started before this preflight had a pending draft to flush.
-      const queued = [...queuedSaveRef.current.values()]
-        .filter((entry) => entry.id === destinationId)
-        .map((entry) => entry.promise);
-      if (queued.length) {
-        const results = await Promise.all(queued);
-        if (results.some((saved) => !saved)) return failClosed();
-        editorFlushRef.current();
-      }
-
-      // Let the keyed queue finish retiring whatever it was already running.
-      // Without this the page reads as busy for one microtask turn after its
-      // save resolved — which is exactly the state a page is in a moment after
-      // the editor normalizes it on open.
-      await saveQueueRef.current.settled(destinationId);
-
-      if (
-        selectedIdRef.current !== destinationId ||
-        pendingRef.current?.id === destinationId ||
-        editorDirtyRef.current === destinationId ||
-        saveQueueRef.current.has(destinationId) ||
-        coverQueueRef.current.has(destinationId)
-      ) {
-        return failClosed();
-      }
-      return true;
-    },
-    [showToast],
-  );
 
   // ⌘Z undoes a pending delete while the snackbar is up
   useEffect(() => {
@@ -6705,7 +6740,6 @@ export function Shell({
                   onReparentPageRef={onReparentPageRef}
                   onRequestRemovePageRef={requestEditorPageRefRemoval}
                   onCreatePageAtCursor={createPageFromSlash}
-                  subpages={ordinaryChildren}
                 />
                 </article>
               </>

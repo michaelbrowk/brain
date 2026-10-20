@@ -305,12 +305,6 @@
 [data-col-drop="true"] .brain-drop-cursor {
   display: none;
 }
-/* The drag is carrying a page the body already links, or the editor is not
-   taking mutations. No line, because there is no boundary to promise — the
-   cursor says `no-drop` and the release does nothing, visibly. */
-[data-file-refused="true"] .brain-drop-cursor {
-  display: none !important;
-}
 html:has(a[data-page-ref-nest-target="true"]) .brain-drop-cursor {
   display: none !important;
 }
@@ -344,10 +338,8 @@ html:has(a[data-page-ref-nest-target="true"]) .brain-drop-cursor {
   white-space: nowrap;
   overflow-wrap: break-word;
 }
-/* A reference in the body is settled, so it reads primary. A row in the tail
-   is a child the body has not taken yet, so it reads one step down — before
-   and after are not the same picture. The tail's hover belongs to the whole
-   row, which carries the action, so the anchor does not take its own. */
+/* Authored page references read primary; the shared-page child list keeps
+   its existing secondary ink. */
 .milkdown .ProseMirror .brain-page-ref {
   color: var(--ink);
 }
@@ -365,28 +357,6 @@ html:has(a[data-page-ref-nest-target="true"]) .brain-drop-cursor {
 :is(.milkdown .ProseMirror, [data-derived-page-refs])
   .brain-page-ref-missing:hover {
   background: transparent;
-}
-/* A row in the derived tail names a child the body does not link yet, so it
-   is a drag source: dropping it into the document is how it gets written in.
-   It dims while it travels — the indicator in the document is the live thing. */
-[data-derived-page-refs] .brain-page-ref[data-dragging="true"] {
-  opacity: 0.4;
-}
-/* The row that is travelling does not offer its own menu, and does not hold
-   the fill its own mousedown gave it — the only live thing while a drag is in
-   flight is the indicator in the document. */
-[data-derived-page-refs]
-  p:has(> .brain-page-ref[data-dragging="true"])
-  button[data-file-page-trigger] {
-  opacity: 0;
-}
-[data-derived-page-refs] p:has(> .brain-page-ref[data-dragging="true"]) {
-  background: transparent;
-}
-/* An open row menu belongs to its row, the same way hover does. */
-[data-derived-page-refs]
-  p:has(button[data-file-page-trigger][data-state="open"]) {
-  background: var(--fill-hover);
 }
 /* the page icon sits in its own span so a hair of air separates it from the
    title; textContent stays "<icon> <title>" for parseDOM and search */
@@ -429,36 +399,6 @@ html:has(a[data-page-ref-nest-target="true"]) .brain-drop-cursor {
   background: var(--fill-hover);
   box-shadow: inset 0 0 0 1px var(--line);
 }
-/* One confirming flash on the block a filing just wrote, in the same treatment
-   a pending nest uses, then out of the way — so arriving is not the same
-   picture as having been there all along.
-
-   The class comes from a decoration the plugin puts on that block for the
-   window (`BRAIN_PAGE_REF_FILED_CLASS`), not from `.ProseMirror-selectednode`.
-   A NodeSelection on a standalone page block is also what picking one up to
-   move it sets, and "about to leave" drawing "just arrived" is a signal that
-   lies about a block a week old.
-
-   Hold, then release. The peak is `--fill-hover`, ink at 4%, and on
-   `--ease-out` a fade is 86% gone a quarter of the way through: 600ms of
-   animation was ~150ms of anything visible. The fill now holds for the first
-   45% and gives way linearly over the rest, which is the same ramp
-   `materialize-edge` runs on an alpha, and 600 is what a reader sees. */
-@keyframes brain-page-ref-filed {
-  0%,
-  45% {
-    background: var(--fill-hover);
-    box-shadow: inset 0 0 0 1px var(--line);
-  }
-  100% {
-    background: transparent;
-    box-shadow: inset 0 0 0 1px transparent;
-  }
-}
-.milkdown .ProseMirror p.brain-page-ref-only.brain-page-ref-filed {
-  border-radius: var(--r-xs);
-  animation: brain-page-ref-filed 600ms linear both;
-}
 @media (prefers-reduced-motion: reduce) {
   .milkdown .ProseMirror p.brain-page-ref-only {
     transition: none;
@@ -471,10 +411,7 @@ html:has(a[data-page-ref-nest-target="true"]) .brain-drop-cursor {
       0 2px 3px color-mix(in oklch, var(--ink) 16%, transparent)
     );
   }
-  /* The flash still holds for its 600ms, it just stops fading. */
-  .milkdown .ProseMirror p.brain-page-ref-only.brain-page-ref-filed {
-    animation-timing-function: steps(1, end);
-  }
+
 }
 /* a page-block title too long for its container truncates with an ellipsis
    (the app's truncation register) instead of spilling past the prose measure
@@ -1205,10 +1142,8 @@ html[data-kbd] .milkdown .ProseMirror .brain-task-mark:focus-visible {
 .milkdown .ProseMirror > h3 {
   max-width: 620px;
 }
-/* The derived tail stands under the document and its rule separates it from
-   the document's blocks, so it is a document-width object and takes the same
-   measure. It was reading the article's box instead and running 52px past the
-   blocks on its right — invisible until the rule arrived to draw it. */
+/* The shared-page child list follows the document's measure. Owner pages
+   render child links in the editor itself. */
 .brain-page-article [data-derived-page-refs] {
   max-width: 620px;
 }

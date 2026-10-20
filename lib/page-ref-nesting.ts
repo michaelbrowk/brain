@@ -1,11 +1,11 @@
 import { directiveFromMarkdown } from "mdast-util-directive";
 import { fromMarkdown } from "mdast-util-from-markdown";
 import { directive } from "micromark-extension-directive";
-import { internalPageLinkId } from "./internal-page-link";
+import { internalPageLinkId } from "./internal-page-link.ts";
 import {
   explicitContainerClosing,
   stripStrayDirectiveNodes,
-} from "./stray-directives";
+} from "./stray-directives.ts";
 
 export interface StandalonePageRefRemoval {
   markdown: string;

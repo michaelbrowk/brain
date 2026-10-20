@@ -31,6 +31,24 @@ also the install, minus its PM2 sentences:
 
 Every other step applies unchanged.
 
+## Child-page link backfill
+
+On the first notes-store initialization after this upgrade, Brain files unlinked
+direct children into eligible parent bodies, in tree order. It saves each
+parent once and creates one notes Git commit named
+`migrate: file child pages in their parents`. Boards, collections, collection
+rows and app parents are excluded. A fresh empty notebook needs no commit.
+
+The completion marker is `child-page-links-v1-<notes-root-hash>.json` under
+`BRAIN_SETTINGS_STATE_DIR` (normally `/var/lib/brain/settings`). It records a pending run before the first edit and completion
+only after Git succeeds. A pending run retains its changes for the named
+migration commit on restart. Initialization fails visibly if a body cannot safely
+receive a link or a save/commit fails; the marker is never marked complete, and a
+retry skips existing links. Keep the marker across upgrades. Removing it or
+moving the notes root causes the backfill to run again, including links an
+owner deliberately removed since the first run. The marker is instance state,
+so it stays outside notes exports and notes Git history.
+
 ## Layout
 
 - `/opt/brain/releases/<commit>-<timestamp>-<nonce>` contains immutable standalone builds. The deploy script retains the seven newest releases plus any older active/rollback target.

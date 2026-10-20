@@ -144,7 +144,10 @@ says can widen it. A page moved out of the app's subtree stops being writable,
 which is how an owner takes a page back.
 
 **`create.page` makes a child of the app and adds it to `owns`** in the same
-request, up to 64 pages. That is the only way the list grows.
+request, up to 64 pages. That is the only way the list grows. App parents do
+not receive automatic child link lines: their children belong to the app UI.
+An app created under an ordinary note is linked at the end of that note like
+any other child.
 
 Two events arrive unasked, and `brain.on` is how you hear them:
 

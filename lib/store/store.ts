@@ -35,6 +35,7 @@ import {
   assertGitReady,
   assertGitSnapshotHealthy,
   beginGitSnapshotBarrier,
+  commitSnapshot,
   resumeGitSnapshotsAfterRecovery,
   scheduleDirtyCommit,
   scheduleCommit,
@@ -64,6 +65,7 @@ import {
   notionConversionHash,
 } from "../notion/protocol";
 import { canonicalPageMarkdown } from "../page-markdown";
+import { ownerSettingsDirectory } from "../owner-settings";
 import {
   removeStandalonePageRefOccurrence,
   appendStandalonePageRef,
@@ -196,6 +198,8 @@ interface Entry {
 /** What `createPage` takes, named because the unlocked half of it takes the
  *  same thing and two copies of a fourteen-key shape drift. */
 interface CreatePageOptions {
+  /** Importers install final bodies and view metadata before filing children. */
+  deferParentLink?: boolean;
   /** Server-derived identity for idempotent create operations. Never pass a
    * raw client-supplied page id. */
   id?: string;
@@ -408,6 +412,8 @@ export interface NotionStagingLimits {
 }
 
 export interface StoreOptions {
+  /** Defaults to Brain's settings state directory; injectable for isolated tests. */
+  childLinksStateDirectory?: string;
   notionStagingLimits?: Partial<NotionStagingLimits>;
   /** The origin page links are classified against — the browser's
    *  `window.location.origin`, as the same rule. A body's rows have to count
@@ -538,6 +544,7 @@ function rethrowSharedAttachmentFailure(error: unknown): never {
 export class Store {
   readonly root: string;
   private readonly publicOrigin: string | null;
+  private readonly childLinksMarker: string;
   private readonly tasksEnabled: () => boolean;
   private readonly notionStagingRoot: string;
   private readonly notionStagingLimits: NotionStagingLimits;
@@ -590,6 +597,17 @@ export class Store {
     return run;
   }
 
+  /** Caller owns mutate(). Keep the ordinary debounced snapshot from
+   * observing only some files of a structural operation. */
+  private async withGitSnapshotBarrier<T>(work: () => Promise<T>): Promise<T> {
+    const release = await beginGitSnapshotBarrier(this.root);
+    try {
+      return await work();
+    } finally {
+      release();
+    }
+  }
+
   /** Synchronous seqlock-style snapshot for public authorization reads.
    * An unchanged inactive generation brackets one stable Store view. */
   readMutationState(): { generation: number; active: boolean } {
@@ -626,6 +644,10 @@ export class Store {
     this.publicOrigin = options.publicOrigin ?? null;
     this.tasksEnabled = options.tasksEnabled ?? (() => true);
     const rootKey = createHash("sha256").update(this.root).digest("hex").slice(0, 20);
+    this.childLinksMarker = path.join(
+      options.childLinksStateDirectory ?? ownerSettingsDirectory(),
+      `child-page-links-v1-${rootKey}.json`,
+    );
     this.notionStagingRoot = path.join(
       os.tmpdir(),
       "brain-notion-imports",
@@ -647,8 +669,8 @@ export class Store {
     await this.mutate(() =>
       this.reconcileNotionStaging().catch(rethrowStagingFailure),
     );
+    await this.backfillChildPageLinks();
     resumeGitSnapshotsAfterRecovery(this.root);
-    await scheduleDirtyCommit(this.root);
     this.warnIfShareEditHasNoOrigin();
   }
 
@@ -3035,7 +3057,7 @@ export class Store {
   async finalizeNotionImport(
     input: FinalizeNotionImportInput,
   ): Promise<FinalizeNotionImportResult> {
-    return this.mutate(async () => {
+    return this.mutate(() => this.withGitSnapshotBarrier(async () => {
       const notionId = normalizeNotionId(input.notionId);
       const sourceHash = normalizeSourceHash(input.sourceHash);
       const conversionHash = normalizeSourceHash(input.conversionHash);
@@ -3103,6 +3125,9 @@ export class Store {
           );
         }
         entry.meta = loadedMeta;
+        await this.saveChildLinkEditUnlocked(
+          await this.parentChildLinkEditUnlocked(entry.parentId, entry.meta), "claude", undefined, true,
+        );
         this.assertNotionCleanupTokenUnowned(
           reservationToken,
           entry.meta.id,
@@ -3329,12 +3354,11 @@ export class Store {
 
       entry.meta = loadedMeta;
       if (!atDesired) {
-        await this.movePageUnlocked(
-          entry.meta.id,
-          desiredParentId,
-          desiredBeforeId,
-          "notion-import",
-        );
+        if (entry.parentId !== desiredParentId) {
+          await this.movePageWithBodyRefsUnlocked(entry.meta.id, desiredParentId, desiredBeforeId, "notion-import", "claude", true);
+        } else {
+          await this.movePageUnlocked(entry.meta.id, desiredParentId, desiredBeforeId, "notion-import");
+        }
         indexPath = assertInRoot(this.root, path.join(entry.dir, "index.md"));
       }
 
@@ -3385,6 +3409,9 @@ export class Store {
       // cache and the old answer for `done` until the page is written again
       // (spec row 150).
       await this.reconcilePageTasksUnlocked(entry.meta.id, finalizedMarkdown);
+      await this.saveChildLinkEditUnlocked(
+        await this.parentChildLinkEditUnlocked(entry.parentId, entry.meta), "claude", undefined, true,
+      );
       const stagingRemoved = await this.tryRemoveNotionStaging(
         reservationToken,
       );
@@ -3398,7 +3425,7 @@ export class Store {
         rev,
         cleanup: { stagingRemoved },
       };
-    });
+    }));
   }
 
   /** Release a token-owned reservation without losing raced filesystem edits.
@@ -3489,12 +3516,11 @@ export class Store {
           (entry.parentId !== loadedMeta.notionTargetParentId ||
             this.beforeIdFor(entry) !== loadedMeta.notionTargetBeforeId)
         ) {
-          await this.movePageUnlocked(
-            entry.meta.id,
-            loadedMeta.notionTargetParentId,
-            loadedMeta.notionTargetBeforeId,
-            "notion-import-abort",
-          );
+          if (entry.parentId !== loadedMeta.notionTargetParentId) {
+            await this.movePageWithBodyRefsUnlocked(entry.meta.id, loadedMeta.notionTargetParentId, loadedMeta.notionTargetBeforeId, "notion-import-abort", "claude", true);
+          } else {
+            await this.movePageUnlocked(entry.meta.id, loadedMeta.notionTargetParentId, loadedMeta.notionTargetBeforeId, "notion-import-abort");
+          }
           indexPath = assertInRoot(this.root, path.join(entry.dir, "index.md"));
         }
         const preserved = await preservingIndexUpdate(
@@ -3625,6 +3651,9 @@ export class Store {
         this.abortReceiptIndex.set(notionId, entry.meta.id);
         emitStore({ type: "meta", id: entry.meta.id });
         if (preserved.durabilityError) throw preserved.durabilityError;
+        await this.saveChildLinkEditUnlocked(
+          await this.parentChildLinkEditUnlocked(entry.parentId, entry.meta), "claude", undefined, true,
+        );
         releaseSafe = true;
         return detached
           ? {
@@ -3785,6 +3814,9 @@ export class Store {
     if (!finalReceipt) {
       throw new Error("notion abort receipt disappeared during replay");
     }
+    await this.saveChildLinkEditUnlocked(
+      await this.parentChildLinkEditUnlocked(entry.parentId, entry.meta), "claude", undefined, true,
+    );
     return finalReceipt.status === "detached"
       ? {
           status: "detached",
@@ -3858,9 +3890,10 @@ export class Store {
     id: string,
     markdown: string,
     expectedRev?: string,
-    by?: "me" | "claude",
+    by?: PageMeta["updatedBy"],
     src?: string,
     expectedMarkdown?: string,
+    structural?: { visitorName?: string; preserveNotionBaseline?: boolean },
   ): Promise<Page> {
     {
       const e = this.get(id);
@@ -3905,6 +3938,12 @@ export class Store {
       }
       e.meta.updated = now();
       if (by) e.meta.updatedBy = by;
+      if (structural?.visitorName) e.meta.updatedByName = structural.visitorName;
+      // Only importer-generated additions can extend an intact import
+      // baseline. Never bless an unrelated body edit made after reservation.
+      if (structural?.preserveNotionBaseline) {
+        extendNotionBodyBaseline(e.meta, parsed.markdown, body);
+      }
       delete e.meta.structureWriteBarrier;
       await this.extendScopedBaselinesUnlocked(id, () => [
         ...referencedAttachmentNames(body),
@@ -3968,7 +4007,161 @@ export class Store {
     title = "Untitled",
     opts: CreatePageOptions = {},
   ): Promise<PageMeta> {
-    return this.mutate(() => this.createPageUnlocked(parentId, title, opts));
+    return this.mutate(() => this.withGitSnapshotBarrier(
+      () => this.createPageUnlocked(parentId, title, opts),
+    ));
+  }
+
+  /** All callers own mutate(). Read the parent's current revision rather
+   * than a UI snapshot; the normal save still enforces that revision. */
+  private async parentChildLinkEditUnlocked(
+    parentId: string | null,
+    child: PageMeta,
+    remove = false,
+  ): Promise<{ id: string; markdown: string; rev: string } | null> {
+    if (!parentId || child.collectionRow || this.isDeleted(parentId)) return null;
+    const page = await this.readPage(parentId);
+    if (!acceptsChildPageLinks(page.meta)) return null;
+    const markdown = remove
+      ? removeStandalonePageRefs(page.markdown, child.id, this.publicOrigin).markdown
+      : this.appendMissingChildLinks(page.markdown, [child]);
+    return markdown === page.markdown
+      ? null
+      : { id: parentId, markdown, rev: page.rev };
+  }
+
+  private appendMissingChildLinks(
+    markdown: string,
+    children: readonly PageMeta[],
+  ): string {
+    const referenced = referencedPageIds(markdown, this.publicOrigin);
+    let next = markdown;
+    for (const child of children) {
+      if (child.collectionRow || child.notionImportToken || referenced.has(child.id)) {
+        continue;
+      }
+      next = appendStandalonePageRef(
+        next,
+        `${child.icon || "📄"} ${child.title}`,
+        child.id,
+        this.publicOrigin,
+      );
+      referenced.add(child.id);
+    }
+    return next;
+  }
+
+  private async saveChildLinkEditUnlocked(
+    edit: { id: string; markdown: string; rev: string } | null,
+    by: PageMeta["updatedBy"] = "me",
+    visitorName?: string,
+    preserveNotionBaseline = false,
+  ): Promise<void> {
+    if (!edit) return;
+    // No src: this is a server-generated body, so even the initiating tab
+    // needs the ordinary remote-write path to receive it.
+    await this.writePageUnlocked(
+      edit.id, edit.markdown, edit.rev, by, undefined, undefined,
+      { visitorName, preserveNotionBaseline },
+    );
+  }
+
+  /** Import completion: one normal save per eligible parent, after the
+   * imported bodies and collection/app metadata have all landed. */
+  async fileChildPages(
+    parentIds: readonly string[],
+    by: "me" | "claude" = "me",
+    childIds?: readonly string[],
+  ): Promise<void> {
+    return this.mutate(() => this.withGitSnapshotBarrier(async () => {
+      await this.fileChildPagesUnlocked(parentIds, by, childIds ? new Set(childIds) : undefined);
+    }));
+  }
+
+  private async fileChildPagesUnlocked(
+    parentIds: readonly string[],
+    by: "me" | "claude",
+    childIds?: ReadonlySet<string>,
+  ): Promise<number> {
+    const edits = await this.planChildPageLinksUnlocked(parentIds, childIds);
+    for (const edit of edits) {
+      await this.saveChildLinkEditUnlocked(edit, by, undefined, true);
+    }
+    return edits.length;
+  }
+
+  private async planChildPageLinksUnlocked(
+    parentIds: readonly string[],
+    childIds?: ReadonlySet<string>,
+  ): Promise<{ id: string; markdown: string; rev: string }[]> {
+    const edits: { id: string; markdown: string; rev: string }[] = [];
+    for (const id of new Set(parentIds)) {
+      if (this.isDeleted(id)) continue;
+      const page = await this.readPage(id);
+      if (!acceptsChildPageLinks(page.meta)) continue;
+      const markdown = this.appendMissingChildLinks(
+        page.markdown, this.siblings(id)
+          .filter((entry) => !childIds || childIds.has(entry.meta.id))
+          .map((entry) => entry.meta),
+      );
+      if (markdown !== page.markdown) edits.push({ id, markdown, rev: page.rev });
+    }
+    // Plan the entire batch before writing: an unappendable body fails
+    // without leaving a partially migrated notebook.
+    return edits;
+  }
+
+  private async backfillChildPageLinks(): Promise<void> {
+    let pending = false;
+    try {
+      const marker = JSON.parse(await fs.readFile(this.childLinksMarker, "utf8"));
+      if (marker.version !== 1 || marker.root !== this.root || typeof marker.complete !== "boolean") {
+        throw new Error("invalid child-page links migration marker");
+      }
+      if (marker.complete) {
+        await scheduleDirtyCommit(this.root);
+        return;
+      }
+      pending = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    await this.mutate(async () => {
+      const release = await beginGitSnapshotBarrier(this.root);
+      let complete = false;
+      try {
+        // A pending run owns the dirty changes it installed before a crash.
+        // Keep them for its named commit instead of the generic startup auto.
+        if (!pending) {
+          await scheduleDirtyCommit(this.root);
+          await assertGitSnapshotHealthy(this.root);
+        }
+        const edits = await this.planChildPageLinksUnlocked([...this.index.keys()]);
+        const mark = (complete: boolean) => atomicWrite(
+          this.childLinksMarker,
+          JSON.stringify({ version: 1, root: this.root, complete }) + "\n",
+        );
+        await mark(false);
+        for (const edit of edits) {
+          await this.saveChildLinkEditUnlocked(edit, "me", undefined, true);
+        }
+        const hasGit = await fs.lstat(path.join(/* turbopackIgnore: true */ this.root, ".git")).then(
+          () => true,
+          (error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT") return false;
+            throw error;
+          },
+        );
+        if (edits.length > 0 || hasGit) {
+          await commitSnapshot(this.root, "migrate: file child pages in their parents");
+        }
+        await mark(true);
+        complete = true;
+      } finally {
+        // An installed pending run owns its dirty snapshot until init retries.
+        if (complete) release();
+      }
+    });
   }
 
   /** The whole of `createPage` with the lock taken off, so a composite that
@@ -4034,11 +4227,6 @@ export class Store {
       ]);
       const parentDir = parentId ? this.get(parentId).dir : this.root;
       const slug = slugify(title);
-      const dir = await uniqueDir(
-        parentDir,
-        slug,
-        this.appReservesChildDir(parentId, slug),
-      );
       const last = this.siblings(parentId).at(-1);
       const meta: PageMeta = {
         id: opts.id ?? nanoid(),
@@ -4056,12 +4244,17 @@ export class Store {
         quickCaptureFingerprint: opts.quickCaptureFingerprint,
         notionId,
       };
+      const parentEdit = opts.deferParentLink
+        ? null
+        : await this.parentChildLinkEditUnlocked(parentId, meta);
+      const dir = await uniqueDir(parentDir, slug, this.appReservesChildDir(parentId, slug));
       await atomicWrite(
         path.join(dir, "index.md"),
         serializeLivePage(meta, opts.markdown || ""),
       );
       this.index.set(meta.id, { dir, parentId, meta });
       if (notionId) this.notionIndex.set(notionId, meta.id);
+      await this.saveChildLinkEditUnlocked(parentEdit, opts.by);
       scheduleCommit(this.root);
       emitStore({ type: "create", id: meta.id, src: opts.src });
       return meta;
@@ -4945,7 +5138,7 @@ export class Store {
     visitorName: string;
     src?: string;
   }): Promise<PageMeta> {
-    return this.mutate(async () => {
+    return this.mutate(() => this.withGitSnapshotBarrier(async () => {
       await this.assertSharedWriteAuthorityUnlocked(
         input.rootId,
         input.parentId,
@@ -4976,12 +5169,14 @@ export class Store {
         updatedBy: "visitor",
         updatedByName: input.visitorName,
       };
+      const parentEdit = await this.parentChildLinkEditUnlocked(input.parentId, meta);
       await atomicWrite(path.join(dir, "index.md"), serializeLivePage(meta, ""));
       this.index.set(meta.id, { dir, parentId: input.parentId, meta });
+      await this.saveChildLinkEditUnlocked(parentEdit, "visitor", input.visitorName);
       scheduleCommit(this.root);
       emitStore({ type: "create", id: meta.id, src: input.src });
       return meta;
-    });
+    }));
   }
 
   /** A link visitor's upload. Nothing is relaxed: the same size cap, the same
@@ -6250,6 +6445,7 @@ export class Store {
     beforeId: string | null,
     src: string | undefined,
     by: "me" | "claude",
+    preserveNotionBaseline = false,
   ): Promise<PageMoveResult> {
     const source = this.get(id);
     const originParentId = source.parentId;
@@ -6266,10 +6462,12 @@ export class Store {
     // Existing references are user data. A retry or a deliberately duplicated
     // page block must not rewrite or deduplicate the destination body. And a
     // body that links the page anywhere — in a sentence as much as in a row —
-    // already has it: the derived tail hides such a child and the editor
-    // refuses to file it, so a move does not add a second reference either.
+    // already has it, so a move does not add a second reference either.
     const writesDestination =
       parsedDestination !== null &&
+      acceptsChildPageLinks(parsedDestination.meta) &&
+      !source.meta.collectionRow &&
+      !source.meta.notionImportToken &&
       !referencedPageIds(parsedDestination.markdown, this.publicOrigin).has(id);
 
     const originPage = originParentId ? this.get(originParentId) : null;
@@ -6281,7 +6479,7 @@ export class Store {
       : null;
     const parsedOrigin =
       originBeforeRaw === null ? null : parsePage(originBeforeRaw);
-    const originSweep = parsedOrigin
+    const originSweep = parsedOrigin && acceptsChildPageLinks(parsedOrigin.meta) && !source.meta.collectionRow
       ? removeStandalonePageRefs(parsedOrigin.markdown, id, this.publicOrigin)
       : null;
     const writesOrigin = originSweep !== null && originSweep.removed > 0;
@@ -6317,28 +6515,35 @@ export class Store {
     ).toISOString();
 
     const freshMeta = (
-      parsed: { meta: Partial<PageMeta> },
+      parsed: { meta: Partial<PageMeta>; markdown: string },
       entry: Entry,
-    ): PageMeta => ({
-      ...parsed.meta,
-      id: parsed.meta.id || entry.meta.id,
-      title: parsed.meta.title || entry.meta.title,
-      order: parsed.meta.order || entry.meta.order,
-      created: parsed.meta.created || entry.meta.created,
-      updated: operationUpdated,
-      updatedBy: by,
-    });
+      nextMarkdown: string,
+    ): PageMeta => {
+      const meta = {
+        ...parsed.meta,
+        id: parsed.meta.id || entry.meta.id,
+        title: parsed.meta.title || entry.meta.title,
+        order: parsed.meta.order || entry.meta.order,
+        created: parsed.meta.created || entry.meta.created,
+        updated: operationUpdated,
+        updatedBy: by,
+      } as PageMeta;
+      if (preserveNotionBaseline) {
+        extendNotionBodyBaseline(meta, parsed.markdown, nextMarkdown);
+      }
+      return meta;
+    };
 
     let destinationRef: MoveIntent["destinationPageRef"];
     let nextDestinationMeta: PageMeta | null = null;
     if (writesDestination && destinationPage && destinationIndex) {
       const nextMarkdown = appendStandalonePageRef(
         parsedDestination!.markdown,
-        `${source.meta.icon ? `${source.meta.icon} ` : ""}${source.meta.title}`,
+        `${source.meta.icon || "📄"} ${source.meta.title}`,
         id,
         this.publicOrigin,
       );
-      nextDestinationMeta = freshMeta(parsedDestination!, destinationPage);
+      nextDestinationMeta = freshMeta(parsedDestination!, destinationPage, nextMarkdown);
       const afterRaw = serializeLivePage(nextDestinationMeta, nextMarkdown);
       destinationRef = {
         pageId: newParentId!,
@@ -6353,7 +6558,7 @@ export class Store {
     let originRef: MoveIntent["originPageRef"];
     let nextOriginMeta: PageMeta | null = null;
     if (writesOrigin && originPage && originIndex) {
-      nextOriginMeta = freshMeta(parsedOrigin!, originPage);
+      nextOriginMeta = freshMeta(parsedOrigin!, originPage, originSweep!.markdown);
       const afterRaw = serializeLivePage(nextOriginMeta, originSweep!.markdown);
       originRef = {
         pageId: originParentId!,
@@ -6449,7 +6654,6 @@ export class Store {
           type: "write",
           id: newParentId,
           rev: destinationRef.afterRev,
-          src,
         });
       }
       if (originRef && originParentId) {
@@ -6457,7 +6661,6 @@ export class Store {
           type: "write",
           id: originParentId,
           rev: originRef.afterRev,
-          src,
         });
       }
       scheduleCommit(this.root);
@@ -6624,7 +6827,7 @@ export class Store {
           "source page reference selection does not match the parent revision",
         );
       }
-      const removal = synthesized
+      let removal = synthesized
         ? { markdown: parsed.markdown, removed: false }
         : removeStandalonePageRefOccurrence(
             parsed.markdown,
@@ -6637,6 +6840,10 @@ export class Store {
         throw new PageRefNestValidationError(
           "source page reference selection does not match the parent revision",
         );
+      }
+      if (!cleanupOnly && source.parentId === parentPageId && acceptsChildPageLinks(freshParentMeta)) {
+        const sweep = removeStandalonePageRefs(parsed.markdown, sourceId, this.publicOrigin);
+        removal = { markdown: sweep.markdown, removed: sweep.removed > 0 };
       }
 
       // A child page is a real block in Brain, not just a filesystem/tree
@@ -6658,7 +6865,7 @@ export class Store {
         updated: parsedTarget.meta.updated || target.meta.updated,
       } as PageMeta;
       // The same rule as a move: a body that links the page anywhere has it.
-      const targetAlreadyReferencesSource = referencedPageIds(
+      const targetAlreadyReferencesSource = !acceptsChildPageLinks(freshTargetMeta) || referencedPageIds(
         parsedTarget.markdown,
         this.publicOrigin,
       ).has(sourceId);
@@ -6666,7 +6873,7 @@ export class Store {
         ? parsedTarget.markdown
         : appendStandalonePageRef(
             parsedTarget.markdown,
-            `${source.meta.icon ? `${source.meta.icon} ` : ""}${source.meta.title}`,
+            `${source.meta.icon || "📄"} ${source.meta.title}`,
             sourceId,
             this.publicOrigin,
           );
@@ -6698,6 +6905,21 @@ export class Store {
         ? originalTargetRaw
         : serializeLivePage(nextTargetMeta, nextTargetMarkdown);
       const nextTargetRev = hashRev(nextTargetRaw);
+      // A tree drop can originate in a reference owned by another branch.
+      // Its selected occurrence leaves that document, while every standalone
+      // child row leaves the actual old parent in the same durable intent.
+      let originRef: MoveIntent["originPageRef"];
+      if (!cleanupOnly && source.parentId !== parentPageId) {
+        const edit = await this.parentChildLinkEditUnlocked(source.parentId, source.meta, true);
+        if (edit) {
+          const entry = this.get(edit.id);
+          const indexFile = assertInRoot(this.root, path.join(entry.dir, "index.md"));
+          const beforeRaw = await fs.readFile(indexFile, "utf8");
+          if (hashRev(beforeRaw) !== edit.rev) throw new RevConflictError(hashRev(beforeRaw), edit.rev);
+          const afterRaw = serializeLivePage({ ...parsePage(beforeRaw).meta, updated: operationUpdated, updatedBy: "me" } as PageMeta, edit.markdown);
+          originRef = { pageId: edit.id, indexFile: path.relative(this.root, indexFile), beforeRaw, beforeRev: edit.rev, afterRaw, afterRev: hashRev(afterRaw) };
+        }
+      }
       if (nextParentRev === currentRev) {
         throw new Error("page-ref nesting did not advance the parent revision");
       }
@@ -6834,6 +7056,7 @@ export class Store {
         targetParentId: targetId,
         nextOrder,
         updated: operationUpdated,
+        ...(originRef ? { originPageRef: originRef } : {}),
         pageRefNest: {
           parentPageId,
           parentIndex: path.relative(this.root, parentIndex),
@@ -6877,6 +7100,7 @@ export class Store {
           if (!targetAlreadyReferencesSource) {
             await atomicWrite(targetIndex, nextTargetRaw);
           }
+          if (originRef) await atomicWrite(moveIntentFile(this.root, originRef.indexFile), originRef.afterRaw);
           await this.clearMoveIntent();
         } catch (operationError) {
           let reconciledSource: Entry;
@@ -6922,6 +7146,10 @@ export class Store {
         releaseSafe = true;
         const authoritativeParentMeta = nextParentMeta;
         this.get(parentPageId).meta = authoritativeParentMeta;
+        if (originRef) {
+          this.get(originRef.pageId).meta = parsePage(originRef.afterRaw).meta as PageMeta;
+          emitStore({ type: "write", id: originRef.pageId, rev: originRef.afterRev });
+        }
         if (!targetAlreadyReferencesSource) {
           this.get(targetId).meta = nextTargetMeta;
         }
@@ -6929,7 +7157,7 @@ export class Store {
         emitStore({ type: "move", id: sourceId, src });
         emitStore({ type: "write", id: parentPageId, rev: parentRev, src });
         if (!targetAlreadyReferencesSource) {
-          emitStore({ type: "write", id: targetId, rev: nextTargetRev, src });
+          emitStore({ type: "write", id: targetId, rev: nextTargetRev });
         }
         await this.grantMovedSubtreeUnlocked(sourceId, parentPageId, targetId);
         return {
@@ -7141,9 +7369,10 @@ export class Store {
 
   /** Soft delete — mark the page (and thus its subtree) as trashed. Hidden from
    *  the tree via siblings(), recoverable until purged. */
-  async deletePage(id: string, src?: string): Promise<void> {
-    return this.mutate(async () => {
+  async deletePage(id: string, src?: string, by: "me" | "claude" = "me"): Promise<void> {
+    return this.mutate(() => this.withGitSnapshotBarrier(async () => {
       const e = this.get(id);
+      const parentEdit = await this.parentChildLinkEditUnlocked(e.parentId, e.meta, true);
       const deletedAt = now();
       const subtree = [...this.index.values()]
         .filter(
@@ -7180,13 +7409,14 @@ export class Store {
       e.meta.deleted = deletedAt;
       e.meta.updated = deletedAt;
       await this.persist(e);
+      await this.saveChildLinkEditUnlocked(parentEdit, by);
       scheduleCommit(this.root);
       emitStore({ type: "delete", id, src });
-    });
+    }));
   }
 
   async restorePage(id: string, src?: string): Promise<void> {
-    return this.mutate(async () => {
+    return this.mutate(() => this.withGitSnapshotBarrier(async () => {
       const e = this.get(id);
       // Deletion marks only the subtree root; descendants are trashed through
       // the ancestor walk in isDeleted(). Clearing one flag under a still-
@@ -7220,6 +7450,20 @@ export class Store {
           this.subtreeAttachmentNamesUnlocked(outermost),
         );
       }
+      if (outermost !== undefined) {
+        const restoredRoot = this.get(outermost);
+        const returned = [...this.index.values()].filter((entry) =>
+          (entry.dir === restoredRoot.dir || entry.dir.startsWith(restoredRoot.dir + path.sep)) &&
+          !this.isDeleted(entry.meta.id),
+        );
+        // Descendants hidden through their ancestor return too, including
+        // legacy trash whose bodies predate automatic child links. Batch each
+        // parent once, without filing unrelated unlinked siblings outside it.
+        await this.fileChildPagesUnlocked(
+          returned.flatMap((entry) => entry.parentId ? [entry.parentId] : []),
+          "me", new Set(returned.map((entry) => entry.meta.id)),
+        );
+      }
       scheduleCommit(this.root);
       emitStore({ type: "create", id, src });
       for (const restoredId of restoredIds) {
@@ -7227,7 +7471,7 @@ export class Store {
           emitStore({ type: "create", id: restoredId, src });
         }
       }
-    });
+    }));
   }
 
   /** Permanent removal — delete the folder + subtree from disk and index. */
@@ -8849,9 +9093,10 @@ function parseMoveIntent(raw: string): MoveIntent {
     !validDestinationPageRef ||
     !validOriginPageRef ||
     (destinationPageRef !== undefined && nest !== undefined) ||
-    // `pageRefNest` already owns the old parent's body for the editor gesture.
-    // Two participants rewriting the same file would race their own images.
-    (originPageRef !== undefined && nest !== undefined)
+    // A reference in another branch can move a child out of its real parent.
+    // Two participants must still never own the same file.
+    (originPageRef !== undefined && nest !== undefined &&
+      originPageRef.pageId === nest.parentPageId)
   ) {
     throw new Error("invalid cross-parent move intent fields");
   }
@@ -10048,4 +10293,19 @@ function notionImportBaseRev(meta: PageMeta, markdown: string): string {
       }),
     )
     .digest("hex");
+}
+
+/** Children are already represented by cards/rows or an app's own UI there. */
+function acceptsChildPageLinks(meta: Partial<PageMeta>): boolean {
+  return meta.kind !== "app" && meta.view !== "board" &&
+    !meta.collection && !meta.collectionRow;
+}
+
+/** A generated child-link edit can extend a trusted importer baseline, but
+ * an author edit that already invalidated it must remain a conflict. */
+function extendNotionBodyBaseline(meta: PageMeta, before: string, after: string): void {
+  const beforeRev = notionImportBaseRev(meta, before);
+  const afterRev = notionImportBaseRev(meta, canonicalPageMarkdown(after));
+  if (meta.notionTargetRev === beforeRev) meta.notionTargetRev = afterRev;
+  if (meta.notionImportBaseRev === beforeRev) meta.notionImportBaseRev = afterRev;
 }

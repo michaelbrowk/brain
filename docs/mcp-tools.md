@@ -197,10 +197,10 @@ without all four hints fails there.
 | `search` | | `query` | matching pages with snippets, the whole-query matches first | `search_backend`, in ripgrep's own sentence: the binary missing, a timeout, one line over 512 KB, a bad exit. A broad word is capped, not refused. `store_failed` |
 | `write_page` | `brain:write` | `id`, `markdown`, `rev?` | the written page's meta and new `rev` | `rev_conflict`, with `currentRev` to re-read from. `store_failed` |
 | `append_page` | `brain:write` | `id`, `markdown` | the page's meta after the append | `store_failed` |
-| `create_page` | `brain:write` | `title`, `parentId?`, `markdown?`, `icon?`, `status?` | the new page's meta, including its id | `parent not found`, and it says the page was not created so the client does not retry at the root. `store_failed` |
+| `create_page` | `brain:write` | `title`, `parentId?`, `markdown?`, `icon?`, `status?` | the new page's meta, including its id. An eligible parent receives a standalone child link unless it already links the child | `parent not found`, and it says the page was not created so the client does not retry at the root. `store_failed` |
 | `update_meta` | `brain:write` | `id`, `title?`, `icon?`, `category?`, `status?`, `view?`, `public?` | the page's meta after the change | `public: true`, with `share_disclosure_required`: only the owner's own disclosure flow turns sharing on. `store_failed` |
-| `move_page` | `brain:write` | `id`, `newParentId?`, `beforeId?` | the moved page's meta plus `unlinkedFrom`, the old parent whose body stopped listing it | `store_failed` |
-| `delete_page` | `brain:write` | `id` | `{ ok: true }`. The page and its subtree go to Trash and are recoverable | `store_failed` |
+| `move_page` | `brain:write` | `id`, `newParentId?`, `beforeId?` | the moved page's meta plus `unlinkedFrom`, the old parent whose body lost its standalone child link(s). The eligible new parent receives a link unless it already links the child; sibling reorders edit no body | `store_failed` |
+| `delete_page` | `brain:write` | `id` | `{ ok: true }`. The page and its subtree go to Trash and are recoverable; standalone links to the child are removed from its eligible parent, while inline mentions stay | `store_failed` |
 
 ## Apps
 
@@ -258,6 +258,11 @@ change the description the owner reads, use `write_page` on the app page, which
 also answers the `app` map like any other page read.
 
 ## Tasks
+
+Automatic parent links exclude boards, collections, collection rows and app
+parents. Creating an app under an ordinary parent files the app there; its
+owned children do not change the app's description. Parent edits use normal
+revision-checked saves, history and live updates, retaining agent attribution.
 
 A task is a record, not a note. A derived list is read against a day, so
 `list_tasks` takes the caller's own calendar date as `today`. Leave it out and

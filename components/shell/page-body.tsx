@@ -1,7 +1,7 @@
 "use client";
 
 // The body of an open page under the head: a collection view, a board, or
-// the editor (right-click page menu → Milkdown → subpages). Presentational —
+// the editor (right-click page menu → Milkdown). Presentational —
 // every piece of state and every handler comes from <Shell> as a prop. The
 // editor `key` is composed here exactly as Shell composed it: a page switch,
 // a history restore (`editorEpoch`), a page-ref nesting operation and a
@@ -15,7 +15,6 @@ import { Skeleton } from "../ui/primitives";
 import { PageContextMenu, type PageMenuHandlers } from "../tree/row-menu";
 import { Board } from "../board";
 import { CollectionView } from "../collection-view";
-import { Subpages } from "../subpages";
 import type { LoadedPage } from "./helpers";
 
 // code-split the heavy Milkdown editor out of the shell bundle — home/hub paints
@@ -96,8 +95,6 @@ export interface PageBodyProps {
   onReparentPageRef: NonNullable<EditorProps["onReparentPageRef"]>;
   onRequestRemovePageRef: NonNullable<EditorProps["onRequestRemovePageRef"]>;
   onCreatePageAtCursor: NonNullable<EditorProps["onCreatePageAtCursor"]>;
-  /** Children listed under the editor (collection rows excluded). */
-  subpages: readonly TreeNode[];
   /** The Tasks module. Off and the editor keeps the Markdown half of the
    *  checkbox (a `- [ ]` line still draws and still ticks) and drops the
    *  record half, so nothing offers to promote a line to a task. */
@@ -133,7 +130,6 @@ export function PageBody({
   onReparentPageRef,
   onRequestRemovePageRef,
   onCreatePageAtCursor,
-  subpages,
   tasksEnabled,
 }: PageBodyProps) {
   if (isCollection && currentNode) {
@@ -196,11 +192,6 @@ export function PageBody({
           capabilities={OWNER_CAPABILITIES}
           tasksEnabled={tasksEnabled}
           toggleMemoryKey={page.id}
-        />
-        <Subpages
-          pages={subpages}
-          markdown={editorValue}
-          onNavigate={onSelect}
         />
       </div>
     </PageContextMenu>

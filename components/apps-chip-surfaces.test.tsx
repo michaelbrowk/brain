@@ -8,7 +8,6 @@ import { CommandPalette } from "./command-palette";
 import { Hub } from "./hub";
 import { MobilePagesView } from "./mobile-pages-view";
 import { PinnedChip } from "./shell/sidebar";
-import { Subpages } from "./subpages";
 import { resetTasksStore } from "./tasks-client";
 import { TreeRow } from "./ui/tree-row";
 
@@ -122,21 +121,6 @@ describe("the chip on the breadcrumb", () => {
       <BreadcrumbPill items={[{ label: "…", title: "Spanish" }, { label: "Trainer" }]} />,
     );
     expect(crumb.querySelector(".ai-chip")).toBeNull();
-  });
-});
-
-describe("the chip in the page's own subpage list", () => {
-  const pages = [
-    node({ id: "app1", title: "Trainer", icon: "🃏", kind: "app" }),
-    node({ id: "page1", title: "Words", icon: "📄" }),
-  ];
-
-  it("names an app child with the chip and an ordinary one without", () => {
-    const list = mount(<Subpages pages={pages} markdown="" onNavigate={() => {}} />);
-    const app = list.querySelector('[data-page-ref="app1"]') as HTMLElement;
-    const plain = list.querySelector('[data-page-ref="page1"]') as HTMLElement;
-    expect(app.querySelector(".ai-chip")?.textContent).toBe("AI");
-    expect(plain.querySelector(".ai-chip")).toBeNull();
   });
 });
 

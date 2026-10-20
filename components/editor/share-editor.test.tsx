@@ -1202,6 +1202,7 @@ describe("the visitor editor", () => {
       const seen = recordFetch({
         put: [json({ rev: "b" }, 200)],
         create: [json({ id: "page-new" }, 200)],
+        get: json({ markdown: "hello\n\n[📄 Meeting notes](/p/page-new)", rev: "parent-linked" }, 200),
       });
       await mount("hello");
       const { insert, settled } = await slashNewPage();
@@ -1221,7 +1222,7 @@ describe("the visitor editor", () => {
       // and its link could part.
       await change("hello [Meeting notes](/p/page-new)");
       expect(putBodies(seen)).toEqual([
-        { markdown: "hello [Meeting notes](/p/page-new)", rev: REV },
+        { markdown: "hello [Meeting notes](/p/page-new)", rev: "parent-linked" },
       ]);
     });
 
@@ -1284,6 +1285,7 @@ describe("the visitor editor", () => {
       );
       expect(carryingATitle[0].method).toBe("POST");
       expect([...new Set(seen.map((request) => request.method))].sort()).toEqual([
+        "GET",
         "POST",
         "PUT",
       ]);

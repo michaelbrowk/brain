@@ -266,6 +266,9 @@ describe("the notification store", () => {
   // rename having happened.
   it("clears through an atomic write: a new file, 0600, no temp left", async () => {
     await seed(dir, [row("a", "2026-09-14T09:00:00.000Z")]);
+    // The first read upgrades the v1 seed with its own atomic write; take the
+    // baseline after it, or a recycled inode makes the check below flaky.
+    await listNotifications(dir);
     const file = path.join(dir, NOTIFICATIONS_FILE);
     await chmod(file, 0o644);
     const before = await stat(file);

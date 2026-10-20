@@ -2122,19 +2122,13 @@ test("delayed nesting stays frozen across navigation and only the composite chan
   const source = sourceResponse.body as { id: string };
   const target = targetResponse.body as { id: string };
   const before = await browserJson(page, `/api/page/${parent.id}`);
-  expect((before.body as { markdown: string }).markdown).toBe("");
+  // Child creation has already filed these rows. The delayed composite is
+  // the only operation allowed to change this baseline during nesting.
   const initialMarkdown = [
-    `[Delayed synthesized source](/p/${source.id})`,
-    `[Delayed synthesized target](/p/${target.id})`,
+    `[📄 Delayed synthesized source](/p/${source.id})`,
+    `[📄 Delayed synthesized target](/p/${target.id})`,
   ].join("\n\n");
-  const seeded = await browserJson(page, `/api/page/${parent.id}`, {
-    method: "PUT",
-    body: {
-      markdown: initialMarkdown,
-      rev: (before.body as { rev: string }).rev,
-    },
-  });
-  expect(seeded.ok).toBe(true);
+  expect((before.body as { markdown: string }).markdown).toBe(initialMarkdown);
   await page.goto(`/p/${parent.id}`);
 
   let releaseSuccess!: () => void;
@@ -2169,6 +2163,8 @@ test("delayed nesting stays frozen across navigation and only the composite chan
   await page.keyboard.type("must not race the move");
   await expect(editor).not.toContainText("must not race the move");
   expect(parentBodyPuts).toBe(0);
+  const frozenParent = await browserJson(page, `/api/page/${parent.id}`);
+  expect(frozenParent.body).toEqual(before.body);
 
   releaseSuccess();
   await expect(
@@ -2181,7 +2177,7 @@ test("delayed nesting stays frozen across navigation and only the composite chan
       const response = await browserJson(page, `/api/page/${parent.id}`);
       return (response.body as { markdown: string }).markdown;
     })
-    .toBe(`[Delayed synthesized target](/p/${target.id})`);
+    .toBe(`[📄 Delayed synthesized target](/p/${target.id})`);
   expect(parentBodyPuts).toBe(0);
 
   await page.unroute("**/api/page-ref/nest");
@@ -6778,7 +6774,7 @@ test("failed slash parent save keeps the inserted link in a local draft", async 
 
   const parentResponse = await browserJson(page, "/api/page", {
     method: "POST",
-    body: { title: "Slash save failure" },
+    body: { title: "Slash save failure", markdown: "Before\n\nAfter" },
   });
   expect(parentResponse.ok).toBeTruthy();
   const parent = parentResponse.body as { id: string };
@@ -6803,6 +6799,20 @@ test("failed slash parent save keeps the inserted link in a local draft", async 
   const content = page.getByRole("textbox", { name: "Page content" });
   await expect(content).toBeVisible();
   await content.focus();
+  // Place the link between saved paragraphs, so the cursor placement still
+  // differs from the automatic append even though both contain the child id.
+  await content.locator("p").filter({ hasText: /^Before$/ }).evaluate((element) => {
+    const text = element.firstChild;
+    if (!text) throw new Error("Before paragraph has no text node");
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.setStart(text, text.textContent?.length ?? 0);
+    range.collapse(true);
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+  });
+  await page.keyboard.press("Enter");
   await page.keyboard.type("/");
   await expect(page.getByTestId("slash-menu")).toBeVisible();
 
@@ -6834,8 +6844,13 @@ test("failed slash parent save keeps the inserted link in a local draft", async 
     .getByTestId("slash-menu")
     .getByRole("button", { name: "New page", exact: true })
     .click();
-  const created = (await (await createdResponse).json()) as { id: string };
-  await failedSave;
+  const created = (await (await createdResponse).json()) as {
+    id: string;
+    title: string;
+    icon?: string;
+  };
+  const rejectedSave = await failedSave;
+  const rejectedBody = rejectedSave.request().postDataJSON() as { markdown: string };
 
   await expect(page).toHaveURL(`/p/${parent.id}`);
   await expect(content).toHaveAttribute("contenteditable", "true");
@@ -6859,9 +6874,15 @@ test("failed slash parent save keeps the inserted link in a local draft", async 
     return key ? localStorage.getItem(key) : null;
   }, parent.id);
   expect(draft).toContain(`/p/${created.id}`);
+  const localMarkdown = (JSON.parse(draft!) as { markdown: string }).markdown;
+  const childLink = `[${created.icon || "📄"} ${created.title}](/p/${created.id})`;
+  expect(localMarkdown).toBe(rejectedBody.markdown);
+  expect(localMarkdown.trim()).toBe(["Before", childLink, "After"].join("\n\n"));
   const serverParent = await browserJson(page, `/api/page/${parent.id}`);
-  expect((serverParent.body as { markdown?: string }).markdown).not.toContain(
-    `/p/${created.id}`,
+  // Creation persisted the append, but the failed save must leave the exact
+  // cursor placement recoverable only in the draft.
+  expect((serverParent.body as { markdown: string }).markdown).toBe(
+    ["Before", "After", childLink].join("\n\n"),
   );
 });
 
@@ -7899,6 +7920,8 @@ test("sidebar structure stays frozen around a conflicted source and its parents"
   await page.goto(`/p/${source.id}`);
   const content = page.getByRole("textbox", { name: "Page content" });
   await expect(content).toBeVisible();
+  const childLink = content.locator(`a.brain-page-ref[data-page-ref="${child.id}"]`);
+  await expect(childLink).toHaveCount(1);
   await page.route(`**/api/page/${source.id}`, async (route) => {
     if (route.request().method() === "PUT") {
       await route.fulfill({ status: 409, contentType: "application/json", body: "{}" });
@@ -7908,14 +7931,27 @@ test("sidebar structure stays frozen around a conflicted source and its parents"
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ markdown: "Remote source", rev: "abcdef123456" }),
+        body: JSON.stringify({
+          markdown: `Remote source\n\n[📄 Guarded child](/p/${child.id})`,
+          rev: "abcdef123456",
+        }),
       });
       return;
     }
     await route.continue();
   });
-  await content.fill("Local conflicted source");
+  const rejectedSave = page.waitForResponse((response) =>
+    response.request().method() === "PUT" &&
+    new URL(response.url()).pathname === `/api/page/${source.id}` &&
+    response.status() === 409,
+  );
+  // A whole-editor fill would also remove the child row and trigger its
+  // removal confirmation before any save. Edit just the source's prose.
+  await content.locator("p").filter({ hasText: /^Source base$/ }).fill("Local conflicted source");
+  await rejectedSave;
   await expect(page.getByRole("button", { name: "Save a copy" })).toBeVisible();
+  await expect(content).toContainText("Local conflicted source");
+  await expect(childLink).toHaveCount(1);
 
   const sourceRow = page
     .locator("nav")

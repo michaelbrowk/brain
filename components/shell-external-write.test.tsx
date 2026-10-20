@@ -453,6 +453,27 @@ describe("a write to the open page from somewhere else", () => {
     expect(button("Save a copy")).toBeDefined();
   });
 
+  it("detects a prose conflict in a parent that already contains its child link", async () => {
+    const childLink = "[📄 Child](/p/child)";
+    const base = `Source base\n\n${childLink}`;
+    const local = `Local conflicted source\n\n${childLink}`;
+    const remote = `Remote source\n\n${childLink}`;
+    await open(base);
+    await type(local);
+    await writeElsewhere(remote);
+    await advance(800);
+
+    expect(puts.at(-1)).toMatchObject({ markdown: local, rev: "rev-1", baseMarkdown: base });
+    expect(server.markdown).toBe(remote);
+    expect(editorHarness.applied).toEqual([]);
+    expect(conflictShown()).toBe(true);
+    expect(button("Save a copy")).toBeDefined();
+    const drafts = Object.keys(localStorage)
+      .filter((key) => key.startsWith("brain-draft-v2:note:"))
+      .map((key) => JSON.parse(localStorage.getItem(key)!));
+    expect(drafts).toEqual([expect.objectContaining({ markdown: local, conflicted: true })]);
+  });
+
   it("never applies a write while a keystroke still waits for its serialize", async () => {
     await open("Base");
     // The editor marks the page dirty on the keystroke; the Markdown follows

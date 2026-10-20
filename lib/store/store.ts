@@ -3,6 +3,7 @@ import { constants as fsConstants, type Stats } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { nanoid } from "nanoid";
 import { generateKeyBetween, generateNKeysBetween } from "fractional-indexing";
@@ -37,7 +38,6 @@ import {
   beginGitSnapshotBarrier,
   commitSnapshot,
   resumeGitSnapshotsAfterRecovery,
-  scheduleDirtyCommit,
   scheduleCommit,
   logForPath,
   showPageAtRevision,
@@ -369,6 +369,7 @@ export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 // A fresh upload is unreferenced until its markdown save lands; the sweep
 // never touches files younger than this.
 const ATTACHMENT_SWEEP_GRACE_MS = 24 * 60 * 60 * 1000;
+const MAX_CHILD_LINK_BACKFILL_PAGE_BYTES = 1024 * 1024;
 const MAX_NOTION_STAGE_FILES = 200;
 const MAX_NOTION_STAGE_BYTES = 256 * 1024 * 1024;
 const DEFAULT_NOTION_STAGE_LIMITS: NotionStagingLimits = {
@@ -669,9 +670,9 @@ export class Store {
     await this.mutate(() =>
       this.reconcileNotionStaging().catch(rethrowStagingFailure),
     );
-    await this.backfillChildPageLinks();
     resumeGitSnapshotsAfterRecovery(this.root);
     this.warnIfShareEditHasNoOrigin();
+    void this.backfillChildPageLinks();
   }
 
   /** BRAIN_PUBLIC_ORIGIN is what every visitor write is checked against, and
@@ -2033,9 +2034,13 @@ export class Store {
   /** True when this page or any ancestor is soft-deleted. Shared routes use
    *  this in addition to public metadata so old/partial trash state stays safe. */
   isDeleted(id: string): boolean {
+    return this.isDeletedAfterRestore(id);
+  }
+
+  private isDeletedAfterRestore(id: string, restoredIds?: ReadonlySet<string>): boolean {
     let current: Entry | undefined = this.get(id);
     while (current) {
-      if (current.meta.deleted) return true;
+      if (current.meta.deleted && !restoredIds?.has(current.meta.id)) return true;
       current = current.parentId ? this.index.get(current.parentId) : undefined;
     }
     return false;
@@ -4093,75 +4098,141 @@ export class Store {
   private async planChildPageLinksUnlocked(
     parentIds: readonly string[],
     childIds?: ReadonlySet<string>,
+    restoredIds?: ReadonlySet<string>,
   ): Promise<{ id: string; markdown: string; rev: string }[]> {
     const edits: { id: string; markdown: string; rev: string }[] = [];
     for (const id of new Set(parentIds)) {
-      if (this.isDeleted(id)) continue;
+      if (this.isDeletedAfterRestore(id, restoredIds)) continue;
       const page = await this.readPage(id);
       if (!acceptsChildPageLinks(page.meta)) continue;
       const markdown = this.appendMissingChildLinks(
-        page.markdown, this.siblings(id)
-          .filter((entry) => !childIds || childIds.has(entry.meta.id))
+        page.markdown, [...this.index.values()]
+          .filter((entry) => entry.parentId === id &&
+            !this.isDeletedAfterRestore(entry.meta.id, restoredIds) &&
+            (!childIds || childIds.has(entry.meta.id)))
+          .sort((a, b) => byOrder(a.meta.order, b.meta.order))
           .map((entry) => entry.meta),
       );
       if (markdown !== page.markdown) edits.push({ id, markdown, rev: page.rev });
     }
-    // Plan the entire batch before writing: an unappendable body fails
-    // without leaving a partially migrated notebook.
+    // Structural operations preflight the entire batch before changing flags.
     return edits;
   }
 
   private async backfillChildPageLinks(): Promise<void> {
-    let pending = false;
+    let phase = "marker_read";
+    const logFailure = (parentId?: string) => console.error(JSON.stringify({
+      event: "child_page_links_backfill_failed", phase,
+      ...(parentId ? { parentId } : {}),
+    }));
     try {
-      const marker = JSON.parse(await fs.readFile(this.childLinksMarker, "utf8"));
-      if (marker.version !== 1 || marker.root !== this.root || typeof marker.complete !== "boolean") {
-        throw new Error("invalid child-page links migration marker");
-      }
-      if (marker.complete) {
-        await scheduleDirtyCommit(this.root);
-        return;
-      }
-      pending = true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-    await this.mutate(async () => {
-      const release = await beginGitSnapshotBarrier(this.root);
-      let complete = false;
-      try {
-        // A pending run owns the dirty changes it installed before a crash.
-        // Keep them for its named commit instead of the generic startup auto.
-        if (!pending) {
-          await scheduleDirtyCommit(this.root);
-          await assertGitSnapshotHealthy(this.root);
-        }
-        const edits = await this.planChildPageLinksUnlocked([...this.index.keys()]);
-        const mark = (complete: boolean) => atomicWrite(
-          this.childLinksMarker,
-          JSON.stringify({ version: 1, root: this.root, complete }) + "\n",
-        );
-        await mark(false);
-        for (const edit of edits) {
-          await this.saveChildLinkEditUnlocked(edit, "me", undefined, true);
-        }
-        const hasGit = await fs.lstat(path.join(/* turbopackIgnore: true */ this.root, ".git")).then(
-          () => true,
-          (error: NodeJS.ErrnoException) => {
-            if (error.code === "ENOENT") return false;
+      await this.mutate(async () => {
+        // Reserve the writer queue now, but let init/getStore resolve before
+        // reading the marker or doing any migration work. Reads can serve
+        // throughout; mutations still share the one writer and Git barrier.
+        await yieldToEventLoop();
+        let pending = false;
+        try {
+          const marker = JSON.parse(await fs.readFile(this.childLinksMarker, "utf8"));
+          if (!marker || marker.version !== 1 || marker.root !== this.root || typeof marker.complete !== "boolean") {
+            throw new Error("invalid child-page links migration marker");
+          }
+          if (marker.complete) {
+            phase = "startup_snapshot";
+            const release = await beginGitSnapshotBarrier(this.root);
+            try {
+              if (await this.hasNotesGit()) await commitSnapshot(this.root, `auto ${now()}`);
+            } finally {
+              release();
+            }
+            return;
+          }
+          pending = true;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+            // Invalid/unreadable state is never a completed migration. Drop
+            // the unusable marker when possible so the next start replans.
+            await fs.rm(this.childLinksMarker, { force: true }).catch(() => undefined);
             throw error;
-          },
-        );
-        if (edits.length > 0 || hasGit) {
-          await commitSnapshot(this.root, "migrate: file child pages in their parents");
+          }
         }
-        await mark(true);
-        complete = true;
-      } finally {
-        // An installed pending run owns its dirty snapshot until init retries.
-        if (complete) release();
-      }
-    });
+        phase = "snapshot_barrier";
+        const release = await beginGitSnapshotBarrier(this.root);
+        try {
+          // A pending run owns the dirty changes it installed before a crash.
+          // Keep them for its named commit instead of the generic startup auto.
+          const hasGit = await this.hasNotesGit();
+          if (!pending && hasGit) {
+            phase = "startup_snapshot";
+            await commitSnapshot(this.root, `auto ${now()}`);
+            await assertGitSnapshotHealthy(this.root);
+          }
+          const edits: { id: string; markdown: string; rev: string }[] = [];
+          let refused = false;
+          for (const [id, entry] of this.index) {
+            if (this.isDeleted(id) || !acceptsChildPageLinks(entry.meta)) continue;
+            if (!this.siblings(id).some((child) =>
+              !child.meta.collectionRow && !child.meta.notionImportToken)) continue;
+            phase = "parent_plan";
+            try {
+              const file = assertInRoot(this.root, path.join(entry.dir, "index.md"));
+              if ((await fs.stat(file)).size > MAX_CHILD_LINK_BACKFILL_PAGE_BYTES) {
+                phase = "parent_size_limit";
+                throw new Error("backfill page size limit");
+              }
+              edits.push(...await this.planChildPageLinksUnlocked([id]));
+            } catch {
+              // A refusal belongs to this parent, not to the notebook. The
+              // pending marker retries it next start after its body is repaired.
+              refused = true;
+              logFailure(id);
+            }
+          }
+          const mark = (complete: boolean) => atomicWrite(
+            this.childLinksMarker,
+            JSON.stringify({ version: 1, root: this.root, complete }) + "\n",
+          );
+          phase = "marker_pending";
+          await mark(false);
+          phase = "parent_write";
+          for (const edit of edits) {
+            await this.saveChildLinkEditUnlocked(edit, "me", undefined, true);
+          }
+          if (edits.length > 0 || hasGit) {
+            phase = "migration_snapshot";
+            await commitSnapshot(this.root, "migrate: file child pages in their parents");
+          }
+          if (!refused) {
+            phase = "marker_complete";
+            try {
+              await mark(true);
+            } catch (error) {
+              // An atomic rename may have installed `complete` before a later
+              // directory fsync failed. A failed acknowledgement must retry.
+              await fs.rm(this.childLinksMarker, { force: true }).catch(() => undefined);
+              throw error;
+            }
+          }
+        } finally {
+          // A failed migration must not strand ordinary saves behind a Git
+          // barrier. Its pending marker, not an immortal lock, owns the retry.
+          release();
+        }
+      });
+    } catch {
+      // Never print exception text: it can contain note or Git hook output.
+      logFailure();
+    }
+  }
+
+  private async hasNotesGit(): Promise<boolean> {
+    return fs.lstat(path.join(/* turbopackIgnore: true */ this.root, ".git")).then(
+      () => true,
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return false;
+        throw error;
+      },
+    );
   }
 
   /** The whole of `createPage` with the lock taken off, so a composite that
@@ -7428,14 +7499,30 @@ export class Store {
       let current: Entry | undefined = e;
       while (current) {
         if (current.meta.deleted) {
-          current.meta.deleted = undefined;
-          current.meta.updated = now();
-          await this.persist(current);
           restoredIds.push(current.meta.id);
         }
         current = current.parentId
           ? this.index.get(current.parentId)
           : undefined;
+      }
+      const restoring = new Set(restoredIds);
+      const outermost = restoredIds.at(-1);
+      const restoredRoot = outermost === undefined ? undefined : this.get(outermost);
+      const returned = restoredRoot ? [...this.index.values()].filter((entry) =>
+        (entry.dir === restoredRoot.dir || entry.dir.startsWith(restoredRoot.dir + path.sep)) &&
+        !this.isDeletedAfterRestore(entry.meta.id, restoring),
+      ) : [];
+      // Plan against the projected live tree before clearing anything on disk
+      // or in the index. A refused append leaves the entire restore retryable.
+      const linkEdits = await this.planChildPageLinksUnlocked(
+        returned.flatMap((entry) => entry.parentId ? [entry.parentId] : []),
+        new Set(returned.map((entry) => entry.meta.id)), restoring,
+      );
+      for (const restoredId of restoredIds) {
+        const entry = this.get(restoredId);
+        entry.meta.deleted = undefined;
+        entry.meta.updated = now();
+        await this.persist(entry);
       }
       // The first baseline walk skipped this subtree because the link did
       // not show it. The link shows it again now, and it shows all of the
@@ -7444,25 +7531,19 @@ export class Store {
       // roots that receive them come from that node. Starting the ancestor
       // walk lower would hand a scoped root between here and there names
       // from outside its own subtree.
-      const outermost = restoredIds.at(-1);
       if (outermost !== undefined) {
         await this.extendScopedBaselinesUnlocked(outermost, () =>
           this.subtreeAttachmentNamesUnlocked(outermost),
         );
       }
-      if (outermost !== undefined) {
-        const restoredRoot = this.get(outermost);
-        const returned = [...this.index.values()].filter((entry) =>
-          (entry.dir === restoredRoot.dir || entry.dir.startsWith(restoredRoot.dir + path.sep)) &&
-          !this.isDeleted(entry.meta.id),
-        );
+      for (const edit of linkEdits) {
         // Descendants hidden through their ancestor return too, including
         // legacy trash whose bodies predate automatic child links. Batch each
         // parent once, without filing unrelated unlinked siblings outside it.
-        await this.fileChildPagesUnlocked(
-          returned.flatMap((entry) => entry.parentId ? [entry.parentId] : []),
-          "me", new Set(returned.map((entry) => entry.meta.id)),
-        );
+        // Persisting a restored parent's flag changed its revision. Keep the
+        // preflight body, paired with the revision just installed above.
+        const page = await this.readPage(edit.id);
+        await this.saveChildLinkEditUnlocked({ ...edit, rev: page.rev }, "me", undefined, true);
       }
       scheduleCommit(this.root);
       emitStore({ type: "create", id, src });

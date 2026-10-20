@@ -248,7 +248,14 @@ export async function commitSnapshot(root: string, message: string): Promise<voi
   timers.delete(root);
   const active = running.get(root);
   if (active) await active;
-  await commit(root, message);
+  try {
+    await commit(root, message);
+  } catch (error) {
+    // Awaited maintenance snapshots have their own structured failure log,
+    // but readiness must retain the same sticky failure as background saves.
+    failures.set(root, error instanceof Error ? error : new Error(String(error)));
+    throw error;
+  }
   pending.delete(root);
   deferred.delete(root);
 }

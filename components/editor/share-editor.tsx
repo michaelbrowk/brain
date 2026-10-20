@@ -930,13 +930,13 @@ function ShareEditorForPage({
       } | null;
       const id = typeof created?.id === "string" ? created.id : "";
       if (!id) return refusedSubpage(SHARE_SUBPAGE_FAILED_COPY, true);
+      let appendedParent: { markdown: string; rev: string } | null = null;
       try {
         const response = await fetcher(pageEndpoint);
         if (response.ok) {
           const parent = await response.json() as { markdown: string; rev: string };
           if (parent.markdown === appendStandalonePageRef(baseBeforeCreate, `📄 ${title}`, id, location.origin)) {
-            revision.current = parent.rev;
-            base.current = parent.markdown;
+            appendedParent = parent;
           }
         }
       } catch {
@@ -948,8 +948,36 @@ function ShareEditorForPage({
       // once after, because an unsaved ref is the one way the two could part.
       setMadeHere((made) => [...made, id]);
       flushOnNextChange.current = true;
-      if (!insertPageRef({ id, title })) {
+      let inserted = false;
+      try {
+        inserted = insertPageRef({ id, title });
+      } catch {
+        // The view may have been replaced while creation was in flight.
+      }
+      if (!inserted) {
+        flushOnNextChange.current = false;
+        try {
+          const response = await fetcher(pageEndpoint);
+          if (response.ok) {
+            const parent = await response.json() as { markdown: string; rev: string };
+            // Preserve edits made during the request on their old revision;
+            // their normal save will conflict rather than erase the append.
+            if (!pending.current && latest.current === baseBeforeCreate) {
+              revision.current = parent.rev;
+              base.current = parent.markdown;
+              latest.current = parent.markdown;
+              setMarkdown(parent.markdown);
+              setEditorEpoch((epoch) => epoch + 1);
+            }
+          }
+        } catch {
+          // An unavailable read leaves the old revision guarding later saves.
+        }
         return refusedSubpage(SHARE_SUBPAGE_UNLINKED_COPY, false);
+      }
+      if (appendedParent) {
+        revision.current = appendedParent.rev;
+        base.current = appendedParent.markdown;
       }
       return { ok: true } as const;
     },

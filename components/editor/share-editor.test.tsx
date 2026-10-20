@@ -1226,6 +1226,50 @@ describe("the visitor editor", () => {
       ]);
     });
 
+    it.each(["refuses", "throws"])("reconciles the server body when slash insertion %s", async (failure) => {
+      const appended = "hello\n\n[📄 Meeting notes](/p/page-new)";
+      const seen = recordFetch({
+        put: [json({ rev: "saved" }, 200)],
+        create: [json({ id: "page-new" }, 200)],
+        get: json({ markdown: appended, rev: "parent-linked" }, 200),
+      });
+      await mount("hello");
+      await slashNewPage(() => {
+        if (failure === "throws") throw new Error("replaced view");
+        return false;
+      });
+      await act(async () => name("Meeting notes"));
+      await pressIn("Create page");
+      expect(editorText()).toBe(appended);
+      expect(seen.filter((request) => request.method === "GET")).toHaveLength(2);
+      expect(puts(seen)).toEqual([]);
+      await type(appended + "\n\nLater typing");
+      expect(putBodies(seen)).toEqual([{
+        markdown: appended + "\n\nLater typing", rev: "parent-linked",
+      }]);
+    });
+
+    it("keeps a stale revision if slash reconciliation is offline, so the next save conflicts", async () => {
+      let reads = 0;
+      const appended = "hello\n\n[📄 Meeting notes](/p/page-new)";
+      const seen = recordFetch({
+        put: [json({ error: "conflict", currentRev: "parent-linked" }, 409)],
+        create: [json({ id: "page-new" }, 200)],
+        get: () => {
+          if (++reads === 2) throw new Error("offline");
+          return json({ markdown: appended, rev: "parent-linked" }, 200)();
+        },
+      });
+      await mount("hello");
+      await slashNewPage(() => false);
+      await act(async () => name("Meeting notes"));
+      await pressIn("Create page");
+      expect(editorText()).toBe("hello");
+      await type("hello and later typing");
+      expect(putBodies(seen)).toEqual([{ markdown: "hello and later typing", rev: REV }]);
+      expect(banner()?.textContent).toContain(SHARE_CONFLICT_COPY);
+    });
+
     it("lets the ref it just placed link into the share", async () => {
       recordFetch({ put: [json({ rev: "b" }, 200)] });
       await mount("hello");

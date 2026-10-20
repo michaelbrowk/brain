@@ -3034,6 +3034,7 @@ export function Shell({
         const baseBeforeCreate = baseMarkdownRef.current.get(parentId);
         const meta = await requestCreatePage(parentId);
         if (!meta) return;
+        let appendedParent: { markdown: string; rev: string } | null = null;
         try {
           const response = await apiFetch(`/api/page/${parentId}`);
           if (response.ok && baseBeforeCreate !== undefined) {
@@ -3044,8 +3045,7 @@ export function Shell({
             // Adopt only our exact generated append. An unrelated remote edit
             // keeps the old revision and meets the ordinary conflict path.
             if (parent.markdown === canonicalPageMarkdown(expected)) {
-              revisionsRef.current.set(parentId, parent.rev);
-              baseMarkdownRef.current.set(parentId, parent.markdown);
+              appendedParent = parent;
             }
           }
         } catch {
@@ -3061,10 +3061,15 @@ export function Shell({
             return false;
           }
         };
-        if (
-          selectedIdRef.current !== parentId ||
-          !insertPageRef(meta)
-        ) {
+        let inserted = false;
+        try {
+          inserted = selectedIdRef.current === parentId && insertPageRef(meta);
+        } catch {
+          // A replaced/destroyed view can throw as well as refuse insertion.
+        }
+        if (!inserted) {
+          cursorPageCreationRef.current = null;
+          await reloadCurrent(parentId).catch(() => {});
           void refreshCreatedPage().then((refreshed) => {
             if (selectedIdRef.current === parentId) {
               showToast(
@@ -3083,6 +3088,8 @@ export function Shell({
         const pending =
           pendingRef.current?.id === parentId ? pendingRef.current : null;
         if (!pending) {
+          cursorPageCreationRef.current = null;
+          await reloadCurrent(parentId).catch(() => {});
           void refreshCreatedPage().then((refreshed) => {
             showToast(
               refreshed
@@ -3091,6 +3098,12 @@ export function Shell({
             );
           });
           return;
+        }
+        // The editor now contains the link. Only now may its cursor save use
+        // the revision of the server's automatic append.
+        if (appendedParent) {
+          revisionsRef.current.set(parentId, appendedParent.rev);
+          baseMarkdownRef.current.set(parentId, appendedParent.markdown);
         }
         if (timer.current) clearTimeout(timer.current);
         timer.current = null;
@@ -3124,6 +3137,7 @@ export function Shell({
     [
       blockConflictMutation,
       doSave,
+      reloadCurrent,
       refreshTree,
       requestCreatePage,
       select,

@@ -3,9 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Store } from "./store";
-import { beginGitSnapshotBarrier, commitSnapshot } from "./git";
+import { assertGitSnapshotHealthy, beginGitSnapshotBarrier, commitSnapshot } from "./git";
 import { brainEvents } from "./events";
 import { RevConflictError } from "./types";
 import { standalonePageRefOccurrences } from "../page-ref-nesting";
@@ -15,13 +15,19 @@ const exec = promisify(execFile);
 let root: string;
 let state: string;
 let store: Store;
+const finishBackfill = async () => expect(await store.waitForMutationIdle(5_000)).toBe(true);
+const markerPath = async () => path.join(state, (await fs.readdir(state))[0]);
+const marker = async () => JSON.parse(await fs.readFile(await markerPath(), "utf8"));
 beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-child-links-"));
   state = await fs.mkdtemp(path.join(os.tmpdir(), "brain-child-links-state-"));
   store = new Store(root, { childLinksStateDirectory: state });
   await store.init();
+  await finishBackfill();
 });
 afterEach(async () => {
+  vi.restoreAllMocks();
+  await finishBackfill();
   const release = await beginGitSnapshotBarrier(root);
   await commitSnapshot(root, "test cleanup");
   release();
@@ -164,6 +170,7 @@ describe("child page links", () => {
   it("files visitor-created children with visitor attribution", async () => {
     store = new Store(root, { childLinksStateDirectory: state, publicOrigin: "https://brain.test" });
     await store.init();
+    await finishBackfill();
     const parent = await store.createPage(null, "Shared");
     await store.configureShare(parent.id, { enabled: true, canEdit: true, expectedScopeToken: (await store.readShareScope(parent.id)).scopeToken });
     const shareVersion = (await store.readShareScope(parent.id)).shareVersion;
@@ -214,10 +221,41 @@ describe("child page links", () => {
     expect(await fs.readdir(path.join(root, "parent"))).toEqual(["index.md"]);
   });
 
+  it.each(["parent", "ancestor"])("preflights a refused %s append before restoring flags, then repairs on retry", async (refusedAt) => {
+    const ancestor = await store.createPage(null, "Ancestor");
+    const parent = await store.createPage(ancestor.id, "Parent");
+    const child = await store.createPage(parent.id, "Child");
+    await store.deletePage(parent.id);
+    const refused = refusedAt === "parent" ? parent : ancestor;
+    await store.writePage(refused.id, "<!-- private unclosed comment");
+    const before = await store.readPage(parent.id);
+    const events: unknown[] = [];
+    const listener = (event: unknown) => events.push(event);
+    brainEvents.on("change", listener);
+    try {
+      await expect(store.restorePage(child.id)).rejects.toThrow("cannot be appended");
+      expect(store.isDeleted(parent.id)).toBe(true);
+      expect(store.isDeleted(child.id)).toBe(true);
+      expect(await store.readPage(parent.id)).toEqual(before);
+      expect(events).toEqual([]);
+      await store.rebuild();
+      expect(store.isDeleted(child.id)).toBe(true);
+      await store.writePage(refused.id, "Repaired");
+      await store.restorePage(child.id);
+      expect(store.isDeleted(child.id)).toBe(false);
+      expect(await refs(ancestor.id, parent.id)).toHaveLength(1);
+      expect(await refs(parent.id, child.id)).toHaveLength(1);
+      expect(events).toContainEqual(expect.objectContaining({ type: "create", id: child.id }));
+    } finally {
+      brainEvents.off("change", listener);
+    }
+  });
+
   it("marks a fresh notebook without creating a notes repository or rerunning", async () => {
     expect(await fs.readdir(root)).toEqual([]);
     expect(await fs.readdir(state)).toHaveLength(1);
     await store.init();
+    await finishBackfill();
     expect(await fs.readdir(root)).toEqual([]);
   });
 
@@ -241,19 +279,199 @@ describe("child page links", () => {
     await fs.rm(state, { recursive: true, force: true });
     const hook = path.join(root, ".git", "hooks", "pre-commit");
     await fs.writeFile(hook, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       store = new Store(root, { childLinksStateDirectory: state });
-      await expect(store.init()).rejects.toThrow("git commit failed");
-      const marker = path.join(state, (await fs.readdir(state))[0]);
-      expect(JSON.parse(await fs.readFile(marker, "utf8")).complete).toBe(false);
+      await expect(store.init()).resolves.toBeUndefined();
+      await finishBackfill();
+      expect((await marker()).complete).toBe(false);
+      await expect(assertGitSnapshotHealthy(root)).rejects.toThrow("snapshot is unhealthy");
+      expect(await refs(parent.id, child.id)).toHaveLength(1);
+      expect(log.mock.calls).toEqual([[JSON.stringify({
+        event: "child_page_links_backfill_failed", phase: "migration_snapshot",
+      })]]);
     } finally {
       await fs.rm(hook);
     }
     store = new Store(root, { childLinksStateDirectory: state });
     await store.init();
+    await finishBackfill();
     expect(await refs(parent.id, child.id)).toHaveLength(1);
     expect((await exec("git", ["log", "--format=%s"], { cwd: root })).stdout.trim().split("\n"))
       .toEqual(["migrate: file child pages in their parents", "before"]);
+    await expect(assertGitSnapshotHealthy(root)).resolves.toBeUndefined();
+  });
+
+  it.each(["absent", "complete"])("initialises despite a failed startup snapshot with an %s marker", async (initialMarker) => {
+    const parent = await store.createPage(null, "Parent");
+    const child = await store.createPage(parent.id, "Child");
+    const release = await beginGitSnapshotBarrier(root);
+    await commitSnapshot(root, "before");
+    release();
+    await store.writePage(parent.id, "Saved before restart");
+    const file = await markerPath();
+    if (initialMarker === "absent") await fs.rm(state, { recursive: true, force: true });
+    const hook = path.join(root, ".git", "hooks", "pre-commit");
+    await fs.writeFile(hook, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      store = new Store(root, { childLinksStateDirectory: state });
+      await expect(store.init()).resolves.toBeUndefined();
+      await finishBackfill();
+      expect(await body(parent.id)).toBe("Saved before restart");
+      await expect(fs.access(file)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(log.mock.calls).toEqual([[JSON.stringify({
+        event: "child_page_links_backfill_failed", phase: "startup_snapshot",
+      })]]);
+      await expect(assertGitSnapshotHealthy(root)).rejects.toThrow("snapshot is unhealthy");
+      await expect(store.createPage(null, "Serving writes")).resolves.toBeDefined();
+    } finally {
+      await fs.rm(hook);
+    }
+    store = new Store(root, { childLinksStateDirectory: state });
+    await store.init();
+    await finishBackfill();
+    expect(await refs(parent.id, child.id)).toHaveLength(1);
+    expect((await marker()).complete).toBe(true);
+  });
+
+  it("initialises, skips only a refused parent, and retries its pending work next start", async () => {
+    const refused = await store.createPage(null, "Refused");
+    const refusedChild = await store.createPage(refused.id, "Refused child");
+    const good = await store.createPage(null, "Good");
+    const goodChild = await store.createPage(good.id, "Good child");
+    await store.writePage(refused.id, "<!-- private unclosed comment");
+    await store.writePage(good.id, "Good prose");
+    await fs.rm(state, { recursive: true, force: true });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    store = new Store(root, { childLinksStateDirectory: state });
+    await expect(store.init()).resolves.toBeUndefined();
+    await finishBackfill();
+    expect(await body(refused.id)).toBe("<!-- private unclosed comment");
+    expect(await refs(good.id, goodChild.id)).toHaveLength(1);
+    expect((await marker()).complete).toBe(false);
+    expect(log.mock.calls).toEqual([[JSON.stringify({
+      event: "child_page_links_backfill_failed", phase: "parent_plan", parentId: refused.id,
+    })]]);
+    await store.writePage(refused.id, "Repaired");
+    store = new Store(root, { childLinksStateDirectory: state });
+    await store.init();
+    await finishBackfill();
+    expect(await refs(refused.id, refusedChild.id)).toHaveLength(1);
+    expect(await refs(good.id, goodChild.id)).toHaveLength(1);
+    expect((await marker()).complete).toBe(true);
+  });
+
+  it.each(["{invalid", "null", '{"version":2}'])("serves notes despite invalid marker %s", async (invalid) => {
+    const page = await store.createPage(null, "Page", { markdown: "Still served" });
+    await fs.writeFile(await markerPath(), invalid);
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    store = new Store(root, { childLinksStateDirectory: state });
+    await expect(store.init()).resolves.toBeUndefined();
+    await finishBackfill();
+    expect(await body(page.id)).toBe("Still served");
+    expect(await fs.readdir(state)).toEqual([]);
+    expect(log.mock.calls).toEqual([[JSON.stringify({
+      event: "child_page_links_backfill_failed", phase: "marker_read",
+    })]]);
+    await expect(store.createPage(null, "Serving writes too")).resolves.toBeDefined();
+  });
+
+  it("returns from init and serves reads while a migration marker write is still pending", async () => {
+    const parent = await store.createPage(null, "Parent", { markdown: "Intro" });
+    const child = await store.createPage(parent.id, "Child");
+    await store.writePage(parent.id, "Intro");
+    const file = await markerPath();
+    await fs.rm(file);
+    const rename = fs.rename.bind(fs);
+    let unblock!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { unblock = resolve; });
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    let held = false;
+    vi.spyOn(fs, "rename").mockImplementation(async (from, to) => {
+      if (to === file && !held) {
+        held = true;
+        entered();
+        await gate;
+      }
+      return rename(from, to);
+    });
+    store = new Store(root, { childLinksStateDirectory: state });
+    try {
+      await expect(store.init()).resolves.toBeUndefined();
+      expect(held).toBe(false);
+      await started;
+      expect(await body(parent.id)).toBe("Intro");
+      expect(store.getTree()[0].children[0].id).toBe(child.id);
+    } finally {
+      unblock();
+      await finishBackfill();
+    }
+    expect(await refs(parent.id, child.id)).toHaveLength(1);
+  });
+
+  it("leaves oversized parents pending while filing the rest", async () => {
+    const large = await store.createPage(null, "Large");
+    await store.createPage(large.id, "Large child");
+    const prose = "x".repeat(1024 * 1024);
+    await store.writePage(large.id, prose);
+    const good = await store.createPage(null, "Good");
+    const child = await store.createPage(good.id, "Child");
+    await store.writePage(good.id, "Intro");
+    await fs.rm(state, { recursive: true, force: true });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    store = new Store(root, { childLinksStateDirectory: state });
+    await expect(store.init()).resolves.toBeUndefined();
+    await finishBackfill();
+    expect(await body(large.id)).toBe(prose);
+    expect(await refs(good.id, child.id)).toHaveLength(1);
+    expect((await marker()).complete).toBe(false);
+    expect(log.mock.calls).toEqual([[JSON.stringify({
+      event: "child_page_links_backfill_failed", phase: "parent_size_limit", parentId: large.id,
+    })]]);
+  });
+
+  it("serves notes despite an unreadable marker", async () => {
+    const file = await markerPath();
+    await fs.rm(file);
+    await fs.mkdir(file);
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    store = new Store(root, { childLinksStateDirectory: state });
+    await expect(store.init()).resolves.toBeUndefined();
+    await finishBackfill();
+    expect(log.mock.calls).toEqual([[JSON.stringify({
+      event: "child_page_links_backfill_failed", phase: "marker_read",
+    })]]);
+    await expect(store.createPage(null, "Serving writes")).resolves.toBeDefined();
+  });
+
+  it.each([1, 2])("does not complete the marker when marker write %i fails", async (failedWrite) => {
+    const parent = await store.createPage(null, "Parent");
+    const child = await store.createPage(parent.id, "Child");
+    await store.writePage(parent.id, "Intro");
+    const file = await markerPath();
+    await fs.rm(file);
+    const rename = fs.rename.bind(fs);
+    let writes = 0;
+    vi.spyOn(fs, "rename").mockImplementation(async (from, to) => {
+      if (to === file && ++writes === failedWrite) throw new Error("private filesystem error");
+      return rename(from, to);
+    });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    store = new Store(root, { childLinksStateDirectory: state });
+    await expect(store.init()).resolves.toBeUndefined();
+    await finishBackfill();
+    await expect(fs.access(file)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(log.mock.calls).toEqual([[JSON.stringify({
+      event: "child_page_links_backfill_failed", phase: failedWrite === 1 ? "marker_pending" : "marker_complete",
+    })]]);
+    vi.restoreAllMocks();
+    store = new Store(root, { childLinksStateDirectory: state });
+    await store.init();
+    await finishBackfill();
+    expect(await refs(parent.id, child.id)).toHaveLength(1);
+    expect((await marker()).complete).toBe(true);
   });
 
   it("backfills once in tree order, one git commit, and leaves exclusions alone", async () => {
@@ -271,6 +489,7 @@ describe("child page links", () => {
     await fs.rm(state, { recursive: true, force: true });
     store = new Store(root, { childLinksStateDirectory: state });
     await store.init();
+    await finishBackfill();
     expect(await body(parent.id)).toBe(`Intro\n\n[📄 Two](/p/${two.id})\n\n[📄 One](/p/${one.id})`);
     expect(await body(board.id)).toBe("Board body");
     const log = (await exec("git", ["log", "--format=%s"], { cwd: root })).stdout.trim().split("\n");
@@ -278,6 +497,7 @@ describe("child page links", () => {
     await store.writePage(parent.id, "Deliberately removed");
     store = new Store(root, { childLinksStateDirectory: state });
     await store.init();
+    await finishBackfill();
     expect(await body(parent.id)).toBe("Deliberately removed");
     expect((await fs.readdir(state)).filter((name) => name.startsWith("child-page-links-v1-"))).toHaveLength(1);
   });

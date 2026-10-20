@@ -33,6 +33,9 @@ type EditorProps = {
   onDirty?: () => void;
   registerFlush?: (flush: () => void) => (() => void) | void;
   registerExternalWrite?: (apply: ExternalWrite) => (() => void) | void;
+  onCreatePageAtCursor?: (
+    insertPageRef: (page: { id: string; title: string; icon?: string }) => boolean,
+  ) => Promise<void>;
 };
 
 const editorHarness = vi.hoisted(() => ({
@@ -350,6 +353,71 @@ describe("a write to the open page from somewhere else", () => {
   function conflictShown() {
     return document.body.textContent?.includes("Page changed elsewhere") ?? false;
   }
+
+  it.each(["refuses", "throws"])("reconciles the server append when slash insertion %s", async (failure) => {
+    await open();
+    const fallback = apiFetchMock.getMockImplementation()!;
+    const appended = "Base\n\n[📄 Untitled](/p/copy)";
+    apiFetchMock.mockImplementation((input, init) => {
+      if (String(input) === "/api/page" && init?.method === "POST") {
+        commit(appended);
+        return Promise.resolve(response({ id: "copy", title: "Untitled" }));
+      }
+      return fallback(input, init);
+    });
+    await act(async () => editorHarness.props!.onCreatePageAtCursor!(() => {
+      if (failure === "throws") throw new Error("replaced view");
+      return false;
+    }));
+    await settle();
+    expect(editorHarness.holds).toBe(appended);
+    expect(puts).toEqual([]);
+    await type(editorHarness.holds + "\n\nLater typing");
+    await advance(800);
+    expect(puts.at(-1)?.rev).toBe("rev-2");
+    expect(server.markdown).toContain("[📄 Untitled](/p/copy)");
+    expect(server.markdown).toContain("Later typing");
+  });
+
+  it("retains the old revision if reconciliation after a failed slash insertion is offline", async () => {
+    await open();
+    const fallback = apiFetchMock.getMockImplementation()!;
+    let parentReads = 0;
+    apiFetchMock.mockImplementation((input, init) => {
+      if (String(input) === "/api/page" && init?.method === "POST") {
+        commit("Base\n\n[📄 Untitled](/p/copy)");
+        return Promise.resolve(response({ id: "copy", title: "Untitled" }));
+      }
+      if (String(input) === "/api/page/note" && !init?.method && ++parentReads === 2) {
+        return Promise.reject(new Error("offline"));
+      }
+      return fallback(input, init);
+    });
+    await act(async () => editorHarness.props!.onCreatePageAtCursor!(() => false));
+    await type("Base and later typing");
+    await advance(800);
+    expect(puts.at(-1)?.rev).toBe("rev-1");
+    expect(conflictShown()).toBe(true);
+    expect(server.markdown).toContain("[📄 Untitled](/p/copy)");
+  });
+
+  it("uses the appended revision for a successfully inserted slash link", async () => {
+    await open();
+    const fallback = apiFetchMock.getMockImplementation()!;
+    apiFetchMock.mockImplementation((input, init) => {
+      if (String(input) === "/api/page" && init?.method === "POST") {
+        commit("Base\n\n[📄 Untitled](/p/copy)");
+        return Promise.resolve(response({ id: "copy", title: "Untitled" }));
+      }
+      return fallback(input, init);
+    });
+    await act(async () => editorHarness.props!.onCreatePageAtCursor!(() => {
+      editorHarness.props!.onChange("Base [📄 Untitled](/p/copy)");
+      return true;
+    }));
+    expect(puts.at(-1)?.rev).toBe("rev-2");
+    expect(server.markdown).toBe("Base [📄 Untitled](/p/copy)");
+  });
 
   it("applies a clean external write to the live editor without a remount", async () => {
     await open("Base");

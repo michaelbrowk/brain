@@ -572,12 +572,11 @@ test("@release the owner answers three cards and the trainer's Words page says s
     await expect(frame.locator("#translationEl")).toBeVisible();
     await frame.locator(`#${button}`).click();
     if (answered.length === 1) {
-      // The first answer on its own, before a second can fold into it: the
-      // singular sentence the bell draws for one write, with the app's own
-      // name in front of it and nothing the app chose anywhere in it.
+      // The first answer lands as the day's one line for the app: its own
+      // name in front, a count behind, and nothing the app chose anywhere in it.
       await expect
         .poll(() => bellTitles(page), { timeout: 30_000 })
-        .toContain(`${seeded.title} updated Words`);
+        .toContain(`${seeded.title} (app) · 1 page`);
     }
   }
 
@@ -603,10 +602,12 @@ test("@release the owner answers three cards and the trainer's Words page says s
     expect(wordRow(words, word), `${word} is not on the Words page`).not.toBeNull();
   }
 
-  // And the burst folds rather than filling the bell with a line per card.
-  await expect
-    .poll(() => bellTitles(page), { timeout: 30_000 })
-    .toContain(`${seeded.title} updated 3 pages`);
+  // And the burst folds into that same line rather than one per card: three
+  // writes to one page are still one page.
+  const trainerRows = (await bellTitles(page)).filter((title) =>
+    title.startsWith(seeded.title),
+  );
+  expect(trainerRows).toEqual([`${seeded.title} (app) · 1 page`]);
 });
 
 test("@release an app cannot read Brain's API, its cookies, or the top window", async ({

@@ -140,6 +140,18 @@ describe("an app's files", () => {
     expect(expected).toContain("https://brain.example/api/app/app1/t/");
   });
 
+  it("keeps direct document navigation isolated without relying on an iframe", async () => {
+    const token = await ownerToken();
+    const response = await GET(new NextRequest(
+      new URL(`/api/app/app1/t/${token}/index.html`, "https://brain.example"),
+      { headers: { "sec-fetch-dest": "document", "sec-fetch-mode": "navigate" } },
+    ), params(token, ["index.html"]));
+    expect(response.status).toBe(200);
+    const sandbox = response.headers.get("Content-Security-Policy")!
+      .split("; ").find((directive) => directive.startsWith("sandbox "));
+    expect(sandbox).toBe("sandbox allow-scripts allow-forms allow-modals");
+  });
+
   it("builds the origin from the request it is answering, not from a header", async () => {
     const token = await ownerToken();
     const forged = new NextRequest(

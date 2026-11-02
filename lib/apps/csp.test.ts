@@ -9,7 +9,8 @@ describe("the app frame's policy", () => {
     // token varies per grant and a policy cannot be re-cut per mint. It still
     // names one app, which is what it is for.
     expect(appFrameCsp(ORIGIN, "app1")).toBe(
-      "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
+      "sandbox allow-scripts allow-forms allow-modals; " +
+        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
         "img-src blob: data: https://brain.example/api/app/app1/t/; " +
         "font-src data: https://brain.example/api/app/app1/t/; " +
         "media-src data: https://brain.example/api/app/app1/t/; " +
@@ -36,6 +37,14 @@ describe("the app frame's policy", () => {
 
   it("lets the frame reach nothing on the network", () => {
     expect(appFrameCsp(ORIGIN, "app1")).toContain("connect-src 'none'");
+  });
+
+  it("isolates the document even when its signed URL is opened outside an iframe", () => {
+    const sandbox = appFrameCsp(ORIGIN, "app1").split("; ")
+      .find((directive) => directive.startsWith("sandbox "));
+    expect(sandbox).toBe(`sandbox ${APP_FRAME_SANDBOX}`);
+    expect(sandbox).not.toContain("allow-same-origin");
+    expect(sandbox).not.toContain("allow-top-navigation");
   });
 
   it("builds for an IPv6-literal origin, which a private install can have", () => {

@@ -553,13 +553,8 @@ export class OAuthStateStore {
     );
   }
 
-  /** The scopes here are the EFFECTIVE ones, the same set `lib/oauth/server.ts`
-   *  hands a verified bearer, not the words stored on the grant. Brain is a
-   *  single-owner service, so an owner write grant reaches the whole owner API
-   *  whatever it asked for: a grant minted before the mail scopes existed can
-   *  read and send mail today. Settings is the one screen a person revokes
-   *  from, and a screen that understates what it is revoking is worse than no
-   *  screen. */
+  /** Settings and bearer verification use the same approved scope closure.
+   *  Older grants do not silently acquire permissions for newer features. */
   async listConnectedApps(): Promise<ConnectedApp[]> {
     const state = await this.read();
     return Object.values(state.grants)

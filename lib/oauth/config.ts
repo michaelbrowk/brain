@@ -164,14 +164,11 @@ export function normalizeScopes(values: readonly string[]): McpScope[] {
   return MCP_SCOPES.filter((scope) => requested.has(scope));
 }
 
-// Brain is a single-owner service. Older Codex installations minted valid
-// read/write grants before import was advertised during connection, and some
-// hosts keep reusing that bearer after an accepted scope-upgrade flow. Treat a
-// verified owner write grant as the full owner API so those durable grants do
-// not get trapped in an OAuth refresh loop. Read-only grants stay read-only.
+// Authorization is bounded by what the owner approved, including for grants
+// issued before a feature existed. A new capability requires a new consent;
+// being a single-owner service is not consent to give every client mail access.
 export function ownerEffectiveScopes(values: readonly McpScope[]): McpScope[] {
-  if (!values.includes("brain:write")) return [...values];
-  return [...MCP_SCOPES];
+  return normalizeScopes(values);
 }
 
 export class OAuthRequestError extends Error {

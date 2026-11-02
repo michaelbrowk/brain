@@ -46,6 +46,9 @@ export function appFrameCsp(origin: string, pageId: string): string {
   // other app's.
   const files = `${origin}/api/app/${pageId}/t/`;
   return [
+    // Enforce the opaque origin on the response itself. The iframe attribute
+    // alone does not protect a signed app URL opened as a top-level document.
+    `sandbox ${APP_FRAME_SANDBOX}`,
     "default-src 'none'",
     "script-src 'unsafe-inline'",
     "style-src 'unsafe-inline'",

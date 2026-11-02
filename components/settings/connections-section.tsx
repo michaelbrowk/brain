@@ -75,11 +75,7 @@ const UNREADABLE_HINT =
 const NO_APPS = "No apps connected with OAuth yet";
 const NO_ACTIVITY = "No agent activity yet";
 
-/** Brain is a single-owner service, so an owner write grant reaches the whole
- *  owner API whatever words were stored on it (`ownerEffectiveScopes`).
- *  `listConnectedApps` sends what a grant can reach rather than what it asked
- *  for, because the one screen a person revokes from must not understate what
- *  it is revoking: a grant minted before 0.11.0 can send mail. */
+/** These are the approved permissions enforced by bearer verification. */
 function mcpScopeLabel(scope: ConnectedApp["scopes"][number]): string {
   if (scope === "brain:read") return "Read";
   if (scope === "brain:write") return "Write";

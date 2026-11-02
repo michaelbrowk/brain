@@ -41,19 +41,12 @@ discover the remaining endpoints automatically.
   name a page to save an attachment into, and it does not include
   `brain:write`. A grant that sorts mail cannot edit notes. Which tool sits
   under which scope is in `docs/mcp-tools.md`.
-- **A `brain:write` grant reaches the import tools as well.** Brain is a
-  single-owner service, and `ownerEffectiveScopes` in `lib/oauth/config.ts`
-  widens any verified write grant to the full scope set when an access token is
-  introspected, so the import tools accept it. The distinction the code enforces
-  today is read-only versus writing, not writing versus importing: a read-only
-  grant stays read-only, and everything above it can import. Do not treat
-  `brain:import` as a second barrier in front of the import surface. The same
-  widening now reaches the two mail scopes, which is deliberate: an owner
-  connection made before mail existed gets the mail tools on upgrade without a
-  second consent screen, and a read-only grant still gets neither. The widening
-  is a rule about **grants**, and an OAuth grant is a screen the owner
-  approved, a row under Connected apps and a Revoke button. The static
-  `MCP_TOKEN` bearer is none of those and is not widened: it keeps
+- **A grant reaches only the permissions the owner approved.** Write permission
+  does not imply import or mail access. Existing notes-only grants keep working
+  for notes; a client that needs a new capability must start a new authorization
+  flow requesting it. The consent screen, bearer verification, and Connected
+  apps list use the same scope closure. An upgrade never adds mail or sending
+  rights to an older grant without consent. The static `MCP_TOKEN` keeps
   `LEGACY_BEARER_SCOPES` (`brain:read`, `brain:write`, `brain:import`) and
   reaches no mail tool.
 - Settings lists active connected apps by grant. Revoking one grant immediately

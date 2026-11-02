@@ -69,6 +69,7 @@ describe("CI cost guardrails", () => {
     // PRs may run the cheap gate, but every expensive step must stay
     // push-only so a pull request never packages or boots a browser.
     expect(workflow).toContain("pull_request:\n    branches: [main]\n");
+    expect(workflow).not.toContain("paths-ignore:");
     for (const step of [
       "pnpm exec playwright install",
       "pnpm test:e2e:release",
@@ -129,8 +130,16 @@ describe("CI cost guardrails", () => {
     expect(fullE2eWorkflow).toContain("  workflow_dispatch:\n");
     expect(fullE2eWorkflow).toContain("  schedule:\n");
     expect(fullE2eWorkflow).toContain("  full-e2e:\n");
-    expect(fullE2eWorkflow).toContain("run: pnpm test:e2e:full\n");
-    expect(fullE2eWorkflow).not.toContain("actions/upload-artifact@");
+    expect(fullE2eWorkflow).toContain("run: pnpm test:e2e:full --shard=${{ matrix.shard }}/4 --global-timeout=1200000 --reporter=github,html\n");
+    const parsed = matter(`---\n${fullE2eWorkflow}\n---\n`).data;
+    const job = parsed.jobs["full-e2e"];
+    expect(job.strategy).toEqual({ "fail-fast": false, matrix: { shard: [1, 2, 3, 4] } });
+    expect(job["timeout-minutes"]).toBe(25);
+    const diagnostics = job.steps.find((step: { name?: string }) => step.name === "Preserve failure diagnostics");
+    expect(diagnostics.if).toBe("failure() || cancelled()");
+    expect(diagnostics.with).toMatchObject({ "retention-days": 7, "if-no-files-found": "ignore" });
+    expect(diagnostics.with.path).toContain("test-results/");
+    expect(diagnostics.with.path).toContain("playwright-report/");
     expect(fullE2eWorkflow).not.toContain("Set build provenance");
     expect(packageScripts["test:e2e:release"]).toBe(
       "playwright test --grep @release",

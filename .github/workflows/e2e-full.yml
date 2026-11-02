@@ -19,6 +19,10 @@ jobs:
     # weekly regression pass. Main releases use the compact @release gate in
     # the separate artifact-producing CI workflow.
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
@@ -34,4 +38,17 @@ jobs:
           sudo apt-get install --yes ripgrep
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
-      - run: pnpm test:e2e:full
+      # Each runner owns its notes/state root. Keep Playwright's single worker:
+      # test files reset the shared fixture and cannot run concurrently there.
+      # Stop before the job deadline so failures retain their diagnostic files.
+      - run: pnpm test:e2e:full --shard=${{ matrix.shard }}/4 --global-timeout=1200000 --reporter=github,html
+      - name: Preserve failure diagnostics
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: e2e-failure-${{ matrix.shard }}
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+          if-no-files-found: ignore

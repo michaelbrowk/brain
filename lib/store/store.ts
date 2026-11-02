@@ -41,6 +41,7 @@ import {
   scheduleCommit,
   logForPath,
   showPageAtRevision,
+  showAttachmentAtRevision,
   type Version,
 } from "./git";
 import { emitStore } from "./events";
@@ -570,7 +571,7 @@ export class Store {
   // promise-chain queue fixes the whole class. NB: NOT reentrant — a mutator
   // wrapped in mutate() must never call another mutate()-wrapped method, or it
   // deadlocks waiting on itself. Composites that delegate to wrapped leaves
-  // (duplicatePage, renamePage, restoreVersion) deliberately stay unwrapped;
+  // (duplicatePage, renamePage) deliberately stay unwrapped;
   // emptyTrash instead owns one lock and calls its private unwrapped purge leaf.
   private mutationTail: Promise<unknown> = Promise.resolve();
 
@@ -661,15 +662,24 @@ export class Store {
 
   async init(): Promise<void> {
     await ensureWritableNotesRoot(this.root);
+    // No snapshot may record an app as deleted while its retired folder is
+    // waiting for recovery. Successful init resumes deferred snapshots below;
+    // a failed recovery keeps them paused, like the other startup journals.
+    await beginGitSnapshotBarrier(this.root);
     await this.ensureNotionStagingRoot().catch(rethrowStagingFailure);
     await this.reconcileMoveIntent();
     await this.reconcileBoardIntent();
     await reconcileAbortIntents(this.root);
     await this.loadTaskIndex();
     await this.rebuild();
-    await this.mutate(() =>
-      this.reconcileNotionStaging().catch(rethrowStagingFailure),
-    );
+    await this.mutate(async () => {
+      for (const entry of this.index.values()) {
+        if (this.readAppMeta(entry.meta.id) === null) continue;
+        await assertAppFolderIsNotAPage(entry.dir);
+        await recoverCrashedAppSwap(entry.dir);
+      }
+      await this.reconcileNotionStaging().catch(rethrowStagingFailure);
+    });
     resumeGitSnapshotsAfterRecovery(this.root);
     this.warnIfShareEditHasNoOrigin();
     this.childLinksBackfill = this.backfillChildPageLinks();
@@ -7807,9 +7817,35 @@ export class Store {
     expectedRev: string,
     src?: string,
   ): Promise<Page> {
-    const md = await this.markdownAt(id, sha);
-    if (md === null) throw new NotFoundError(id);
-    return this.writePage(id, md, expectedRev, "me", src);
+    return this.mutate(() => this.withGitSnapshotBarrier(async () => {
+      const current = await this.readPage(id);
+      if (current.rev !== expectedRev) {
+        throw new RevConflictError(current.rev, expectedRev);
+      }
+      const md = await this.markdownAt(id, sha);
+      if (md === null) throw new NotFoundError(id);
+      for (const name of referencedAttachmentNames(md)) {
+        const held = await this.readAttachmentFile(name, MAX_ATTACHMENT_BYTES);
+        if (held.ok) continue;
+        if (held.why !== "missing") throw new AttachmentStoreUnavailableError();
+        const data = await showAttachmentAtRevision(this.root, sha, name, MAX_ATTACHMENT_BYTES);
+        if (data === null) throw new NotFoundError(name);
+        validateAttachment({ data, originalName: name, mimeType: attachmentMimeTypeForName(name) });
+        const contentHash = createHash("sha256").update(data).digest("hex");
+        const namedHash = /^([0-9a-f]{64})(?:\.|$)/.exec(name)?.[1];
+        if (namedHash !== undefined && namedHash !== contentHash) {
+          throw new AttachmentStoreUnavailableError();
+        }
+        // Retain the historical name, including files from before content-
+        // addressed uploads, so the restored Markdown keeps its exact URLs.
+        const dir = assertInRoot(this.root, path.join(/* turbopackIgnore: true */ this.root, "_attachments"));
+        const identity = await ensureRealDirectory(dir);
+        await atomicWrite(assertInRoot(dir, path.join(dir, name)), data);
+        await assertRealDirectory(dir, identity);
+        scheduleCommit(this.root);
+      }
+      return this.writePageUnlocked(id, md, expectedRev, "me", src);
+    }));
   }
 
   private isDescendant(id: string, ancestorId: string): boolean {
@@ -9296,7 +9332,10 @@ async function copyDirIfPresent(from: string, to: string): Promise<void> {
 async function directoryExists(dir: string): Promise<boolean> {
   return fs.stat(dir).then(
     (stats) => stats.isDirectory(),
-    () => false,
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return false;
+      throw error;
+    },
   );
 }
 
@@ -9305,7 +9344,7 @@ async function directoryExists(dir: string): Promise<boolean> {
  *  uses for its one reservation exception, asked on the write side so the two
  *  cannot disagree. An app's own set never holds one, because the name rule
  *  in `lib/apps/model.ts` refuses every `.md` at every depth. */
-/** RECOVER A CRASHED SWAP BEFORE ANY APP WRITE TOUCHES `app/`.
+/** Recover a crashed swap at startup and before an app write touches `app/`.
  *
  *  `writeAppFiles` swaps a staged set in by renaming `app/` out to
  *  `.app-next-old/` and `.app-next/` in. That pair is not one operation on
@@ -9319,25 +9358,35 @@ async function directoryExists(dir: string): Promise<boolean> {
  *  one state write carry nothing over and then delete the only surviving
  *  files.
  *
- *  Run by the rewrite AND by the state leaf, which no longer goes through the
+ *  Run before init resolves, by the rewrite AND by the state leaf, which no longer goes through the
  *  swap: the state write is by far the most frequent thing an app does, so it
  *  is the write most likely to be the next one after a crash, and the promise
  *  is that the next write finds the files. Two `stat`s in the ordinary case. */
 async function recoverCrashedAppSwap(dir: string): Promise<void> {
   const retired = path.join(dir, `${APP_STAGING_DIR}-old`);
+  let changed = false;
   if (await directoryExists(retired)) {
+    await assertRealDirectory(retired);
     if (await directoryExists(path.join(/*turbopackIgnore: true*/ dir, "app"))) {
+      await assertRealDirectory(path.join(/*turbopackIgnore: true*/ dir, "app"));
       await fs.rm(retired, { recursive: true, force: true });
     } else {
       await fs.rename(retired, path.join(/*turbopackIgnore: true*/ dir, "app"));
     }
+    changed = true;
   }
   // The staged set is only ever meaningful inside the one `writeAppFiles`
   // call that made it, so anything still here is a half-written folder a
   // crash left. Dropped after the decision above, never before it: in the
   // between-the-renames case it is exactly the half-written set that must NOT
   // become `app/`.
-  await fs.rm(path.join(dir, APP_STAGING_DIR), { recursive: true, force: true });
+  const staged = path.join(dir, APP_STAGING_DIR);
+  if (await directoryExists(staged)) {
+    await assertRealDirectory(staged);
+    await fs.rm(staged, { recursive: true, force: true });
+    changed = true;
+  }
+  if (changed) await syncDirectory(dir);
 }
 
 async function assertAppFolderIsNotAPage(dir: string): Promise<void> {

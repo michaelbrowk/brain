@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { APP_ENTRY_PATH, APP_STAGING_DIR } from "../apps/model";
 import { Store } from "./store";
+import { buildPortableArchive } from "../portable/model";
 
 /** THE WINDOW BETWEEN THE TWO RENAMES.
  *
@@ -51,6 +52,37 @@ async function crashBetweenRenames(dir: string) {
 }
 
 describe("a crash between the swap's two renames", () => {
+  it("recovers on startup before the first read or export, without another write", async () => {
+    const meta = await seedApp();
+    await store.writeAppState(meta.id, { a: 7 });
+    const dir = store.resolve(meta.id);
+    await crashBetweenRenames(dir);
+
+    const reopened = new Store(root);
+    await reopened.init();
+    await reopened.whenChildLinksBackfilled();
+
+    const entry = await reopened.readAppFile(meta.id, APP_ENTRY_PATH);
+    expect(entry.kind === "file" && Buffer.from(entry.data).toString("utf8")).toBe(ENTRY);
+    expect((await reopened.readAppFile(meta.id, "app/assets/card.png")).kind).toBe("file");
+    expect(await reopened.readAppState(meta.id)).toEqual({ a: 7 });
+    expect((await buildPortableArchive(reopened)).skippedApps).toEqual([]);
+    expect(await readdir(dir)).not.toContain(RETIRED);
+    expect(await readdir(dir)).not.toContain(APP_STAGING_DIR);
+  });
+
+  it("keeps the live set and removes stale retired files during startup", async () => {
+    const meta = await seedApp();
+    const dir = store.resolve(meta.id);
+    await mkdir(path.join(dir, RETIRED));
+    await writeFile(path.join(dir, RETIRED, "index.html"), "stale");
+    const reopened = new Store(root);
+    await reopened.init();
+    const entry = await reopened.readAppFile(meta.id, APP_ENTRY_PATH);
+    expect(entry.kind === "file" && Buffer.from(entry.data).toString("utf8")).toBe(ENTRY);
+    expect(await readdir(dir)).not.toContain(RETIRED);
+  });
+
   it("recovers the retired set on the next write", async () => {
     const meta = await seedApp();
     const dir = store.resolve(meta.id);

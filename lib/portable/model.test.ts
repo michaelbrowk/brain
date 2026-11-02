@@ -67,6 +67,37 @@ function repack(
 const EXPORTED_AT = new Date("2026-09-13T10:00:00.000Z");
 const TODAY = "2026-09-13";
 
+it("round-trips literal archive paths and code while remapping real links with suffixes", async () => {
+  const source = await temporaryStore();
+  const page = await source.createPage(null, "Literal paths");
+  const content = [
+    "Keep `./p000001.md` and ./p000001.md exactly.",
+    "",
+    "```md",
+    `[Example](/p/${page.id})`,
+    "./p000001.md",
+    "```",
+    "",
+    `[Real](/p/${page.id}#words)`,
+    `[Query](/p/${page.id}?view=one#part)`,
+    `[Escaped fragment](/p/${page.id}\\#words)`,
+    `[Escaped query](/p/${page.id}\\?view=one&amp;sort=two\\#part)`,
+    `[Entity suffix](/p/${page.id}&#63;view=one&num;part)`,
+    `[External](https://example.com/p/${page.id})`,
+  ].join("\n");
+  await source.writePage(page.id, content);
+  const archive = await buildPortableArchive(source);
+  const destination = await temporaryStore();
+  const result = await applyPortableBundle(destination, validatePortableArchive(archive.bytes).bundle);
+  const restored = await destination.readPage(result.rootIds[0]);
+  expect(restored.markdown).toBe(content
+    .replace(`[Real](/p/${page.id}#words)`, `[Real](/p/${restored.meta.id}#words)`)
+    .replace(`[Query](/p/${page.id}?view=one#part)`, `[Query](/p/${restored.meta.id}?view=one#part)`)
+    .replace(`[Escaped fragment](/p/${page.id}\\#words)`, `[Escaped fragment](/p/${restored.meta.id}\\#words)`)
+    .replace(`[Escaped query](/p/${page.id}\\?view=one&amp;sort=two\\#part)`, `[Escaped query](/p/${restored.meta.id}\\?view=one&amp;sort=two\\#part)`)
+    .replace(`[Entity suffix](/p/${page.id}&#63;view=one&num;part)`, `[Entity suffix](/p/${restored.meta.id}&#63;view=one&num;part)`));
+});
+
 function anchorFor(text: string, line: number) {
   const normalized = normalizeTaskText(text);
   return { text: normalized, hash: hashTaskText(normalized), ordinal: 0, line };

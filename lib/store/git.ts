@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { parsePage } from "./frontmatter";
+import { localAttachmentName } from "../attachments";
 
 /** Debounced git snapshot of the notes dir — every save becomes a commit, so
  *  the folder carries its own history/undo/backup. Saves remain independent
@@ -397,6 +398,59 @@ async function showRevisionPath(
 ): Promise<string> {
   const result = await runGit(root, ["show", `${sha}:${rel}`], [0, 128]);
   return result.code === 0 ? result.stdout : "";
+}
+
+/** Read only a regular attachment blob, as bytes, with a hard output budget.
+ * `git show`'s text decoder cannot restore binary files. Resolve the tree entry
+ * first so a historical symlink can never be installed as an attachment. */
+export async function showAttachmentAtRevision(
+  root: string,
+  sha: string,
+  name: string,
+  maxBytes: number,
+): Promise<Uint8Array | null> {
+  if (
+    !/^[0-9a-f]{7,40}$/i.test(sha) ||
+    localAttachmentName(`/_attachments-v2/${name}`) !== name ||
+    !Number.isSafeInteger(maxBytes) || maxBytes < 0
+  ) return null;
+  const rel = `_attachments/${name}`;
+  const tree = await runGit(root, ["ls-tree", "-l", sha, "--", rel], [0, 128]);
+  if (tree.code !== 0) return null;
+  const match = /^(100644|100755) blob ([0-9a-f]{40})\s+(\d+)\t([^\n]+)\n?$/.exec(tree.stdout);
+  if (!match || match[4] !== rel || Number(match[3]) > maxBytes) return null;
+  const expectedSize = Number(match[3]);
+  const args = ["cat-file", "blob", match[2]];
+  return new Promise((resolve, reject) => {
+    const child = spawn("git", ["-c", `safe.directory=${root}`, ...args], {
+      cwd: root,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let overflow = false;
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      size += chunk.byteLength;
+      if (size > maxBytes || size > expectedSize) {
+        overflow = true;
+        child.kill();
+      } else {
+        chunks.push(chunk);
+      }
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      if (stderr.length < MAX_STDERR_BYTES) stderr += chunk.toString();
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code !== 0 || overflow || size !== expectedSize) {
+        reject(new GitCommandError(args, code, overflow ? "attachment exceeds byte budget" : stderr));
+      } else {
+        resolve(new Uint8Array(Buffer.concat(chunks, size)));
+      }
+    });
+  });
 }
 
 /** File contents at a given commit. First try today's path. If the page moved,

@@ -17,6 +17,7 @@ import {
 import type { Store, TreeNode } from "@/lib/store";
 import { type TaskRecord, taskRecordSchema } from "@/lib/tasks/model";
 import { createPortableArchive, readPortableArchive } from "./archive";
+import { rewriteMarkdownDestinations } from "./markdown-links";
 
 export const PORTABLE_FORMAT = "brain-portable" as const;
 /** Version 2 is the first to carry tasks; version 3 the first to carry an app
@@ -214,16 +215,6 @@ function findNode(nodes: TreeNode[], id: string): TreeNode | null {
   return null;
 }
 
-function replaceKnown(value: string, replacements: Map<string, string>): string {
-  let result = value;
-  for (const [source, target] of [...replacements].sort(
-    ([left], [right]) => right.length - left.length,
-  )) {
-    result = result.replaceAll(source, target);
-  }
-  return result;
-}
-
 /** The tasks one export carries, each with the body its file holds.
  *
  *  A whole notebook export carries every record the index has, with nothing
@@ -334,7 +325,7 @@ export async function buildPortableArchive(
   for (const attachment of attachmentEntries) {
     const name = attachment.archivePath.slice("assets/".length);
     for (const url of attachmentUrls.get(name) ?? []) {
-      assetReplacements.set(url, `../${attachment.archivePath}`);
+      assetReplacements.set(url.split(/[?#]/, 1)[0], `../${attachment.archivePath}`);
     }
   }
   const pageReplacements = new Map<string, string>();
@@ -451,9 +442,9 @@ export async function buildPortableArchive(
     ...pages.map((page) => ({
       path: pagePaths.get(page.meta.id)!,
       data: new TextEncoder().encode(
-        replaceKnown(
-          replaceKnown(page.markdown, assetReplacements),
-          pageReplacements,
+        rewriteMarkdownDestinations(
+          page.markdown,
+          new Map([...assetReplacements, ...pageReplacements]),
         ).trimEnd() + "\n",
       ),
     })),
@@ -769,9 +760,9 @@ export async function applyPortableBundle(
     );
     for (const page of ordered) {
       const id = created.get(page.sourceId)!;
-      const markdown = replaceKnown(
-        replaceKnown(bundle.markdown.get(page.markdownPath)!, assetLinks),
-        pageLinks,
+      const markdown = rewriteMarkdownDestinations(
+        bundle.markdown.get(page.markdownPath)!,
+        new Map([...assetLinks, ...pageLinks]),
       );
       await store.writePage(id, markdown, undefined, "me", options.src);
       await store.updateMeta(id, {

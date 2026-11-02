@@ -43,6 +43,10 @@ write implies read, and mail never implies write.
 
 Rules no single row states.
 
+- **Tool arguments contain at most 10,000 array elements and object members
+  combined.** The SDK checks this before schema validation, including invalid
+  input. A small byte payload with thousands of invalid items is still refused
+  before any store operation. Split larger structured operations into batches.
 - **The largest request this endpoint accepts is 16 MiB.** The whole body, so a
   batch is measured whole and an app's base64 assets count towards it at their
   encoded length. Over it the answer is HTTP `413` with

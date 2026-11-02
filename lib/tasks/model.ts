@@ -92,7 +92,7 @@ const instantField = z.preprocess(fromYamlInstant, instantSchema);
  *  is one owner setting, so a day and a clock in a file mean the same thing on
  *  every device the owner uses. */
 const timeSchema = z
-  .string({ invalid_type_error: 'write it as "HH:MM"' })
+  .string({ error: 'write it as "HH:MM"' })
   .regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'write it as "HH:MM"');
 
 const pad2 = (value: number): string => String(value).padStart(2, "0");

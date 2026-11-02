@@ -10,7 +10,7 @@ every one of them. `docs/deploy-puller.md` builds on this layout, and so does
 `pnpm deploy`.
 
 It is not the first install. That one is the Docker Compose install in the
-README — two containers against a folder of Markdown — and nothing in this
+README — three containers against a folder of Markdown — and nothing in this
 document is needed for it. Come here when you want systemd instead of
 containers, and go back there for the container upgrade path.
 
@@ -120,11 +120,25 @@ runs as the unprivileged `node` user. `brain-entrypoint.sh web` starts the
 Next standalone on `0.0.0.0:3020`; `brain-entrypoint.sh mail` creates
 `/run/brain-mail/brain-mail.sock` and hands it to the Mail service as fd 3
 (`LISTEN_FDS=1`, `LISTEN_FDNAMES=brain-mail`), which is the only way the
-service will listen. `ops/docker/docker-compose.smoke.yml` runs both as two
-services of one image sharing the socket volume; it is the release smoke, not
-the onboarding compose file (B). Inside the image there is no per-message
-MIME worker yet: Mail reports `mail_mime_worker_unavailable` for bodies that
-need parsing until B designs supervision. A systemd install stays on systemd.
+service will listen. Before opening that socket, the mail bootstrap creates
+one 32-byte wrapping key on a fresh credentials volume, with mode `0600` and
+an atomic no-overwrite publication. It never replaces an existing key. If a
+crash leaves the publication's staging hardlink, the next startup removes
+only verified staging aliases of that same inode and preserves the key bytes.
+Unknown hardlinks remain an error. If state exists but the key is missing or
+unsafe, startup stops: restore the original credentials volume instead of
+inventing a new key that cannot decrypt the accounts.
+
+Both compose files add a third `mail-mime` service with no network, read-only
+root, no capabilities and no access to notes, mail state or credentials. Its
+only volume is the MIME socket. A supervisor hands each accepted socket to a
+fresh parser process with a 128 MiB JS heap and a 16-second lifetime; at most
+two run together. The entire pool has a 384 MiB memory limit, 0.4 CPU and 32
+process/thread slots. A worker that exceeds its deadline is killed; a later
+message gets a fresh worker. `ops/docker/docker-compose.smoke.yml` starts
+empty mail volumes and verifies credential encryption plus two real body and
+attachment parses through this socket, without contacting a mail provider.
+A systemd install stays on systemd.
 
 ## One-command install
 
@@ -168,7 +182,9 @@ down, removes `/etc/caddy/Caddyfile` if it is the one the script wrote (its
 first line, `# managed by Brain install.sh`, says so), and
 deletes every entry of `/opt/brain` except the notes directory that
 `NOTES_ROOT` in `.env` names, the directories above it, and `/opt/brain/notes`
-in any case:
+in any case. It resolves real paths before stopping anything. An unresolved
+notes path, or a notes directory equal to or containing the installation,
+stops the uninstall without removing data or stopping containers:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/michaelbrowk/brain/main/install.sh | sudo bash -s -- --uninstall

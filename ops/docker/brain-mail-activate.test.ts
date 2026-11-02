@@ -34,7 +34,9 @@ describe("mail socket handoff", () => {
         "process.exit(ok ? 0 : 3);",
       ].join("\n"),
     );
-    const result = await execFileAsync(process.execPath, [shim, socketPath, fake]);
+    const result = await execFileAsync(process.execPath, [shim, socketPath, fake], {
+      env: { ...process.env, STATE_DIRECTORY: path.join(root, "state"), CREDENTIALS_DIRECTORY: path.join(root, "credentials") },
+    });
     expect(result.stdout).toBe("handoff ok\n");
     expect((await stat(socketPath)).isSocket()).toBe(true);
     expect((await stat(socketPath)).mode & 0o777).toBe(0o660);
@@ -47,7 +49,10 @@ describe("mail socket handoff", () => {
     const fake = path.join(root, "service", "main.js");
     await writeFile(fake, 'process.on("SIGTERM", () => process.exit(143));\nprocess.stdout.write("waiting\\n");\nsetInterval(() => {}, 1000);\n');
     const { spawn } = await import("node:child_process");
-    const child = spawn(process.execPath, [shim, path.join(root, "brain-mail.sock"), fake], { stdio: ["ignore", "pipe", "inherit"] });
+    const child = spawn(process.execPath, [shim, path.join(root, "brain-mail.sock"), fake], {
+      stdio: ["ignore", "pipe", "inherit"],
+      env: { ...process.env, STATE_DIRECTORY: path.join(root, "state"), CREDENTIALS_DIRECTORY: path.join(root, "credentials") },
+    });
     await new Promise<void>((resolve) => child.stdout.once("data", () => resolve()));
     child.kill("SIGTERM");
     const code = await new Promise<number | null>((resolve) => child.once("exit", (value) => resolve(value)));

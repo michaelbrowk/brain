@@ -10,10 +10,10 @@ RUN apt-get update \
   && apt-get install --yes --no-install-recommends ca-certificates git ripgrep \
   && rm -rf /var/lib/apt/lists/* \
   && install -d -o node -g node -m 0700 /opt/brain/notes /var/lib/brain /var/lib/brain-mail /run/credentials/brain-mail \
-  && install -d -o node -g node -m 0710 /run/brain-mail \
+  && install -d -o node -g node -m 0710 /run/brain-mail /run/brain-mail-mime \
   && install -d -o root -g root -m 0755 /opt/brain/bin /opt/brain/current
 COPY --chown=root:root ${BRAIN_STAGE}/ /opt/brain/current/
-COPY --chown=root:root ops/docker/brain-entrypoint.sh ops/docker/brain-mail-activate.mjs ops/docker/brain-hash-password.mjs /opt/brain/bin/
+COPY --chown=root:root ops/docker/brain-entrypoint.sh ops/docker/brain-mail-activate.mjs ops/docker/brain-mail-key.mjs ops/docker/brain-mail-mime-activate.mjs ops/docker/brain-hash-password.mjs /opt/brain/bin/
 RUN chmod 0755 /opt/brain/bin/brain-entrypoint.sh \
   && test "$(node --version)" = "v22.23.1" \
   && rg --version >/dev/null \

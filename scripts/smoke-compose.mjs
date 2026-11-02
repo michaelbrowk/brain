@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Boots the compose sample against one local image.
 import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import bcrypt from "bcryptjs";
@@ -51,10 +52,7 @@ try {
     throw new Error(`hash-password on empty stdin exited ${empty.code} with ${JSON.stringify(empty.stderr)}, expected 2 and its one-line reason`);
   }
 
-  // --entrypoint bypasses brain-entrypoint.sh, whose argument dispatch would
-  // reject `sh` with exit 64. Both seeds run before the services boot.
-  await compose("run", "--rm", "--no-deps", "--entrypoint", "/bin/sh", "mail", "-c",
-    "head -c 32 /dev/urandom > /run/credentials/brain-mail/account-wrapping-key && chmod 0600 /run/credentials/brain-mail/account-wrapping-key");
+  // Do not seed mail credentials: that would hide a broken fresh install.
   // Deep readiness requires the notes root to be a Git worktree with a
   // verifiable HEAD; seed the volume the way scripts/smoke-standalone.mjs does.
   await compose("run", "--rm", "--no-deps", "--entrypoint", "/bin/sh", "web", "-c",
@@ -110,6 +108,11 @@ try {
   if (mailHealth.status !== "ok" || mailHealth.build?.commit !== expectedCommit) {
     throw new Error(`mail health is ${JSON.stringify(mailHealth)}`);
   }
+
+  const prerequisites = execFileAsync("docker", ["compose", "-p", project, "-f", composeFile, "exec", "-T", "mail", "node", "--input-type=module"], { env, maxBuffer: 1024 * 1024 });
+  prerequisites.child.stdin.end(await readFile(path.join(process.cwd(), "ops/docker/mail-prerequisites-smoke.mjs")));
+  const { stdout: mailEvidence } = await prerequisites;
+  if (!mailEvidence.includes("compose mail credentials, body and attachment smoke passed")) throw new Error("mail prerequisite smoke did not finish");
 
   await compose("stop", "-t", "20", "web");
   const { stdout: webId } = await compose("ps", "-a", "-q", "web");

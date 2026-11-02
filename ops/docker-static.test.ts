@@ -29,12 +29,25 @@ describe("container image", () => {
     expect(entrypoint).toContain("exec node /opt/brain/current/server.js");
     expect(entrypoint).toContain("exec node /opt/brain/bin/brain-mail-activate.mjs");
   });
-  it("runs web and mail as two services of one image sharing the socket volume", () => {
-    expect(compose.match(/image: \$\{BRAIN_SMOKE_IMAGE:\?set BRAIN_SMOKE_IMAGE\}/g)).toHaveLength(2);
+  it("runs web, mail and an isolated MIME pool from one image", () => {
+    expect(compose.match(/image: \$\{BRAIN_SMOKE_IMAGE:\?set BRAIN_SMOKE_IMAGE\}/g)).toHaveLength(3);
     expect(compose).toContain('command: ["web"]');
     expect(compose).toContain('command: ["mail"]');
     expect(compose.match(/- mail-socket:\/run\/brain-mail/g)).toHaveLength(2);
-    expect(compose.match(/init: true/g)).toHaveLength(2);
+    expect(compose.match(/init: true/g)).toHaveLength(3);
     expect(compose).not.toMatch(/restart:/);
+    for (const source of [compose, readFileSync(path.join(root, "ops/docker/docker-compose.yml"), "utf8")]) {
+      const mime = source.split("  mail-mime:\n")[1]!.split("\nvolumes:")[0]!;
+      expect(mime).toContain('command: ["mail-mime"]');
+      expect(mime).toContain("network_mode: none");
+      expect(mime).toContain("read_only: true");
+      expect(mime).toContain("cap_drop: [ALL]");
+      expect(mime).toContain('security_opt: ["no-new-privileges:true"]');
+      expect(mime).toContain("mem_limit: 384m");
+      expect(mime).toContain("pids_limit: 32");
+      expect(mime.match(/^      - /gm)).toHaveLength(1);
+      expect(mime).toContain("- mail-mime-socket:/run/brain-mail-mime");
+      expect(source.match(/- mail-mime-socket:\/run\/brain-mail-mime/g)).toHaveLength(2);
+    }
   });
 });

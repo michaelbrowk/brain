@@ -45,6 +45,9 @@ import {
   type Version,
 } from "./git";
 import { emitStore } from "./events";
+import { taskRecordFields } from "../tasks/model";
+import { taskBodySchema, taskCategorySchema, taskCategoryKey, normalizeTaskCategoryName, type TaskCategory } from "../tasks/details";
+import { readTaskCatalog, writeTaskCatalog } from "./task-categories";
 import {
   attachmentMimeTypeForName,
   canonicalAttachmentMimeType,
@@ -7958,9 +7961,88 @@ export class Store {
     return { ...view, updatedByName: meta.updatedByName };
   }
 
-  /** The body a person wrote under a task's frontmatter, or the empty string.
-   *  Nothing in the app writes one, so this exists for the portable export,
-   *  which must not drop what it cannot show. */
+  /** The record and notes as one snapshot. The body hash protects a dialog
+   *  save from overwriting notes edited by another client. */
+  async readTaskDetails(id: string): Promise<{task: TaskView; body: string; bodyRev: string}> {
+    assertTaskId(id);
+    return this.mutate(async () => {
+      const task = this.getTask(id);
+      if (!task) throw new NotFoundError(id);
+      const body = await readTaskBody(this.root, id);
+      return {task, body, bodyRev: hashRev(body)};
+    });
+  }
+
+  /** Catalog entries outlive their tasks; legacy free-form names remain visible. */
+  async listTaskCategories(): Promise<TaskCategory[]> {
+    const categories = await readTaskCatalog(this.root);
+    const seen = new Set(categories.map(category => taskCategoryKey(category.name)));
+    for (const task of this.taskIndex.all()) {
+      if (!task.category || seen.has(taskCategoryKey(task.category))) continue;
+      categories.push({name: task.category});
+      seen.add(taskCategoryKey(task.category));
+    }
+    return categories;
+  }
+
+  async createTaskCategory(name: string, icon?: string, src?: string): Promise<TaskCategory> {
+    return this.mutate(async () => {
+      const parsed = taskCategorySchema.safeParse({name: normalizeTaskCategoryName(name), ...(icon === undefined ? {} : {icon})});
+      if (!parsed.success) throw new TaskValidationError("invalid category name or icon");
+      const current = await this.listTaskCategories();
+      const existing = current.find(category => taskCategoryKey(category.name) === taskCategoryKey(parsed.data.name));
+      const category = existing ?? parsed.data;
+      const catalog = await readTaskCatalog(this.root);
+      if (!catalog.some(entry => taskCategoryKey(entry.name) === taskCategoryKey(category.name))) {
+        await writeTaskCatalog(this.root, existing ? current : [...current, category]);
+        scheduleCommit(this.root);
+        emitStore({type: "task", id: "categories", src});
+      }
+      return category;
+    });
+  }
+
+  async updateTaskCategory(name: string, icon: string | null, src?: string): Promise<TaskCategory> {
+    return this.mutate(async () => {
+      const existing = (await this.listTaskCategories()).find(category => taskCategoryKey(category.name) === taskCategoryKey(name));
+      if (!existing) throw new TaskValidationError("category not found");
+      const parsed = taskCategorySchema.safeParse({name: existing.name, ...(icon === null ? {} : {icon})});
+      if (!parsed.success) throw new TaskValidationError("invalid category icon");
+      const catalog = await this.listTaskCategories();
+      const index = catalog.findIndex(entry => taskCategoryKey(entry.name) === taskCategoryKey(name));
+      catalog[index] = parsed.data;
+      await writeTaskCatalog(this.root, catalog);
+      scheduleCommit(this.root);
+      emitStore({type: "task", id: "categories", src});
+      return parsed.data;
+    });
+  }
+
+  async importTaskCategories(categories: TaskCategory[], src?: string): Promise<void> {
+    return this.mutate(async () => {
+      const catalog = await readTaskCatalog(this.root);
+      const current = await this.listTaskCategories();
+      const persisted = new Set(catalog.map(category => taskCategoryKey(category.name)));
+      const seen = new Set(current.map(category => taskCategoryKey(category.name)));
+      for (const raw of categories) {
+        const parsed = taskCategorySchema.safeParse(raw);
+        if (!parsed.success) throw new TaskValidationError("invalid imported category");
+        if (seen.has(taskCategoryKey(parsed.data.name))) {
+          if (!persisted.has(taskCategoryKey(parsed.data.name))) {
+            const index = current.findIndex(category => taskCategoryKey(category.name) === taskCategoryKey(parsed.data.name));
+            current[index] = {...parsed.data, name: current[index].name};
+          }
+          continue;
+        }
+        current.push(parsed.data);
+        seen.add(taskCategoryKey(parsed.data.name));
+      }
+      await writeTaskCatalog(this.root, current);
+      scheduleCommit(this.root);
+      emitStore({type: "task", id: "categories", src});
+    });
+  }
+
   async readTaskBody(id: string): Promise<string> {
     assertTaskId(id);
     return readTaskBody(this.root, id);
@@ -7992,6 +8074,7 @@ export class Store {
     const record = parseTask(raw);
     return this.mutate(async () => {
       this.assertLinkablePageUnlocked(record.page);
+      for (const pageId of record.relatedPageIds ?? []) this.assertLinkablePageUnlocked(pageId);
       const taken =
         this.taskIndex.get(record.id) !== undefined ||
         (await taskFileExists(this.root, record.id));
@@ -8158,6 +8241,9 @@ export class Store {
     return this.mutate(async () => {
       assertRepeatUnlinked(input.repeat, input.page);
       this.assertLinkablePageUnlocked(input.page);
+      const parsedRefs = parseTaskRefs(input.relatedPageIds);
+      for (const pageId of parsedRefs ?? []) this.assertLinkablePageUnlocked(pageId);
+      if (input.body !== undefined) assertTaskBody(input.body);
       const now = new Date().toISOString();
       const record = parseTask({
         id: nanoid(),
@@ -8167,6 +8253,7 @@ export class Store {
         ...(input.evening !== undefined ? { evening: input.evening } : {}),
         ...(input.deadline !== undefined ? { deadline: input.deadline } : {}),
         ...(input.category !== undefined ? { category: input.category } : {}),
+        ...(parsedRefs !== undefined ? { relatedPageIds: parsedRefs } : {}),
         ...(input.page !== undefined ? { page: input.page } : {}),
         ...(input.anchor !== undefined ? { anchor: input.anchor } : {}),
         ...(input.repeat !== undefined ? { repeat: input.repeat } : {}),
@@ -8176,7 +8263,7 @@ export class Store {
         created: now,
         updated: now,
       });
-      await this.writeTaskUnlocked(record, input.src);
+      await this.writeTaskUnlocked(record, input.src, input.body);
       return this.attributed(this.taskIndex.view(record.id) as TaskView);
     });
   }
@@ -8192,6 +8279,22 @@ export class Store {
       let current = this.taskIndex.get(id);
       if (!current) throw new NotFoundError(id);
       assertTodayUsage(current, patch);
+      if (patch.bodyRev !== undefined && patch.body === undefined) {
+        throw new TaskValidationError("bodyRev requires body");
+      }
+      if (patch.body !== undefined) {
+        assertTaskBody(patch.body);
+        if (typeof patch.bodyRev !== "string") throw new TaskValidationError("bodyRev is required when editing notes");
+        const body = await readTaskBody(this.root, id);
+        if (hashRev(body) !== patch.bodyRev) {
+          throw Object.assign(new Error("Notes changed elsewhere. Reload the task and try again."), {name: "TaskBodyConflictError"});
+        }
+      }
+      if (patch.relatedPageIds !== undefined && patch.relatedPageIds !== null) {
+        for (const pageId of parseTaskRefs(patch.relatedPageIds) ?? []) {
+          if (!current.relatedPageIds?.includes(pageId)) this.assertLinkablePageUnlocked(pageId);
+        }
+      }
       // A repeating task is never linked and never detached: the schema
       // refuses `repeat` beside `page`, so its completion can only be the
       // rule's, and the branch below cannot compete with the note's.
@@ -8225,7 +8328,7 @@ export class Store {
           return this.attributed(this.taskIndex.view(id) as TaskView);
         }
       }
-      await this.writeTaskUnlocked(applyTaskPatch(current, patch), patch.src);
+      await this.writeTaskUnlocked(applyTaskPatch(current, patch), patch.src, patch.body);
       return this.attributed(this.taskIndex.view(id) as TaskView);
     });
   }
@@ -8635,6 +8738,8 @@ function assertOnlyCompletion(patch: UpdateTaskPatch, subject: string): void {
     "evening",
     "deadline",
     "category",
+    "relatedPageIds",
+    "body",
     "repeat",
   ];
   for (const key of others) {
@@ -8703,6 +8808,15 @@ function mergeConcurrentTicks(
     canonicalPageMarkdown(markdown),
     parsed.markdown,
   );
+}
+
+function assertTaskBody(body: unknown): asserts body is string {
+  if (!taskBodySchema.safeParse(body).success) throw new TaskValidationError("notes must be text up to 100000 characters");
+}
+function parseTaskRefs(refs: unknown): string[] | undefined {
+  const parsed = taskRecordFields.shape.relatedPageIds.safeParse(refs);
+  if (!parsed.success) throw new TaskValidationError("relatedPageIds must be up to 64 unique page ids");
+  return parsed.data;
 }
 
 function parseTask(raw: unknown): TaskRecord {
@@ -8784,6 +8898,7 @@ function applyTaskPatch(
     delete next.remindedAt;
   }
   assignOrClear(next, "category", patch.category);
+  assignOrClear(next, "relatedPageIds", patch.relatedPageIds);
   assignOrClear(next, "repeat", patch.repeat);
   // `log` STAYS when the rule goes. Stopping a repeat leaves the instance as
   // an ordinary task, and its completions are the Logbook's: up to thirty

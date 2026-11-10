@@ -409,3 +409,10 @@ describe("the zone the client offers with its list request", () => {
     expect(await readTimeZone(zoneDir)).toBeNull();
   });
 });
+
+describe("task create context", () => {
+  it("forwards the task body and page ids without treating them as a source checkbox", async () => {
+    expect((await post({title: "Review", body: "Notes", relatedPageIds: ["page-context"]})).status).toBe(201);
+    expect(mocks.createTask).toHaveBeenCalledWith({title: "Review", body: "Notes", relatedPageIds: ["page-context"]});
+  });
+});

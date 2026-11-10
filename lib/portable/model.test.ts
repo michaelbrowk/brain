@@ -292,11 +292,11 @@ describe("Brain portable packages", () => {
     ]);
   });
 
-  it("stamps version 3 on a new export", async () => {
+  it("stamps version 4 on a new export", async () => {
     const source = await temporaryStore();
     await source.createPage(null, "Only Page");
     const exported = await buildPortableArchive(source);
-    expect(exported.manifest.version).toBe(3);
+    expect(exported.manifest.version).toBe(4);
   });
 
   it("imports a version 1 archive with no tasks key exactly as it does today", async () => {
@@ -321,12 +321,12 @@ describe("Brain portable packages", () => {
     );
   });
 
-  it("refuses a version 4 archive", async () => {
+  it("refuses a version 5 archive", async () => {
     const source = await temporaryStore();
     await source.createPage(null, "From The Future");
     const exported = await buildPortableArchive(source);
     const newer = repack(exported.bytes, (manifest) => {
-      manifest.version = 4;
+      manifest.version = 5;
     });
     expect(() => validatePortableArchive(newer)).toThrow(/manifest is invalid/);
   });

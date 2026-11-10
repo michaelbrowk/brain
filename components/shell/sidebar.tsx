@@ -141,7 +141,6 @@ export function ShellSidebar({
   onNewMessage,
   onNavigateNotification,
   notificationRefreshToken = 0,
-  tasksOpenTodayCount,
   onSelect,
   onToggleExpand,
   onDelete,
@@ -317,7 +316,6 @@ export function ShellSidebar({
               label="Tasks"
               selected={tasksOpen}
               reduce={reduce}
-              count={tasksOpenTodayCount}
               onClick={onOpenTasks}
             />
           )}

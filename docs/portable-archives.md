@@ -29,10 +29,10 @@ assets/
 
 ## Format version
 
-The manifest carries a `version`. Version 2 is the first to carry tasks, and
-an archive exported before it, version 1, imports unchanged. A version 1
-manifest never has a `tasks` key, and a notebook with no tasks exports a
-version 2 manifest that has none either.
+The manifest carries a `version`. Version 2 added tasks, version 3 app files,
+and version 4 task category metadata and context-page links. New exports use
+version 4; versions 1–3 remain readable. A version 1 manifest never has a
+`tasks` key, and a notebook with no tasks omits that key.
 
 ## Tasks
 
@@ -55,9 +55,14 @@ archive is the notebook and not the screen.
 - A subtree export carries the tasks of the pages it carries. A whole notebook
   export carries every task the notebook has, including a task on a trashed
   page and a completion older than the 30 day Logbook window.
-- A body written by hand under a task's frontmatter is carried in `tasks/` and
+- Task notes under the frontmatter are carried in `tasks/` and
   restored byte for byte, a leading `---` fence and a missing trailing newline
   included. A body that is only whitespace is treated as no body.
+- Context page links are remapped to newly imported page ids; links outside
+  the exported scope are omitted rather than pointing at another notebook.
+- A full export includes empty task categories and their emoji. A subtree
+  includes only categories used by its tasks. Import merges by normalized
+  name and preserves category metadata already set in the destination.
 - Two records in one archive may hold the same id. The second one imported
   takes a fresh id, so both land and neither is overwritten.
 

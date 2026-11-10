@@ -83,6 +83,7 @@ async function mount(
   apiFetchMock.mockImplementation(async (input, init) => {
     const url = String(input);
     if (url.startsWith("/api/tasks?")) return response({ tasks });
+    if (url === "/api/task-categories") return response({ categories: [] });
     if (url.startsWith("/api/tasks/")) {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       patches.push({ url, body });
@@ -103,18 +104,20 @@ async function mount(
     );
   });
   await settle();
+  const completed = host.querySelector<HTMLButtonElement>(".tasks-completed-toggle");
+  if (completed) await act(async () => completed.click());
 }
 
 /** The box of ONE row, by its title. Not "the first box on screen": every
  *  capturable list draws a ghost row above the tasks and that row has a box
  *  of its own. */
 function boxFor(title: string): HTMLButtonElement {
-  const node = [...host.querySelectorAll<HTMLElement>(".brain-task-title")].find(
+  const node = [...host.querySelectorAll<HTMLElement>(".tasks-compact-title")].find(
     (candidate) => candidate.textContent === title,
   );
   if (!node) throw new Error(`no row titled ${title}`);
   const box = node
-    .closest(".brain-task-row-item")
+    .closest(".tasks-compact-item")
     ?.querySelector<HTMLButtonElement>(".brain-task-box");
   if (!box) throw new Error(`no box on the row titled ${title}`);
   return box;
@@ -323,8 +326,8 @@ describe("one field per request, where the store says so", () => {
 
     // `t` moves the selected row to Today; the row has to be selected first,
     // which a press does.
-    const row = boxFor("water").closest(".brain-task-row") as HTMLElement;
-    await act(async () => row.click());
+    const row = boxFor("water").closest(".tasks-compact-row")!.querySelector(".tasks-compact-open") as HTMLElement;
+    await act(async () => row.focus());
     await act(async () => {
       window.dispatchEvent(new KeyboardEvent("keydown", { key: "s" }));
     });
@@ -344,8 +347,8 @@ describe("one field per request, where the store says so", () => {
   it("sends no expectedWhen on a reschedule, even of a repeating task", async () => {
     await mount([task("water", { when: TODAY, repeat: { freq: "daily" } })]);
 
-    const row = boxFor("water").closest(".brain-task-row") as HTMLElement;
-    await act(async () => row.click());
+    const row = boxFor("water").closest(".tasks-compact-row")!.querySelector(".tasks-compact-open") as HTMLElement;
+    await act(async () => row.focus());
     await act(async () => {
       window.dispatchEvent(new KeyboardEvent("keydown", { key: "s" }));
     });

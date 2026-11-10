@@ -57,9 +57,16 @@ describe("surfaceTakesKeys", () => {
  *  name for a call to it. What counts here is a call to `addEventListener`
  *  whose first argument is the literal `keydown`, `keyup` or `keypress`, on
  *  any target, and a call to the helper. */
-const ASKS: Readonly<Record<string, { listeners: number; asks: string }>> = {
+const ASKS: Readonly<Record<string, { listeners: number; asks: string; observers?: { count: number; why: string } }>> = {
   "components/mail-surface.tsx": { listeners: 1, asks: "surfaceTakesKeys" },
-  "components/tasks-surface.tsx": { listeners: 2, asks: "surfaceTakesKeys" },
+  "components/tasks-surface.tsx": {
+    listeners: 2,
+    asks: "surfaceTakesKeys",
+    observers: {
+      count: 1,
+      why: "The capture listener only remembers in a WeakSet that the key began inside an open layer. It never consumes a key or changes UI/data. The bubble listener performs all actions and asks surfaceTakesKeys before each one.",
+    },
+  },
   "components/tasks-row.tsx": { listeners: 1, asks: "surfaceTakesKeys" },
   "components/editor/slash-menu.tsx": { listeners: 1, asks: "caretMenuTakesKey" },
   "components/editor/wikilink-menu.tsx": { listeners: 1, asks: "caretMenuTakesKey" },
@@ -212,9 +219,9 @@ describe("key listeners bound by hand", () => {
     );
   });
 
-  it.each(Object.entries(ASKS))("%s asks once for every listener it binds", (file, entry) => {
+  it.each(Object.entries(ASKS))("%s asks once for every listener that acts on keys", (file, entry) => {
     expect(counted.get(file)?.asks.get(entry.asks) ?? 0).toBeGreaterThanOrEqual(
-      entry.listeners,
+      entry.listeners - (entry.observers?.count ?? 0),
     );
   });
 });

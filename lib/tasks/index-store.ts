@@ -194,10 +194,8 @@ function skip(name: string, reason: string): void {
   console.warn(`[brain/tasks] skipping ${TASKS_DIR}/${name}: ${reason}`);
 }
 
-/** The body after a record's frontmatter, or the empty string when the file
- *  has none and when there is no file yet. There is no task body in v1: it has
- *  no writer in the app, so the only one a file can hold is a person's own,
- *  and this is how the portable export carries it out. */
+/** The task notes after frontmatter, or empty when absent. Both the dialog
+ *  and portable export read these same bytes; there is no second notes field. */
 export async function readTaskBody(root: string, id: string): Promise<string> {
   const file = taskFilePath(root, id);
   try {
@@ -272,6 +270,7 @@ export function serializeTask(task: TaskRecord, body: string): string {
   if (task.evening !== undefined) ordered.evening = task.evening;
   if (task.deadline !== undefined) ordered.deadline = task.deadline;
   if (task.category !== undefined) ordered.category = task.category;
+  if (task.relatedPageIds?.length) ordered.relatedPageIds = task.relatedPageIds;
   if (task.page !== undefined) ordered.page = task.page;
   if (task.anchor !== undefined) ordered.anchor = task.anchor;
   if (task.detachedAt !== undefined) ordered.detachedAt = task.detachedAt;

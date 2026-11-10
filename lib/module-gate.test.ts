@@ -37,6 +37,15 @@ describe("the module API gate", () => {
     for (const url of urls) expect(moduleOfApiPath(url), url).toBe("tasks");
   });
 
+  it("gates the task category catalog without reserving a task id", async () => {
+    const root = path.join(import.meta.dirname, "..", "app", "api", "task-categories");
+    expect(await routeUrls(root, "/api/task-categories")).toEqual(["/api/task-categories"]);
+    expect(moduleOfApiPath("/api/task-categories")).toBe("tasks");
+    // This valid historical task id still resolves through [id], not a catalog route.
+    expect(moduleOfApiPath("/api/tasks/categories")).toBe("tasks");
+    await expect(fs.access(path.join(root, "..", "tasks", "categories", "route.ts"))).rejects.toMatchObject({code: "ENOENT"});
+  });
+
   it("claims every route file under /api/mail", async () => {
     const root = path.join(import.meta.dirname, "..", "app", "api", "mail");
     const urls = await routeUrls(root, "/api/mail");

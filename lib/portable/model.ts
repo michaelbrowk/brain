@@ -16,19 +16,20 @@ import {
 } from "@/lib/collections/model";
 import type { Store, TreeNode } from "@/lib/store";
 import { type TaskRecord, taskRecordSchema } from "@/lib/tasks/model";
+import { taskCategorySchema, taskCategoryKey } from "@/lib/tasks/details";
 import { createPortableArchive, readPortableArchive } from "./archive";
 import { rewriteMarkdownDestinations } from "./markdown-links";
 
 export const PORTABLE_FORMAT = "brain-portable" as const;
-/** Version 2 is the first to carry tasks; version 3 the first to carry an app
- *  page's own files. Every version is read. A 1 or a 2 imports exactly as it
+/** Version 2 carries tasks, version 3 app files, and version 4 task category
+ *  metadata and independent context-page links. Every prior version is read. A 1 or a 2 imports exactly as it
  *  did before its bump, because refusing the exports people already hold
  *  would cost them their data and buy nothing. The other direction does not
  *  hold and cannot: both schemas here are strict, so a Brain older than this
- *  release refuses a version 3 archive rather than dropping the key it does
+ *  release refuses a newer archive rather than dropping the key it does
  *  not know. That is the trade 0.10.0 made for tasks, in the same words. */
-export const PORTABLE_VERSION = 3 as const;
-const portableVersionSchema = z.union([z.literal(1), z.literal(2), z.literal(3)]);
+export const PORTABLE_VERSION = 4 as const;
+const portableVersionSchema = z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]);
 const MAX_PORTABLE_PAGES = 5_000;
 const MAX_PAGE_MARKDOWN_BYTES = 10 * 1024 * 1024;
 
@@ -160,6 +161,7 @@ export const portableManifestSchema = z
     pages: z.array(portablePageSchema).min(1).max(MAX_PORTABLE_PAGES),
     attachments: z.array(portableAttachmentSchema).max(MAX_PORTABLE_PAGES * 4),
     tasks: z.array(portableTaskSchema).max(MAX_PORTABLE_PAGES * 4).optional(),
+    taskCategories: z.array(taskCategorySchema).max(2_000).optional(),
   })
   .strict();
 
@@ -416,6 +418,8 @@ export async function buildPortableArchive(
   });
   const exportedAt = options.now ?? new Date();
   const tasks = await exportedTasks(store, options.rootId, nodeIds);
+  const usedCategories = new Set(tasks.entries.map(task => task.record.category).filter((name): name is string => !!name).map(taskCategoryKey));
+  const taskCategories = (await store.listTaskCategories()).filter(category => !options.rootId || usedCategories.has(taskCategoryKey(category.name)));
   const manifest = portableManifestSchema.parse({
     format: PORTABLE_FORMAT,
     version: PORTABLE_VERSION,
@@ -433,6 +437,7 @@ export async function buildPortableArchive(
     // A notebook with no tasks writes a version 2 manifest with no `tasks`
     // key, which is byte for byte what a version 1 manifest carried.
     ...(tasks.entries.length > 0 ? { tasks: tasks.entries } : {}),
+    ...(taskCategories.length > 0 ? {taskCategories} : {}),
   });
   const entries = [
     {
@@ -514,6 +519,9 @@ export function validatePortableArchive(
   }
   if (manifest.version === 1 && manifest.tasks) {
     throw new Error("portable manifest is version 1 and cannot carry tasks");
+  }
+  if (manifest.version < 4 && (manifest.taskCategories !== undefined || manifest.tasks?.some(task => task.record.relatedPageIds !== undefined))) {
+    throw new Error("portable manifest before version 4 cannot carry task categories or context page links");
   }
   if (manifest.version < 3 && manifest.pages.some((page) => page.app)) {
     throw new Error("portable manifest is older than version 3 and cannot carry app files");
@@ -839,6 +847,11 @@ export async function applyPortableBundle(
     // land in one git commit together.
     for (const task of bundle.manifest.tasks ?? []) {
       const record: TaskRecord = { ...task.record };
+      // Context links never adopt IDs from another notebook. Links outside
+      // the exported scope are omitted, just like a missing source page.
+      if (record.relatedPageIds) {
+        record.relatedPageIds = record.relatedPageIds.map(id => created.get(id)).filter((id): id is string => id !== undefined);
+      }
       if (record.page !== undefined) {
         const pageId = created.get(record.page);
         if (pageId) {
@@ -883,6 +896,7 @@ export async function applyPortableBundle(
     await store.fileChildPages([
       ...created.values(), ...(options.parentId ? [options.parentId] : []),
     ], "me", [...created.values()]);
+    if (bundle.manifest.taskCategories?.length) await store.importTaskCategories(bundle.manifest.taskCategories, options.src);
     return { rootIds, created: created.size, tasks: createdTasks.length };
   } catch (error) {
     for (const taskId of createdTasks) {

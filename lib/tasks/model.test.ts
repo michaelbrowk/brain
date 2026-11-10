@@ -590,3 +590,20 @@ describe("the clock on a record", () => {
     ).toBe(false);
   });
 });
+
+describe("context page references", () => {
+  it("keeps old records valid and rejects duplicate, malformed or unbounded ids", () => {
+    expect(taskRecordSchema.safeParse(base).success).toBe(true);
+    expect(taskRecordSchema.parse({...base, relatedPageIds: ["page-context"]}).relatedPageIds).toEqual(["page-context"]);
+    for (const ids of [["same", "same"], ["../outside"], Array.from({length: 65}, (_, i) => `page-${i}`)]) {
+      expect(taskRecordSchema.safeParse({...base, relatedPageIds: ids}).success).toBe(false);
+    }
+  });
+});
+
+
+it("canonicalizes an empty context list to an absent record field", () => {
+  const parsed = parseTaskRecord({...base, relatedPageIds: []});
+  expect(parsed.ok).toBe(true);
+  if (parsed.ok) expect(parsed.task).not.toHaveProperty("relatedPageIds");
+});

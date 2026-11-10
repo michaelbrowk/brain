@@ -23,6 +23,7 @@ slash menu's Task item, or typing `- [ ] ` at a line start.
 | `evening` | `true` | Needs `when` to be a day. A section of that day, not a clock. |
 | `deadline` | a calendar day | The day the task is owed, whatever `when` says. |
 | `category` | text, up to 200 characters | |
+| `relatedPageIds` | up to 64 unique page ids | Context links only; never the source of the checkbox or completion. |
 | `page` | a page id | The note that holds this task's checkbox. Requires `anchor`, unless the task has detached. |
 | `anchor` | `text`, `hash`, `ordinal`, `line` | Where on that page the checkbox stood when the anchor was written. |
 | `detachedAt` | a UTC instant | Written when the reconcile could no longer find the line. Requires `page`. |
@@ -252,3 +253,24 @@ older one lands in the centre as a missed reminder and is not pushed.
 
 `docs/notifications.md` has the rest: the centre and the bell, new mail from
 people, push on an installed app, and how to turn any of it off.
+
+
+## Task dialog details
+
+Notes live in the task Markdown body. `GET /api/tasks/<id>` returns the record,
+`body`, and `bodyRev`; a PATCH editing `body` must send that revision. A stale
+revision returns 409 before any metadata or notes are written. Metadata-only
+patches preserve existing notes bytes. New task POST may carry `body` directly.
+Notes are limited to 100,000 characters in the editing API.
+
+`relatedPageIds` names context pages independently of `page` and `anchor`.
+New links must identify existing, non-trashed pages. Existing links may be
+retained when a page later becomes unavailable, and a null PATCH clears them.
+A linked task's title and completion still belong to its source checkbox.
+
+The category catalog is `_tasks/_catalog/index.md`, frontmatter schema 1 with
+`categories: [{name, icon?}]`. Empty categories and emoji survive a reload;
+legacy task category strings remain valid. Category creation normalizes case
+and spacing for duplicate detection without rewriting old task records. Only
+Store writes the catalog, atomically and inside the existing mutation lock.
+`/api/task-categories` lists, creates and updates category icons.

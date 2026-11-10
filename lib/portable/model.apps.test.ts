@@ -67,6 +67,7 @@ function rewriteManifest(
 const downgradeManifest = (bytes: Uint8Array) =>
   rewriteManifest(bytes, (manifest) => {
     manifest.version = 2;
+    delete manifest.taskCategories;
   });
 
 const retargetEntry = (bytes: Uint8Array, entryPath: string) =>
@@ -77,8 +78,8 @@ const retargetEntry = (bytes: Uint8Array, entryPath: string) =>
   });
 
 describe("an app page in a portable archive", () => {
-  it("writes the version the new key needs", async () => {
-    expect(PORTABLE_VERSION).toBe(3);
+  it("writes the current archive version", async () => {
+    expect(PORTABLE_VERSION).toBe(4);
   });
 
   it("carries the entry, the assets and the state", async () => {
@@ -198,9 +199,9 @@ describe("an app page in a portable archive", () => {
   it("still reads a version 2 archive, which has no app key at all", async () => {
     await store.createPage(null, "Spanish", { markdown: "hola" });
     const { bytes, manifest } = await buildPortableArchive(store);
-    expect(manifest.version).toBe(3);
-    // A version 2 manifest is this one with the number changed, because a
-    // notebook of ordinary pages writes the same bytes either way.
+    expect(manifest.version).toBe(4);
+    // This fixture contains ordinary pages only. Remove newer optional
+    // catalog metadata and keep the version 2 compatibility assertion.
     const legacy = downgradeManifest(bytes);
     expect(() => validatePortableArchive(legacy)).not.toThrow();
   });

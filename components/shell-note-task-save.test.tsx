@@ -10,7 +10,7 @@
 // echo, and the page answer carries a rev and nothing about the records the
 // reconcile decided — so there is nothing to hand over and the set has to be
 // re-asked. Until it was, a task ticked in a note stayed open in Tasks, in
-// Home's Today block and on the sidebar badge until a reload or midnight.
+// Home's Today block until a reload or midnight.
 //
 // The editor here is a stand-in: what is under test is the save-settled path
 // in the shell, not Milkdown. `onChange` is the markdown the editor would
@@ -140,9 +140,7 @@ describe("a task ticked or deleted in a note, and the set three screens read", (
       id: "task-1",
       title: LINE,
       page: "note",
-      // Filed today, so the sidebar's count has something to draw: the badge
-      // is `openTodayCount` over this same set, and it is the third screen
-      // this seam feeds.
+      // Filed today so the shared Tasks and Home views both read this record.
       when: localDay().today,
       done: false,
       created: "2026-09-14T08:00:00.000Z",
@@ -222,7 +220,7 @@ describe("a task ticked or deleted in a note, and the set three screens read", (
     await settle();
   }
 
-  /** The number the sidebar's Tasks row draws, straight off the same set. */
+  /** Tasks navigation deliberately has no badge, even as the shared set changes. */
   function badge(): string | null {
     const row = [...document.querySelectorAll<HTMLButtonElement>("button.tree-row")].find(
       (button) => button.textContent?.includes("Tasks"),
@@ -233,12 +231,12 @@ describe("a task ticked or deleted in a note, and the set three screens read", (
   it("ticks the record in the shared set when the box is ticked in the note", async () => {
     await open();
     expect(liveTask("task-1")?.done).toBe(false);
-    expect(badge()).toBe("1");
+    expect(badge()).toBeNull();
 
     await save(TICKED);
 
     expect(liveTask("task-1")?.done).toBe(true);
-    // and the badge, which is `openTodayCount` over that same set
+    // The shared record updates without reintroducing a navigation count.
     expect(badge()).toBeNull();
   });
 

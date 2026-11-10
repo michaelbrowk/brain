@@ -198,7 +198,7 @@ export type ShellSurface = "notes" | "mail" | "settings" | "tasks";
 /** What the Tasks surface has open: one of the five lists, or the view of one
  *  category. It is navigation state and not part of the canvas identity
  *  (see `navigationPresenceIdentity`). */
-export type TasksListState = ListName | { category: string };
+export type TasksListState = ListName | "all" | { category: string };
 
 export type NavigationPresenceState = {
   selectedId: string | null;

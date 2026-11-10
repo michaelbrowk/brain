@@ -283,7 +283,7 @@ test("@release the palette searches pages, mail and tasks in one list and opens 
   );
   expect(pushed).toContain(`/tasks?task=${taskId}`);
   await expect(
-    page.locator(`.brain-task-row-item[data-task-id="${taskId}"] .brain-task-row[data-selected]`),
+    page.getByRole("dialog", { name: "Quarterly plants", exact: true }),
   ).toBeVisible();
 });
 

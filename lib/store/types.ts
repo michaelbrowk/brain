@@ -848,6 +848,9 @@ export interface CreateTaskInput {
   evening?: true;
   deadline?: string;
   category?: string;
+  relatedPageIds?: string[];
+  /** Markdown notes stored in the task file body, not frontmatter. */
+  body?: string;
   /** The note that holds the checkbox, for a linked task. */
   page?: string;
   anchor?: TaskAnchor;
@@ -866,6 +869,10 @@ export interface UpdateTaskPatch {
   evening?: true | null;
   deadline?: string | null;
   category?: string | null;
+  relatedPageIds?: string[] | null;
+  body?: string;
+  /** Required when body is supplied; the hash from readTaskDetails. */
+  bodyRev?: string;
   repeat?: TaskRepeat | null;
   /** Unlinked only in this release. A linked task is completed through its
    *  note, which is the reconcile path. */

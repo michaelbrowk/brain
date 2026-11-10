@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import matter from "gray-matter";
 import {
   LOGBOOK_WINDOW_DAYS,
   TASKS_DIR,
@@ -13,7 +14,7 @@ import {
   taskFilePath,
   writeTaskFile,
 } from "./index-store";
-import { taskLogEntrySchema, taskRecordFields, type TaskRecord } from "./model";
+import { taskLogEntrySchema, taskRecordFields, taskRecordRules, type TaskRecord } from "./model";
 
 async function tmpRoot(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "brain-tasks-"));
@@ -354,6 +355,7 @@ const EVERY_FIELD: TaskRecord[] = [
   {
     id: BETA,
     title: "Take the bins out",
+    relatedPageIds: ["page-context"],
     when: DAY,
     deadline: "2026-09-20",
     category: "Home",
@@ -436,6 +438,7 @@ describe("the serializer and the schema, key for key", () => {
     const logged: TaskRecord = {
       id: BETA,
       title: "Take the bins out",
+    relatedPageIds: ["page-context"],
       when: DAY,
       log: [{ scheduled: DAY, time: "13:00", completedAt: INSTANT }],
       created: INSTANT,
@@ -466,5 +469,19 @@ describe("the serializer and the schema, key for key", () => {
     expect(serializeTask(detached, "")).toContain("time: '13:00'");
     const index = await loadTaskIndex(root);
     expect(index.get(ALPHA)?.time).toBe("13:00");
+  });
+});
+
+
+describe("pre-context reader compatibility", () => {
+  it("omits empty links but keeps nonempty links under the existing strict schema contract", () => {
+    const legacySchema = taskRecordFields.omit({relatedPageIds: true}).strict().superRefine(taskRecordRules);
+    const record: TaskRecord = {id: ALPHA, title: "Ordinary task", created: INSTANT, updated: INSTANT, done: false};
+    const empty = matter(serializeTask({...record, relatedPageIds: []}, "Notes")).data;
+    expect(empty).not.toHaveProperty("relatedPageIds");
+    expect(legacySchema.safeParse(empty).success).toBe(true);
+    const linked = matter(serializeTask({...record, relatedPageIds: [PAGE]}, "Notes")).data;
+    expect(linked.relatedPageIds).toEqual([PAGE]);
+    expect(legacySchema.safeParse(linked).success).toBe(false);
   });
 });

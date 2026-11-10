@@ -48,7 +48,7 @@ export interface TaskSection {
 /** What the column is looking at. `category: ""` is the uncategorised view,
  *  which is how the route asks for "no category" as well. */
 export type TasksView =
-  | { readonly kind: "list"; readonly list: ListName }
+  | { readonly kind: "list"; readonly list: ListName | "all" }
   | { readonly kind: "category"; readonly category: string };
 
 /** `lib/tasks/lists.ts`'s own answer to which list a record is in, and the key
@@ -77,7 +77,7 @@ export function sectionsFor(
   }
   // The logbook reads by completion and everything else by creation, and a
   // category view is everything else.
-  const order: ListName = view.kind === "list" ? view.list : "today";
+  const order: ListName = view.kind === "list" && view.list !== "all" ? view.list : "today";
   return [...sections.values()]
     .sort((a, b) => compareGroups(a.group, b.group))
     .map((section) => ({
@@ -121,7 +121,7 @@ export function belongs(
   // reader's question: at 01:00 in Dubai a task finished ten minutes ago
   // carries yesterday's UTC date, and reading it at zero would drop the row
   // out of Today the moment it was ticked.
-  if (view.kind === "list") return listOf(task, today, offsetMinutes) === view.list;
+  if (view.kind === "list") return view.list === "all" || listOf(task, today, offsetMinutes) === view.list;
   // A CATEGORY VIEW KEEPS THE DAY'S WORK TOO (spec 2). It is the one list
   // organised by the part of a life the work belongs to, so erasing a task the
   // instant it is finished would make it the one list with nothing to show for

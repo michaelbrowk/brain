@@ -8,7 +8,7 @@ import { act, useEffect, useReducer } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { apiFetch } from "@/lib/client";
-import { localDay, mutateTasks, resetTasksStore } from "./tasks-client";
+import { liveTask, localDay, mutateTasks, resetTasksStore } from "./tasks-client";
 import { resetMailComposeAvailable } from "./mail-compose-available";
 import { resetTaskCaptureFocus } from "./tasks-ghost-row";
 import { Shell } from "./shell";
@@ -262,12 +262,9 @@ describe("tasks surface navigation (desktop)", () => {
     expect(callsFor("/api/tree")).toBe(treeBefore);
   });
 
-  it("counts a task promoted in a note on the sidebar row, asking nothing", async () => {
-    // THE BADGE IS THE SAME SET, FROM A THIRD SCREEN. A task promoted on a
-    // note is written into `components/tasks-client` by the editor, and the
-    // count the shell derives is off that set, so the number moves on a note
-    // the reader never left. Nothing is asked again: the tab drops the SSE
-    // echo of its own write, so no token moves and no load runs.
+  it("shares a task promoted in a note without adding a sidebar badge or refetching", async () => {
+    // The editor publishes into the shared set; navigation stays count-free,
+    // and its own SSE echo must not trigger a second load.
     window.history.replaceState({}, "", "/");
 
     await act(async () => root.render(<Shell tree={[]} initialSelectedId={null} />));
@@ -293,7 +290,8 @@ describe("tasks surface navigation (desktop)", () => {
     });
     await settle();
 
-    expect(navRow("Tasks")?.querySelector(".tree-row-count")?.textContent).toBe("1");
+    expect(liveTask("task-1")?.title).toBe("water the plants");
+    expect(navRow("Tasks")?.querySelector(".tree-row-count")).toBeNull();
     expect(reads()).toBe(before);
   });
 
@@ -336,7 +334,7 @@ describe("tasks surface navigation (desktop)", () => {
     await settle();
   }
 
-  it("opens Tasks with the caret in the capture row from the head's plus", async () => {
+  it("opens Tasks with the caret in the new task title from the head's plus", async () => {
     window.history.replaceState({}, "", "/");
 
     await act(async () => root.render(<Shell tree={[]} initialSelectedId={null} />));
@@ -351,10 +349,10 @@ describe("tasks surface navigation (desktop)", () => {
     expect(window.location.pathname).toBe("/tasks");
 
     const capture = await findLazy(
-      () => document.querySelector<HTMLInputElement>('input[aria-label="New task"]'),
-      "the capture row",
+      () => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Task title"]'),
+      "the task title",
     );
-    expect(capture.placeholder).toBe("New task…");
+    expect(capture.placeholder).toBe("What needs to be done?");
     expect(document.activeElement).toBe(capture);
   });
 
@@ -368,8 +366,8 @@ describe("tasks surface navigation (desktop)", () => {
     await act(async () => menuRow("Task")!.click());
     await findLazy(surfaceBody, "tasks surface after the Task row");
     await findLazy(
-      () => document.querySelector<HTMLInputElement>('input[aria-label="New task"]'),
-      "the capture row on the first visit",
+      () => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Task title"]'),
+      "the task title on the first visit",
     );
 
     // leave Tasks the way a reader would, with Back
@@ -385,11 +383,19 @@ describe("tasks surface navigation (desktop)", () => {
     await act(async () => navRow("Tasks")?.click());
     await findLazy(surfaceBody, "tasks surface after the second visit");
 
-    const capture = await findLazy(
-      () => document.querySelector<HTMLInputElement>('input[aria-label="New task"]'),
-      "the capture row on the second visit",
+    await settle();
+    expect(document.querySelector('textarea[aria-label="Task title"]')).toBeNull();
+    expect(document.activeElement?.closest('[role="dialog"]')).toBeNull();
+
+    // A fresh explicit request still opens a new draft after the old request
+    // was consumed; acknowledging it must not disable later creation.
+    await openNewMenu();
+    await act(async () => menuRow("Task")!.click());
+    const nextTitle = await findLazy(
+      () => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Task title"]'),
+      "a fresh task title after returning",
     );
-    expect(document.activeElement).not.toBe(capture);
+    expect(document.activeElement).toBe(nextTitle);
   });
 
   it("does the same from Settings, where the plus is not drawn", async () => {
@@ -428,8 +434,8 @@ describe("tasks surface navigation (desktop)", () => {
     expect(window.location.pathname).toBe("/tasks");
 
     const capture = await findLazy(
-      () => document.querySelector<HTMLInputElement>('input[aria-label="New task"]'),
-      "the capture row",
+      () => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Task title"]'),
+      "the task title",
     );
     expect(document.activeElement).toBe(capture);
   });

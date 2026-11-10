@@ -32,9 +32,12 @@ export async function GET(req: NextRequest, { params }: Ctx) {
   if (refused) return refused;
 
   const store = await getStore();
-  const task = store.getTask(id);
-  if (!task) return notFound();
-  return NextResponse.json({ task });
+  try {
+    return NextResponse.json(await store.readTaskDetails(id));
+  } catch (error) {
+    if (isNotFound(error)) return notFound();
+    throw error;
+  }
 }
 
 export async function PATCH(req: NextRequest, { params }: Ctx) {
@@ -74,6 +77,9 @@ export async function PATCH(req: NextRequest, { params }: Ctx) {
     return NextResponse.json({ task });
   } catch (error) {
     if (isNotFound(error)) return notFound();
+    if (error instanceof Error && error.name === "TaskBodyConflictError") {
+      return NextResponse.json({error: "conflict", reason: error.message}, {status: 409});
+    }
     // The instance moved between the row being drawn and the tick landing.
     // Not malformed, so not a 400: a 409 with where the task now stands.
     if (isTaskConflict(error)) return conflict(error.reason, error.currentWhen);

@@ -3,6 +3,8 @@
 import { useEffect, useSyncExternalStore } from "react";
 import { apiFetch } from "@/lib/client";
 import type { TaskRepeat, TaskView } from "@/lib/tasks/model";
+import type { TaskCategory } from "@/lib/tasks/details";
+export type { TaskCategory } from "@/lib/tasks/details";
 
 /** ONE FETCH OF THE TASKS, READ BY EVERYTHING THAT NEEDS THEM.
  *
@@ -347,6 +349,9 @@ export interface CreateTaskInput {
   evening?: true;
   deadline?: string;
   category?: string;
+  relatedPageIds?: string[];
+  repeat?: TaskRepeat;
+  body?: string;
 }
 
 export async function createTask(input: CreateTaskInput): Promise<TaskView> {
@@ -369,6 +374,9 @@ export interface TaskPatch {
   evening?: true | null;
   deadline?: string | null;
   category?: string | null;
+  relatedPageIds?: string[] | null;
+  body?: string;
+  bodyRev?: string;
   /** `null` stops the task repeating and leaves the current instance as an
    *  ordinary task. Its completions stay: they are the Logbook's. */
   repeat?: TaskRepeat | null;
@@ -397,4 +405,31 @@ export async function patchTask(
   if (!response.ok) await refuse(response);
   const body = (await response.json()) as { task: TaskView };
   return body.task;
+}
+
+export interface TaskDetails { task: TaskView; body: string; bodyRev: string }
+export async function readTaskDetails(id: string): Promise<TaskDetails> {
+  const response = await apiFetch(`/api/tasks/${encodeURIComponent(id)}`);
+  if (!response.ok) await refuse(response);
+  return response.json() as Promise<TaskDetails>;
+}
+export async function deleteTask(id: string): Promise<void> {
+  const response = await apiFetch(`/api/tasks/${encodeURIComponent(id)}`, {method: "DELETE"});
+  if (!response.ok) await refuse(response);
+}
+export async function listTaskCategories(): Promise<TaskCategory[]> {
+  const response = await apiFetch("/api/task-categories");
+  if (!response.ok) await refuse(response);
+  return ((await response.json()) as {categories: TaskCategory[]}).categories;
+}
+export async function createTaskCategory(name: string, icon?: string): Promise<TaskCategory> {
+  return writeTaskCategory("POST", {name, ...(icon === undefined ? {} : {icon})});
+}
+export async function updateTaskCategory(name: string, icon: string | null): Promise<TaskCategory> {
+  return writeTaskCategory("PATCH", {name, icon});
+}
+async function writeTaskCategory(method: "POST" | "PATCH", input: {name: string; icon?: string | null}): Promise<TaskCategory> {
+  const response = await apiFetch("/api/task-categories", {method, headers: {"content-type": "application/json"}, body: JSON.stringify(input)});
+  if (!response.ok) await refuse(response);
+  return ((await response.json()) as {category: TaskCategory}).category;
 }

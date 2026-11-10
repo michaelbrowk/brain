@@ -63,7 +63,8 @@ Rules no single row states.
   is the machine code wherever the refusal has one and otherwise the field,
   the id or the measurement. Branch on `reason`. A refusal with more to hand
   back puts it in a third field beside those two, `currentRev` on a
-  `write_page` conflict and `currentWhen` on a task one. The import tools keep
+  `write_page` conflict, `currentWhen` on a repeating-task conflict, and
+  `currentBodyRev` on a task-notes conflict. The import tools keep
   the `{ error, code }` their own contract has, which `docs/notion-import.md`
   owns.
 - **`store_failed` is the notes folder failing.** A full disk, a read-only
@@ -72,8 +73,8 @@ Rules no single row states.
   The page tools, the task tools and `save_mail_attachment` all answer it, and
   every write that meets it still writes its activity line. Retry it once the
   disk is not what it was, not in a loop.
-- **`module_off` is a module the owner switched off.** The ten mail tools and
-  the eight task tools stay listed and stay in the scopes, and each answers
+- **`module_off` is a module the owner switched off.** The mail and task tools
+  stay listed and stay in the scopes, and each answers
   this code with one sentence naming where the switch is: "Mail is turned off
   in Settings › Modules" or "Tasks are turned off in Settings › Modules".
   Nothing is deleted by a switch and nothing is queued behind it, so do not
@@ -103,8 +104,8 @@ Rules no single row states.
 - **`complete_task` and `reopen_task` need `today` as your own local calendar
   date.** The answer says which list the record is in for that day, and a
   repeating task's next occurrence is computed from it. The server has no
-  caller's time zone to fall back on. `list_tasks` and `get_task` are the
-  lenient pair: they fall back to the owner's own zone.
+  caller's time zone to fall back on. `list_tasks` falls back to the owner's
+  own zone; `get_task` does not need a date.
 
 ## What the hints say
 
@@ -145,6 +146,9 @@ per hint, in the order the tables below use them:
 | `delete_page` | write **destroys** idempotent local |
 | `list_tasks` | read keeps idempotent local |
 | `get_task` | read keeps idempotent local |
+| `list_task_categories` | read keeps idempotent local |
+| `create_task_category` | write keeps idempotent local |
+| `update_task_category` | write keeps idempotent local |
 | `create_task` | write keeps repeats local |
 | `promote_task_line` | write keeps repeats local |
 | `update_task` | write keeps idempotent local |
@@ -273,8 +277,11 @@ A task is a record, not a note. A derived list is read against a day, so
 Brain uses the owner's own time zone, the one Settings, Account holds. With no
 zone captured and no `today`, the read is refused rather than answered in UTC.
 The Inbox is the exception: it is a property of the record alone, so it needs
-neither a day nor a zone. The logbook needs a UTC offset as well, because a
-completion is one instant and the day it falls on is the caller's.
+neither a day nor a zone. The logbook and All tasks need a UTC offset as well,
+because a completion is one instant and the day it falls on is the caller's.
+All tasks includes open tasks and the existing 30-day window of completed
+tasks; it is not an unlimited completion archive. Today includes overdue
+tasks, using the same rule as the interface.
 
 A completion does not leave its list. A ticked task stays in the list it was
 in, struck through, until the day changes, and only then does it reach the
@@ -291,16 +298,38 @@ to the Inbox clears them whether or not the call names them. `remindedAt` is
 not a field any tool can set: clearing `time` is how a reminder is stopped, and
 the store clears the mark itself.
 
+`body` is the task's Notes field, as Markdown. Read it with `get_task`; list
+responses stay compact and contain task metadata only. To edit Notes, send
+the `bodyRev` from that read with the new `body`. A stale revision returns
+`reason: "conflict"` and `currentBodyRev`, without applying any part of the
+update. Read the task again and reconcile the edits before retrying. An empty
+string clears Notes; `null` is not accepted. `bodyRev` without `body` is also
+refused.
+
+`relatedPageIds` links up to 64 unique, existing Brain pages for context. It
+does not move the task or attach it to a checkbox. On update, `[]` or `null`
+clears these links. The source checkbox still owns the title and completion
+of a promoted task.
+
+The category catalog stores names and emoji independently of task creation.
+Creating an existing normalized name returns the existing category. Updating
+a category changes its icon; `null` clears it. Renaming or deleting categories
+is not part of this contract.
+
 Every task write records one line in the activity log, carrying the tool, the
-record's id, the note's id for a promote, and the outcome. No title enters it.
+record's id when there is one, the note's id for a promote, and the outcome.
+Titles, Notes, category names and revision tokens do not enter that log.
 
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
-| `list_tasks` | | `list?` as `inbox`, `today`, `upcoming`, `someday` or `logbook`, `page?`, `today?`, `offsetMinutes?`, `category?` | `{ tasks }` for every list but the logbook, which answers `{ entries }`, one per completion, each with its own `key` | `bad_today` for a day that is not `YYYY-MM-DD`, `bad_offset` for a logbook read with no offset and no zone, the no-zone refusal for a derived list with neither a day nor a captured zone, and `missing_list` for a call naming neither a list nor a page. `store_failed`. `module_off` |
-| `get_task` | | `id` | `{ task }`, including whether its note line was removed and which page it is linked to | `bad_id`, `not_found`, `page_trashed`. `store_failed`. `module_off` |
-| `create_task` | `brain:write` | `title`, `when?`, `time?`, `evening?`, `deadline?`, `category?`, `repeat?` | `{ task }`, unlinked: it owns its own completion and belongs to no note | whatever the record refuses, as `that task change was refused` with the record's own reason, for instance `time needs a day to be a time on`. `bad_time` for a `time` that is not `HH:MM`. `store_failed`. `module_off` |
-| `promote_task_line` | `brain:write` | `page`, `line` as a zero-based markdown line number or the line's own text with runs of whitespace collapsed, `when?`, `time?`, `evening?`, `deadline?`, `category?` | `{ task }`, linked to that checkbox line, with the anchor the editor's own promote builds. The note's category is inherited unless one is named here | `that line is not a checkbox`, `that line appears more than once, pass its line number`, `that line is empty`, `that line already has a task` naming the record that has it, `bad_page`, and `not_found` for a note that is not there. `bad_time` for a `time` that is not `HH:MM`. `store_failed`. `module_off` |
-| `update_task` | `brain:write` | `id`, `title?`, `when?`, `time?`, `evening?`, `deadline?`, `category?`, `repeat?`. A field left out is left alone and `null` clears it | `{ task }` after the change | `bad_id`, `not_found`, whatever the record refuses. `expectedWhen` and `remindedAt` are refused as unknown arguments. `bad_time` for a `time` that is not `HH:MM`. `store_failed`. `module_off` |
+| `list_tasks` | | `list?` as `inbox`, `today`, `upcoming`, `someday`, `all` or `logbook`, `page?`, `today?`, `offsetMinutes?`, `category?` | `{ tasks }` for every list but the logbook, which answers `{ entries }`, one per completion, each with its own `key` | `bad_today` for a day that is not `YYYY-MM-DD`, `bad_offset` for an All tasks or logbook read with no offset and no zone, the no-zone refusal for a derived list with neither a day nor a captured zone, and `missing_list` for a call naming neither a list nor a page. `store_failed`. `module_off` |
+| `get_task` | | `id` | `{ task, body, bodyRev }`, including whether its source line was removed and its related page IDs | `bad_id`, `not_found`, `page_trashed`. `store_failed`. `module_off` |
+| `list_task_categories` | | none | `{ categories }`, each with `name` and optional `icon` | `store_failed`. `module_off` |
+| `create_task_category` | `brain:write` | `name`, `icon?` | `{ category }`, newly created or already present under the normalized name | whatever the category record refuses. `store_failed`. `module_off` |
+| `update_task_category` | `brain:write` | `name`, `icon` as a string or `null` | `{ category }` with its updated or cleared icon | `category not found`, whatever the category record refuses. `store_failed`. `module_off` |
+| `create_task` | `brain:write` | `title`, `when?`, `time?`, `evening?`, `deadline?`, `category?`, `repeat?`, `body?`, `relatedPageIds?` | `{ task }`, unlinked: it owns its own completion, with optional related context pages | whatever the record refuses, as `that task change was refused` with the record's own reason, for instance `time needs a day to be a time on`. `bad_time` for a `time` that is not `HH:MM`. `store_failed`. `module_off` |
+| `promote_task_line` | `brain:write` | `page`, `line` as a zero-based markdown line number or the line's own text with runs of whitespace collapsed, `when?`, `time?`, `evening?`, `deadline?`, `category?`, `body?`, `relatedPageIds?` | `{ task }`, linked to that checkbox line, with the anchor the editor's own promote builds. The note's category is inherited unless one is named here | `that line is not a checkbox`, `that line appears more than once, pass its line number`, `that line is empty`, `that line already has a task` naming the record that has it, `bad_page`, and `not_found` for a note that is not there. `bad_time` for a `time` that is not `HH:MM`. `store_failed`. `module_off` |
+| `update_task` | `brain:write` | `id`, `title?`, `when?`, `time?`, `evening?`, `deadline?`, `category?`, `repeat?`, `relatedPageIds?`, `body?`, `bodyRev?`. Omitted fields stay unchanged; `null` clears nullable metadata, and `body: ""` clears Notes | `{ task }` after the change; read again for the new `bodyRev` | `bad_id`, `not_found`, whatever the record refuses. `conflict` with `currentBodyRev` for stale Notes. `expectedWhen` and `remindedAt` are refused as unknown arguments. `bad_time` for a `time` that is not `HH:MM`. `store_failed`. `module_off` |
 | `complete_task` | `brain:write` | `id`, `today`, `offsetMinutes?`, `expectedWhen?` | `{ task, list }`, where `list` is the list the record is in for that day, which is the list it was already in. An ordinary task's completion uses `today` for that answer alone; a repeating one's next occurrence is computed from it | `bad_id`, `not_found`, and `conflict` with `currentWhen` when a repeating task has moved since the caller last read it. `store_failed`. `module_off` |
 | `reopen_task` | `brain:write` | `id`, `today`, `offsetMinutes?` | `{ task, list }`, the list the record lands back in for that day. Unticking a repeating task restores the instance its newest completion came from | `bad_id`, `not_found`, `conflict`. `store_failed`. `module_off` |
 | `delete_task` | `brain:write` | `id` | `{ ok: true }`. A linked task's checkbox line stays in its note, and the record that pointed at it is what goes | `bad_id`, `not_found`. `store_failed`. `module_off` |
@@ -314,7 +343,8 @@ detached, done and open, whatever their age, because the editor draws a word on
 every task line whatever state its record is in. A `list`, a `today`, an
 `offsetMinutes` or a `category` beside it is refused as `unexpected_list`,
 `unexpected_today`, `unexpected_offset` or `unexpected_category`, and a page id
-that is not an id is `bad_page`.
+that is not an id is `bad_page`. This is a source-checkbox lookup, not a filter
+by `relatedPageIds`.
 
 A linked task cannot repeat. The record refuses `repeat` and `page` together,
 because a repeating task advances its own `when` on completion and a checkbox

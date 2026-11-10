@@ -8191,7 +8191,10 @@ export class Store {
         return false;
       }
       if (filter.list && list !== filter.list) return false;
-      if (filter.category !== undefined && task.category !== filter.category) {
+      if (
+        filter.category !== undefined &&
+        taskCategoryKey(task.category ?? "") !== taskCategoryKey(filter.category)
+      ) {
         return false;
       }
       return true;
@@ -8231,7 +8234,8 @@ export class Store {
       .filter(
         (task) =>
           !this.taskHidden(task) &&
-          (category === undefined || task.category === category),
+          (category === undefined ||
+            taskCategoryKey(task.category ?? "") === taskCategoryKey(category)),
       )
       .map((task) => this.attributed(task));
     return logbookRows(shown, today, offsetMinutes);
@@ -8286,8 +8290,9 @@ export class Store {
         assertTaskBody(patch.body);
         if (typeof patch.bodyRev !== "string") throw new TaskValidationError("bodyRev is required when editing notes");
         const body = await readTaskBody(this.root, id);
-        if (hashRev(body) !== patch.bodyRev) {
-          throw Object.assign(new Error("Notes changed elsewhere. Reload the task and try again."), {name: "TaskBodyConflictError"});
+        const currentBodyRev = hashRev(body);
+        if (currentBodyRev !== patch.bodyRev) {
+          throw Object.assign(new Error("Notes changed elsewhere. Reload the task and try again."), {name: "TaskBodyConflictError", currentBodyRev});
         }
       }
       if (patch.relatedPageIds !== undefined && patch.relatedPageIds !== null) {

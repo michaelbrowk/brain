@@ -1379,6 +1379,8 @@ const TASK_WRITE_TOOLS = [
   "complete_task",
   "reopen_task",
   "delete_task",
+  "create_task_category",
+  "update_task_category",
 ] as const;
 
 describe("the task read tools", () => {
@@ -1416,7 +1418,7 @@ describe("the task read tools", () => {
   afterEach(() => vi.unstubAllEnvs());
 
   it("refuses every derived list with no date and no zone to derive one", async () => {
-    for (const list of ["today", "upcoming", "someday", "logbook"]) {
+    for (const list of ["today", "upcoming", "someday", "logbook", "all"]) {
       const { payload } = await toolPayload(
         await callTool("list_tasks", { list }, 1),
       );
@@ -1551,6 +1553,25 @@ describe("the task read tools", () => {
     expect(listTasks.mock.calls[0][1]).toEqual({ list: "inbox" });
   });
 
+  it("maps all to the unfiltered store read, keeping the caller's day, offset and category", async () => {
+    const listTasks = vi.fn().mockReturnValue([view()]);
+    mocks.getStore.mockResolvedValue({ listTasks });
+    const { payload, isError } = await toolPayload(await callTool("list_tasks", {
+      list: "all", today: TODAY, offsetMinutes: 240, category: "Team",
+    }, 46));
+    expect(isError).toBe(false);
+    expect(payload.tasks).toEqual([view()]);
+    expect(listTasks).toHaveBeenCalledWith(TODAY, { offsetMinutes: 240, category: "Team" });
+    expect(listTasks.mock.calls[0][1]).not.toHaveProperty("list");
+  });
+
+  it("requires an offset for all instead of silently choosing a completed-task day", async () => {
+    const { payload, isError } = await toolPayload(await callTool("list_tasks", { list: "all", today: TODAY }, 47));
+    expect(isError).toBe(true);
+    expect(payload.reason).toBe("bad_offset");
+    expect(mocks.getStore).not.toHaveBeenCalled();
+  });
+
   it("passes the caller's date and category to the store", async () => {
     const listTasks = vi.fn().mockReturnValue([]);
     mocks.getStore.mockResolvedValue({ listTasks });
@@ -1598,6 +1619,7 @@ describe("the task read tools", () => {
     const linked = view({ page: PAGE_ID });
     mocks.getStore.mockResolvedValue({
       getTask: vi.fn().mockReturnValue(linked),
+      readTaskDetails: vi.fn().mockResolvedValue({ task: linked, body: "Context notes", bodyRev: "123456abcdef" }),
       taskPageTrashed: vi.fn().mockReturnValue(false),
     });
 
@@ -1605,12 +1627,13 @@ describe("the task read tools", () => {
       await callTool("get_task", { id: TASK_ID }, 5),
     );
 
-    expect(payload.task).toEqual(linked);
+    expect(payload).toEqual({ task: linked, body: "Context notes", bodyRev: "123456abcdef" });
   });
 
   it("answers page_trashed for a task whose page is in the trash", async () => {
     mocks.getStore.mockResolvedValue({
       getTask: vi.fn().mockReturnValue(view({ page: PAGE_ID })),
+      readTaskDetails: vi.fn().mockResolvedValue({ task: view({ page: PAGE_ID }), body: "", bodyRev: "123456abcdef" }),
       taskPageTrashed: vi.fn().mockReturnValue(true),
     });
 
@@ -1627,6 +1650,7 @@ describe("the task read tools", () => {
   it("answers not_found for an unknown id and bad_id for one that is not a task id", async () => {
     mocks.getStore.mockResolvedValue({
       getTask: vi.fn().mockReturnValue(null),
+      readTaskDetails: vi.fn().mockRejectedValue(new NotFoundError("task-missing")),
       taskPageTrashed: vi.fn().mockReturnValue(false),
     });
 
@@ -1686,6 +1710,8 @@ describe("the task write tools", () => {
   });
 
   const argsFor = (name: string): Record<string, unknown> => {
+    if (name === "create_task_category") return { name: "Team", icon: "👥" };
+    if (name === "update_task_category") return { name: "Team", icon: null };
     if (name === "create_task") return { title: "Water the plants" };
     if (name === "promote_task_line") return { page: PAGE_ID, line: 0 };
     if (name === "update_task") return { id: TASK_ID, title: "Water them" };
@@ -2579,6 +2605,7 @@ describe("the task write tools", () => {
 
     mocks.getStore.mockResolvedValue({
       getTask: vi.fn().mockReturnValue(null),
+      readTaskDetails: vi.fn().mockRejectedValue(new NotFoundError("task-missing")),
     });
     const notFound = await toolPayload(
       await callTool("get_task", { id: "task-missing" }, 747),
@@ -2591,6 +2618,7 @@ describe("the task write tools", () => {
 
     mocks.getStore.mockResolvedValue({
       getTask: vi.fn().mockReturnValue(view({ page: PAGE_ID })),
+      readTaskDetails: vi.fn().mockResolvedValue({ task: view({ page: PAGE_ID }), body: "", bodyRev: "123456abcdef" }),
       taskPageTrashed: vi.fn().mockReturnValue(true),
     });
     const trashed = await toolPayload(
@@ -7829,6 +7857,18 @@ describe("the module gate, where it is wired", () => {
       error: "Tasks are turned off in Settings › Modules",
       reason: "module_off",
     });
+    expect(mocks.getStore).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["list_task_categories", {}],
+    ["create_task_category", { name: "Team" }],
+    ["update_task_category", { name: "Team", icon: null }],
+  ])("refuses %s with Tasks off before opening the store", async (name, args) => {
+    mocks.modules = { mail: true, tasks: false };
+    const { payload, isError } = await toolPayload(await callTool(name as string, args as Record<string, unknown>, 974));
+    expect(isError).toBe(true);
+    expect(payload).toEqual({ error: "Tasks are turned off in Settings › Modules", reason: "module_off" });
     expect(mocks.getStore).not.toHaveBeenCalled();
   });
 

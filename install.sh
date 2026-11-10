@@ -380,10 +380,11 @@ uninstall() {
   # If notes contain the installation, every candidate below could itself be
   # note content. There is no safe automatic deletion plan for this layout.
   for protected in "$real_notes" "$real_default"; do
-    case "$real_install/" in "${protected%/}"/*)
+    # Root contains every absolute installation. Do not derive its glob from
+    # an empty quoted expansion: Bash 3 and Bash 5 match that differently.
+    if [ "$protected" = "/" ] || [[ "$real_install/" == "$protected/"* ]]; then
       die "The notes directory contains the install directory; nothing was stopped or removed. Move the installation outside the notes directory before uninstalling."
-      ;;
-    esac
+    fi
   done
   local removable=()
   for entry in "$INSTALL_DIR"/* "$INSTALL_DIR"/.env "$INSTALL_DIR"/.docker-compose.yml.new; do

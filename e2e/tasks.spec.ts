@@ -379,7 +379,12 @@ test("@release deleting the line detaches the task and labels it as removed from
   await page.goto("/tasks");
   const row = page.locator(`[data-task-id="${task}"]`);
   await expect(row).toBeVisible({ timeout: 20_000 });
-  await expect(row).toContainText("line removed from Packing");
+  await expect(row).toContainText("Source line removed");
+  await row.getByRole("button", { name: "find the charger", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "find the charger", exact: true });
+  await expect(dialog.getByText("The original task line was removed from this note.", { exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "Packing", exact: true }).click();
+  await expect(page).toHaveURL(`/p/${note.id}`);
 });
 
 test("@release deleting the task in Tasks leaves the line an ordinary checkbox", async ({

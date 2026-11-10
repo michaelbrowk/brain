@@ -759,7 +759,7 @@ describe("install.sh run, upgrade, uninstall", () => {
     expect(r.stdout).not.toMatch(/down|rm /);
   });
 
-  it.each(["install directory", "ancestor", "root", "relative dot", "symlink", "default notes symlink"])("uninstall refuses when notes contain the installation via %s", (variant) => {
+  it.each(["install directory", "ancestor", "root", "root symlink", "relative dot", "symlink", "default notes symlink", "default notes root symlink"])("uninstall refuses when notes contain the installation via %s", (variant) => {
     const r = runInstall({}, ["--uninstall"], {}, undefined, (dir) => {
       mkdirSync(dir, { recursive: true });
       writeFileSync(path.join(dir, "keep.md"), "note inside the installation");
@@ -768,11 +768,14 @@ describe("install.sh run, upgrade, uninstall", () => {
       if (variant === "ancestor") notes = path.dirname(dir);
       if (variant === "root") notes = "/";
       if (variant === "relative dot") notes = ".";
+      if (variant === "root symlink") {
+        notes = path.join(dir, "root-link"); symlinkSync("/", notes);
+      }
       if (variant === "symlink") {
         notes = path.join(dir, "notes-link"); symlinkSync(dir, notes);
       }
-      if (variant === "default notes symlink") {
-        symlinkSync(path.dirname(dir), path.join(dir, "notes"));
+      if (variant === "default notes symlink" || variant === "default notes root symlink") {
+        symlinkSync(variant === "default notes root symlink" ? "/" : path.dirname(dir), path.join(dir, "notes"));
         notes = path.join(dir, "my-notes"); mkdirSync(notes);
       }
       writeFileSync(path.join(dir, ".env"), `NOTES_ROOT=${notes}\n`);

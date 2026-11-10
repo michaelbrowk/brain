@@ -84,6 +84,9 @@ const TRUTH_TABLE: Record<string, string> = {
   // Tasks
   list_tasks: "read keeps idempotent local",
   get_task: "read keeps idempotent local",
+  list_task_categories: "read keeps idempotent local",
+  create_task_category: "write keeps idempotent local",
+  update_task_category: "write keeps idempotent local",
   create_task: "write keeps repeats local",
   promote_task_line: "write keeps repeats local",
   update_task: "write keeps idempotent local",

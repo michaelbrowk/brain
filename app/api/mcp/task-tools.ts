@@ -11,6 +11,7 @@ import {
 import { appendMcpActivity } from "@/lib/mcp/activity-log";
 import { readTimeZone } from "@/lib/owner-settings";
 import { listOf } from "@/lib/tasks/lists";
+import { taskBodySchema, taskCategorySchema } from "@/lib/tasks/details";
 import { TASK_ID_RE, isLinkedTask, taskRecordFields } from "@/lib/tasks/model";
 import { normalizeTaskText, parseTaskLines } from "@/lib/tasks/task-lines";
 import {
@@ -24,7 +25,7 @@ import {
   text,
 } from "./tool-kit";
 
-/** THE TASK TOOLS: TWO READS, SIX WRITES, ONE PROMOTE.
+/** Task records, their Markdown notes, and the shared category catalog.
  *
  *  An agent owns tasks outright from 0.11.0. It used to own none of them, on
  *  the reasoning that an agent writes a checkbox line and the person promotes
@@ -118,7 +119,7 @@ const no = (outcome: string, error: string, reason: string): TaskAnswer => ({
   outcome,
 });
 
-/** The store's three error classes, as answers an agent can act on, and
+/** The store's expected errors, as answers an agent can act on, and
  *  anything else it can throw as one more.
  *
  *  `RecurrenceError` is deliberately absent: `advanceTaskUnlocked` turns it
@@ -131,6 +132,22 @@ const no = (outcome: string, error: string, reason: string): TaskAnswer => ({
  *  owner's Connections log showed nothing at all.
  */
 function taskRefusal(error: unknown): TaskAnswer {
+  if (error instanceof Error && error.name === "TaskBodyConflictError") {
+    return {
+      answer: {
+        ...text({
+          error: error.message,
+          reason: "conflict",
+          currentBodyRev:
+            "currentBodyRev" in error && typeof error.currentBodyRev === "string"
+              ? error.currentBodyRev
+              : undefined,
+        }),
+        isError: true,
+      },
+      outcome: "conflict",
+    };
+  }
   if (isTaskConflict(error)) {
     return {
       answer: {
@@ -332,10 +349,10 @@ export function registerTaskTools(server: McpToolServer): void {
     {
       title: "List tasks",
       description:
-        "List the tasks of one list, or every record on one note. Pass the caller's own local calendar date as `today`; leave it out and Brain uses the owner's own time zone. Every list but `logbook` answers `{tasks}`, one record each; `logbook` answers `{entries}`, one per completion, because a repeating task has many completions and one record, and each entry carries its own `key`. A completion stays in the list it was in until the day changes, so pass `offsetMinutes` to read the day the way the owner does.",
+        "List the tasks of one list, or every record on one source note. `all` reads tasks without filtering by list, retaining the 30-day completed-task window; `page` reads tasks sourced from that note, not tasks with it in relatedPageIds. Pass the caller's own local calendar date as `today`; leave it out and Brain uses the owner's own time zone. Every list but `logbook` answers `{tasks}`, one record each; `logbook` answers `{entries}`, one per completion, because a repeating task has many completions and one record, and each entry carries its own `key`. A completion stays in the list it was in until the day changes. Both `all` and `logbook` need offsetMinutes, supplied by the caller or derived from the owner's time zone. Lists omit Markdown notes; use get_task to read them.",
       inputSchema: {
         list: z
-          .enum(["inbox", "today", "upcoming", "someday", "logbook"])
+          .enum(["inbox", "today", "upcoming", "someday", "logbook", "all"])
           .optional(),
         page: z
           .string()
@@ -348,7 +365,7 @@ export function registerTaskTools(server: McpToolServer): void {
         offsetMinutes: offsetSchema
           .optional()
           .describe(
-            "the caller's own UTC offset in minutes, east positive, required for the logbook",
+            "the caller's own UTC offset in minutes, east positive, required for all and logbook unless the owner's time zone supplies it",
           ),
         category: z.string().optional(),
       },
@@ -412,10 +429,12 @@ export function registerTaskTools(server: McpToolServer): void {
       const day = await callerDay(today, offsetMinutes);
       if (day.today === null) return refusal(NO_ZONE, NO_ZONE_REASON);
       // `doneAt` is one UTC instant and the Logbook day it falls on is the
-      // caller's, so the logbook cannot be answered without their offset.
-      if (list === "logbook" && day.offsetMinutes === undefined) {
+      // caller's. Both lists apply the completion window using that offset.
+      if ((list === "logbook" || list === "all") && day.offsetMinutes === undefined) {
         return refusal(
-          "the logbook needs the caller's own UTC offset",
+          list === "logbook"
+            ? "the logbook needs the caller's own UTC offset"
+            : "all tasks need the caller's own UTC offset",
           "bad_offset",
         );
       }
@@ -434,7 +453,7 @@ export function registerTaskTools(server: McpToolServer): void {
       }
       return text({
         tasks: store.listTasks(day.today, {
-          list,
+          ...(list !== "all" ? { list } : {}),
           ...(day.offsetMinutes !== undefined
             ? { offsetMinutes: day.offsetMinutes }
             : {}),
@@ -449,7 +468,7 @@ export function registerTaskTools(server: McpToolServer): void {
     {
       title: "Read a task",
       description:
-        "Read one task record, including whether its note line was removed and which page it is linked to.",
+        "Read one task as {task, body, bodyRev}. `body` is the task's Markdown notes; pass bodyRev back when editing them. The task includes its source page and checkbox anchor, whether that line was removed, and relatedPageIds for additional context pages. Related pages do not own the title or completion.",
       inputSchema: { id: z.string() },
       annotations: hints("read keeps idempotent local"),
     },
@@ -458,16 +477,75 @@ export function registerTaskTools(server: McpToolServer): void {
         return refusal("that task id is not valid", "bad_id");
       }
       const store = await getStore();
-      const task = store.getTask(id);
-      if (!task) return refusal("no task with that id", "not_found");
+      let details;
+      try {
+        details = await store.readTaskDetails(id);
+      } catch (error) {
+        if (isNotFound(error)) return refusal("no task with that id", "not_found");
+        throw error;
+      }
       // A trashed page's tasks are hidden from every list, so reading one by
       // id answers the same way rather than handing back a row the surface
       // would never show.
       if (store.taskPageTrashed(id)) {
         return refusal("that task's page is in the trash", "page_trashed");
       }
-      return text({ task });
+      return text(details);
     }),
+  );
+
+  server.registerTool(
+    "list_task_categories",
+    {
+      title: "List task categories",
+      description:
+        "Read the shared task category catalog as {categories}, including empty categories and names already used by tasks. Each category has a name and an optional icon, usually an emoji.",
+      inputSchema: z.object({}).strict(),
+      annotations: hints("read keeps idempotent local"),
+    },
+    taskRead(async () => {
+      const store = await getStore();
+      return text({ categories: await store.listTaskCategories() });
+    }),
+  );
+
+  server.registerTool(
+    "create_task_category",
+    {
+      title: "Create a task category",
+      description:
+        "Add a category to the shared catalog, even before it has tasks. `icon` is optional, usually an emoji. Names are matched after normalizing case and whitespace; an existing category is returned unchanged. Use update_task_category to change its icon.",
+      inputSchema: taskCategorySchema,
+      annotations: hints("write keeps idempotent local"),
+    },
+    async ({ name, icon }, extra) =>
+      taskWrite(extra, "create_task_category", async (marks) => {
+        marks.change = icon === undefined ? "name" : "name+icon";
+        const store = await getStore();
+        const category = await store.createTaskCategory(name, icon, "claude");
+        return ok({ category });
+      }),
+  );
+
+  server.registerTool(
+    "update_task_category",
+    {
+      title: "Update a task category",
+      description:
+        "Set the icon of an existing category in the shared catalog. `name` identifies the category after normalizing case and whitespace; it does not rename it. Pass an emoji or another icon string, or null to clear the icon.",
+      inputSchema: z.object({
+        name: taskCategorySchema.shape.name,
+        icon: taskCategorySchema.shape.icon.unwrap().nullable(),
+      }).strict(),
+      annotations: hints("write keeps idempotent local"),
+    },
+    async ({ name, icon }, extra) =>
+      taskWrite(extra, "update_task_category", async (marks) => {
+        marks.change = "icon";
+        const store = await getStore();
+        const category = await store.updateTaskCategory(name, icon, "claude");
+        return ok({ category });
+      }),
   );
 
   server.registerTool(
@@ -478,7 +556,7 @@ export function registerTaskTools(server: McpToolServer): void {
       // two records.
       annotations: hints("write keeps repeats local"),
       description:
-        "Make a task. It is unlinked: it owns its own completion and belongs to no note. To turn a checkbox line of a note into a task, use promote_task_line. `time` and `evening` are statements about a day, so both need `when` to be a day rather than `someday`. Calling it twice makes two tasks.",
+        "Make a task. It is unlinked: it owns its own title and completion. `body` adds Markdown notes and relatedPageIds adds existing Brain pages as context; neither creates a source checkbox link. To turn a checkbox line of a note into a task, use promote_task_line. `time` and `evening` are statements about a day, so both need `when` to be a day rather than `someday`. Calling it twice makes two tasks.",
       inputSchema: z
         .object({
           title: fields.title,
@@ -488,10 +566,15 @@ export function registerTaskTools(server: McpToolServer): void {
           deadline: fields.deadline,
           category: fields.category,
           repeat: fields.repeat,
+          body: taskBodySchema.optional(),
+          relatedPageIds: fields.relatedPageIds,
         })
         .strict(),
     },
-    async ({ title, when, time, evening, deadline, category, repeat }, extra) =>
+    async (
+      { title, when, time, evening, deadline, category, repeat, body, relatedPageIds },
+      extra,
+    ) =>
       taskWrite(extra, "create_task", async (marks) => {
         if (badTime(time)) return no("bad_time", BAD_TIME, "bad_time");
         const store = await getStore();
@@ -503,6 +586,8 @@ export function registerTaskTools(server: McpToolServer): void {
           ...(deadline !== undefined ? { deadline } : {}),
           ...(category !== undefined ? { category } : {}),
           ...(repeat !== undefined ? { repeat } : {}),
+          ...(body !== undefined ? { body } : {}),
+          ...(relatedPageIds !== undefined ? { relatedPageIds } : {}),
           src: "claude",
         };
         const task = await store.createTask(input);
@@ -520,7 +605,7 @@ export function registerTaskTools(server: McpToolServer): void {
       // against it, the way the editor's own gesture does.
       annotations: hints("write keeps repeats local"),
       description:
-        "Turn one checkbox line of a note into a task linked to that line. `line` is a zero-based markdown line number, or the line's own text with runs of whitespace collapsed. The note's category is inherited unless one is named here. The line keeps owning the task's title and its completion. Takes no `rev`: the anchor is built from the note as read a moment before the record is made, the same window the editor's own promote gesture has, and a later edit to the line is repaired on the next reconcile.",
+        "Turn one checkbox line of a note into a task linked to that line. `line` is a zero-based markdown line number, or the line's own text with runs of whitespace collapsed. The note's category is inherited unless one is named here. The line keeps owning the task's title and its completion. `body` adds separate Markdown notes to the task; relatedPageIds adds context pages without changing the source page or anchor. Takes no `rev`: the anchor is built from the note as read a moment before the record is made, the same window the editor's own promote gesture has, and a later edit to the line is repaired on the next reconcile.",
       inputSchema: z
         .object({
           page: z.string(),
@@ -536,10 +621,15 @@ export function registerTaskTools(server: McpToolServer): void {
           evening: fields.evening,
           deadline: fields.deadline,
           category: fields.category,
+          body: taskBodySchema.optional(),
+          relatedPageIds: fields.relatedPageIds,
         })
         .strict(),
     },
-    async ({ page, line, when, time, evening, deadline, category }, extra) =>
+    async (
+      { page, line, when, time, evening, deadline, category, body, relatedPageIds },
+      extra,
+    ) =>
       taskWrite(extra, "promote_task_line", async (marks) => {
         if (badTime(time)) return no("bad_time", BAD_TIME, "bad_time");
         if (!TASK_ID_RE.test(page)) {
@@ -610,6 +700,8 @@ export function registerTaskTools(server: McpToolServer): void {
             : inheritedCategory !== undefined
               ? { category: inheritedCategory }
               : {}),
+          ...(body !== undefined ? { body } : {}),
+          ...(relatedPageIds !== undefined ? { relatedPageIds } : {}),
           src: "claude",
         });
         marks.task = task.id;
@@ -624,7 +716,7 @@ export function registerTaskTools(server: McpToolServer): void {
       title: "Update a task",
       annotations: hints("write keeps idempotent local"),
       description:
-        "Change one task. A field left out is left alone and `null` clears it. `when` takes a day, the word `someday`, or null for the Inbox. `time` and `evening` are statements about a day, so a change that parks the task or sends it back to the Inbox clears both whether or not they are named here. Clearing `time` is also how a reminder is stopped.",
+        "Change one task. A field left out is left alone. `null` clears scheduling, category, repeat, or relatedPageIds; an empty array also clears related pages. `body` replaces Markdown notes and requires the bodyRev returned by get_task; an empty string clears notes, while null is invalid. A stale bodyRev refuses the whole change with reason conflict and currentBodyRev; read get_task before retrying. bodyRev without body is refused. Related pages are context and never replace the source page or checkbox anchor. `when` takes a day, the word `someday`, or null for the Inbox. `time` and `evening` are statements about a day, so a change that parks the task or sends it back to the Inbox clears both whether or not they are named here. Clearing `time` is also how a reminder is stopped.",
       inputSchema: z
         .object({
           id: z.string(),
@@ -635,11 +727,14 @@ export function registerTaskTools(server: McpToolServer): void {
           deadline: fields.deadline.nullable(),
           category: fields.category.nullable(),
           repeat: fields.repeat.nullable(),
+          body: taskBodySchema.optional(),
+          bodyRev: z.string().regex(/^[a-f0-9]{12}$/).optional(),
+          relatedPageIds: fields.relatedPageIds.nullable(),
         })
         .strict(),
     },
     async (
-      { id, title, when, time, evening, deadline, category, repeat },
+      { id, title, when, time, evening, deadline, category, repeat, body, bodyRev, relatedPageIds },
       extra,
     ) =>
       taskWrite(extra, "update_task", async (marks) => {
@@ -657,14 +752,18 @@ export function registerTaskTools(server: McpToolServer): void {
           ...(deadline !== undefined ? { deadline } : {}),
           ...(category !== undefined ? { category } : {}),
           ...(repeat !== undefined ? { repeat } : {}),
+          ...(body !== undefined ? { body } : {}),
+          ...(bodyRev !== undefined ? { bodyRev } : {}),
+          ...(relatedPageIds !== undefined ? { relatedPageIds } : {}),
           src: "claude",
         };
         // The field names the patch carries, in the schema's own order
         // (`Object.keys` walks a string-keyed object in insertion order), so
         // a person scanning the log can tell a retitle from a reschedule
-        // without opening the record.
+        // without opening the record. bodyRev is only a precondition, not a
+        // changed field.
         marks.change = Object.keys(patch)
-          .filter((key) => key !== "src")
+          .filter((key) => key !== "src" && key !== "bodyRev")
           .join("+");
         const task = await store.updateTask(id, patch);
         marks.label = task.title;

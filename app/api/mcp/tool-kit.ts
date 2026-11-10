@@ -192,6 +192,8 @@ export const WRITE_TOOLS: ReadonlySet<string> = new Set([
   "complete_task",
   "reopen_task",
   "delete_task",
+  "create_task_category",
+  "update_task_category",
   "create_app_page",
   "write_app_page",
 ]);

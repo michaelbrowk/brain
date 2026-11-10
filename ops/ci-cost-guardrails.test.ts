@@ -25,6 +25,13 @@ const criticalFlows = readFileSync(
 );
 
 describe("CI cost guardrails", () => {
+  it("allows the push-only release gates 30 minutes and keeps PRs at 25", () => {
+    const parsed = matter(`---\n${workflow}\n---\n`).data;
+    expect(parsed.jobs.check["timeout-minutes"]).toBe(
+      "${{ github.event_name == 'push' && 30 || 25 }}",
+    );
+  });
+
   it("cancels a superseded pull request run and never a run on main", () => {
     // The build and both smokes run only on a push to main. Cancelling there
     // meant a second merge stopped the first one's run before it reached

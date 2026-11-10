@@ -1,18 +1,21 @@
 #!/usr/bin/env node
 // Hands one listening Unix socket to the Mail service the way systemd does
-// (LISTEN_PID/LISTEN_FDS/LISTEN_FDNAMES, fd 3). No restarts and no MIME
-// worker: process supervision inside the image is designed in B.
+// (LISTEN_PID/LISTEN_FDS/LISTEN_FDNAMES, fd 3). Docker supervises this process;
+// the MIME worker lives in a separate, networkless container.
 import { spawn } from "node:child_process";
 import { chmodSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { ensureMailWrappingKey } from "./brain-mail-key.mjs";
 
 const [socketPath, entrypoint] = process.argv.slice(2);
 if (!socketPath || !entrypoint) {
   process.stderr.write("usage: brain-mail-activate.mjs <socket-path> <main.js>\n");
   process.exit(64);
 }
+
+await ensureMailWrappingKey(process.env.STATE_DIRECTORY, process.env.CREDENTIALS_DIRECTORY);
 
 const directory = path.dirname(socketPath);
 mkdirSync(directory, { recursive: true, mode: 0o710 });

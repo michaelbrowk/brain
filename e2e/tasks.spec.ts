@@ -146,9 +146,7 @@ async function openNote(page: Page, id: string) {
   });
 }
 
-/** Complete a task from the Tasks surface, through the real row: the press,
- *  the 1300ms window a reader can change their mind inside, and the PATCH at
- *  the end of it. */
+/** Complete through the Tasks checkbox and wait for its persisted write. */
 async function completeFromTasks(page: Page, title: string, taskId: string) {
   await page.goto("/tasks");
   const row = page.locator(`[data-task-id="${taskId}"]`);
@@ -160,7 +158,7 @@ async function completeFromTasks(page: Page, title: string, taskId: string) {
         candidate.request().method() === "PATCH",
       { timeout: 20_000 },
     ),
-    row.getByRole("checkbox", { name: title }).click(),
+    row.getByRole("checkbox", { name: `Complete ${title}`, exact: true }).click(),
   ]);
   expect(response.status()).toBe(200);
 }
@@ -176,18 +174,16 @@ async function createTask(page: Page, title: string): Promise<string> {
   return (created.body as { task: { id: string } }).task.id;
 }
 
-/** Open a task's row on the Tasks surface and expand it, which is what draws
- *  the chip row every case below reads. */
-async function expandRow(page: Page, id: string, title: string) {
+/** Open the approved task dialog from its full-row action. */
+async function openTaskDialog(page: Page, id: string, title: string) {
   await page.goto("/tasks");
   const row = page.locator(`[data-task-id="${id}"]`);
   await expect(row).toBeVisible({ timeout: 20_000 });
-  await row.getByText(title, { exact: true }).click();
-  await expect(row.locator(".brain-task-row[data-expanded]")).toHaveCount(1);
-  // The reveal is a spring from height 0, so the chips are still growing for a
-  // frame or two after the attribute lands.
-  await page.waitForTimeout(500);
-  return row;
+  await row.getByRole("button", { name: title, exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: title, exact: true });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
+  return dialog;
 }
 
 /** Type at the end of a paragraph without touching any other line. */
@@ -383,7 +379,12 @@ test("@release deleting the line detaches the task and labels it as removed from
   await page.goto("/tasks");
   const row = page.locator(`[data-task-id="${task}"]`);
   await expect(row).toBeVisible({ timeout: 20_000 });
-  await expect(row).toContainText("line removed from Packing");
+  await expect(row).toContainText("Source line removed");
+  await row.getByRole("button", { name: "find the charger", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "find the charger", exact: true });
+  await expect(dialog.getByText("The original task line was removed from this note.", { exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "Packing", exact: true }).click();
+  await expect(page).toHaveURL(`/p/${note.id}`);
 });
 
 test("@release deleting the task in Tasks leaves the line an ordinary checkbox", async ({
@@ -438,244 +439,120 @@ test("@release consecutive task lines sit as close together as consecutive bulle
   expect(tops[1] - tops[0]).toBeLessThanOrEqual(32);
 });
 
-/* ── The row and the panels it opens ──────────────────────────────────────────
- *
- * Three answers the row got wrong on 0.10.6, all of them only reachable with a
- * real row under a real pointer: the unit harness drives `expanded` as a prop,
- * so a fold the row ASKS for never arrives there, and jsdom has no layout for
- * a clip box to cut anything in.
- */
+/* The task dialog keeps the old protections: child panels do not dismiss
+ * their parent, calendar choices remain a draft until Save, and real pointer,
+ * keyboard and touch interactions leave focus and layout in a usable state. */
 
-test("@release a day in the calendar keeps the panel open and the row expanded", async ({
-  page,
-}) => {
-  // The panel is portalled to the end of the document and React carries its
-  // clicks up the ROW's tree all the same, so a day cell reached the row's own
-  // press handler, which folded the row. The chips went, the picker went with
-  // them, and a teardown that is not a close throws the day away: the panel
-  // shut and nothing was saved.
+test("@release a calendar day stays in the task draft until Save", async ({ page }) => {
   test.setTimeout(60_000);
   await page.setViewportSize({ width: 1440, height: 900 });
   await login(page);
   const id = await createTask(page, "Water the plants");
-  const row = await expandRow(page, id, "Water the plants");
-
-  await row.getByRole("button", { name: /^When:/ }).click();
-  const panel = page.getByRole("dialog", { name: /^When:/ });
-  await expect(panel).toBeVisible();
-
+  const dialog = await openTaskDialog(page, id, "Water the plants");
+  await dialog.getByRole("button", { name: /^When:/ }).click();
+  const panel = page.getByRole("dialog", { name: "When", exact: true });
   const cell = panel.getByRole("gridcell", { name: /^\w+day 20 / });
   await cell.click();
-
-  // The panel stands, the cell takes the ink capsule, and nothing has gone to
-  // the route: the grid edits the panel's own value and Done is what sends it.
   await expect(panel).toBeVisible();
   await expect(cell).toHaveAttribute("aria-selected", "true");
-  await expect(row.locator(".brain-task-row[data-expanded]")).toHaveCount(1);
-
-  await panel.getByRole("button", { name: "Done" }).click();
+  await expect(dialog).toBeVisible();
+  await panel.getByRole("button", { name: "Done", exact: true }).click();
   await expect(panel).toHaveCount(0);
-  await expect
-    .poll(async () => {
-      const read = await browserJson(page, `/api/tasks/${id}`);
-      return (read.body as { task?: { when?: string } })?.task?.when ?? null;
-    }, { timeout: 15_000 })
-    .toMatch(/-20$/);
+  const beforeSave = await browserJson(page, `/api/tasks/${id}`);
+  expect((beforeSave.body as { task: { when?: string } }).task.when).toBe(localToday());
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect.poll(async () => {
+    const read = await browserJson(page, `/api/tasks/${id}`);
+    return (read.body as { task?: { when?: string } })?.task?.when ?? null;
+  }, { timeout: 15_000 }).toMatch(/-20$/);
 });
 
-test("@release every chip stays inside the expanded row, with room for its ring", async ({
-  page,
-}) => {
-  // The chip row grows from height 0, so it clips while that plays; its box
-  // hugged the chips exactly, so it went on clipping at rest and cut every
-  // chip's focus ring down to two slivers on its left and right edges. Both
-  // halves are read here: nothing reaches past the capsule, and the clip box
-  // keeps the ring's own five pixels on all four sides.
+test("@release task properties and page picker fit desktop, tablet and phone", async ({ page }) => {
   test.setTimeout(90_000);
   await login(page);
-  const id = await createTask(page, "Chip geometry");
-
+  const id = await createTask(page, "Property geometry");
   for (const width of [1440, 1024, 390]) {
     await page.setViewportSize({ width, height: 900 });
-    const row = await expandRow(page, id, "Chip geometry");
-    const measured = await row.evaluate((node) => {
-      const capsule = node.querySelector(".brain-task-row") as HTMLElement;
-      const chips = node.querySelector(".brain-task-chips") as HTMLElement;
-      const style = getComputedStyle(capsule);
-      const box = capsule.getBoundingClientRect();
-      const clip = chips.getBoundingClientRect();
-      const kids = [...chips.children].map((child) => {
+    const dialog = await openTaskDialog(page, id, "Property geometry");
+    const measured = await dialog.evaluate((node) => {
+      const box = node.getBoundingClientRect();
+      const properties = [...node.querySelectorAll(".tasks-detail-properties button")].map((child) => {
         const rect = child.getBoundingClientRect();
-        return {
-          word: (child.textContent ?? "").trim(),
-          left: rect.left,
-          right: rect.right,
-          top: rect.top,
-          bottom: rect.bottom,
-          lines: 1,
-        };
+        return { label: child.getAttribute("aria-label") || child.textContent, left: rect.left, right: rect.right };
       });
-      return {
-        inner: {
-          left: box.left + parseFloat(style.paddingLeft),
-          right: box.right - parseFloat(style.paddingRight),
-        },
-        capsuleBottom: box.bottom,
-        clip,
-        kids,
-        // A chip never breaks its own word across two lines: the ROW wraps.
-        wrapped: new Set(kids.map((kid) => Math.round(kid.top))).size,
-        scrollPast: chips.scrollWidth - chips.clientWidth,
-      };
+      return { left: box.left, right: box.right, properties, overflow: node.scrollWidth - node.clientWidth };
     });
-
-    expect(measured.kids.length, `chips at ${width}`).toBeGreaterThanOrEqual(4);
-    expect(measured.scrollPast, `no chip runs past the row at ${width}`).toBe(0);
-    for (const chip of measured.kids) {
-      expect(chip.right, `${chip.word} at ${width}`).toBeLessThanOrEqual(
-        measured.inner.right + 0.5,
-      );
-      expect(chip.left, `${chip.word} at ${width}`).toBeGreaterThanOrEqual(
-        measured.inner.left - 0.5,
-      );
-      expect(chip.bottom, `${chip.word} at ${width}`).toBeLessThanOrEqual(
-        measured.capsuleBottom + 0.5,
-      );
-      // THE CLIP BOX KEEPS ITS DISTANCE. Five pixels is the ring's reach: a
-      // 3px outline at 2px of offset.
-      expect(chip.top - measured.clip.top, `ring room over ${chip.word}`)
-        .toBeGreaterThanOrEqual(5);
-      expect(measured.clip.bottom - chip.bottom, `ring room under ${chip.word}`)
-        .toBeGreaterThanOrEqual(5);
-      expect(chip.left - measured.clip.left, `ring room left of ${chip.word}`)
-        .toBeGreaterThanOrEqual(5);
+    expect(measured.left).toBeGreaterThanOrEqual(-0.5);
+    expect(measured.right).toBeLessThanOrEqual(width + 0.5);
+    expect(measured.overflow).toBe(0);
+    expect(measured.properties.length).toBeGreaterThanOrEqual(4);
+    for (const property of measured.properties) {
+      expect(property.left, `${property.label} at ${width}`).toBeGreaterThanOrEqual(measured.left);
+      expect(property.right, `${property.label} at ${width}`).toBeLessThanOrEqual(measured.right);
     }
-    // 390 is the width the four of them do not fit on one line at, and the row
-    // is what wraps there.
-    expect(measured.wrapped, `lines at ${width}`).toBe(width === 390 ? 2 : 1);
+    await dialog.getByRole("button", { name: "Add page", exact: true }).click();
+    const picker = page.getByRole("dialog", { name: "Link pages", exact: true });
+    await expect(picker).toBeVisible();
+    const bounds = await picker.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(15);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width - 15);
+    await picker.getByRole("button", { name: "Done", exact: true }).click();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
   }
 });
 
-test("@release an expanded row folds on a press outside it", async ({ page }) => {
-  // It kept its chips and its tint through a press anywhere else on the page,
-  // and the only ways back were Escape and a second press on the row itself.
+test("@release outside press dismisses a child picker before the task draft", async ({ page }) => {
   test.setTimeout(60_000);
   await page.setViewportSize({ width: 1440, height: 900 });
   await login(page);
-  const id = await createTask(page, "Stays expanded");
-  const row = await expandRow(page, id, "Stays expanded");
-  const capsule = row.locator(".brain-task-row[data-expanded]");
-
-  // A panel the row opened is part of the row: the press that dismisses it
-  // belongs to the panel, and the row stands.
-  await row.getByRole("button", { name: /^When:/ }).click();
-  await expect(page.getByRole("dialog", { name: /^When:/ })).toBeVisible();
+  const id = await createTask(page, "Keeps its draft");
+  const dialog = await openTaskDialog(page, id, "Keeps its draft");
+  await dialog.getByRole("textbox", { name: "Task notes" }).fill("Unsaved draft");
+  await dialog.getByRole("button", { name: /^When:/ }).click();
+  const panel = page.getByRole("dialog", { name: "When", exact: true });
+  await expect(panel).toBeVisible();
   await page.mouse.click(1380, 760);
-  await expect(page.getByRole("dialog", { name: /^When:/ })).toHaveCount(0);
-  await expect(capsule).toHaveCount(1);
-
-  // With nothing open over it, the same press folds it.
+  await expect(panel).toHaveCount(0);
+  await expect(dialog).toBeVisible();
   await page.mouse.click(1380, 760);
-  await expect(capsule).toHaveCount(0);
-  await expect(row.locator(".brain-task-chips")).toHaveCount(0);
+  await expect(dialog).toHaveCount(0);
+  const reopened = await openTaskDialog(page, id, "Keeps its draft");
+  await expect(reopened.getByRole("textbox", { name: "Task notes" })).toHaveValue("");
 });
 
-test("@release the cursor's capsule is drawn only while the column holds the focus", async ({
-  page,
-}) => {
-  // Michael's "с задачи должен сниматься фокус" is this half of it: the chips
-  // went with the fold and the grey capsule stayed, which reads as the task
-  // still holding the focus it was asked to give up. The cursor itself does
-  // not move, so a Tab back into the column finds it where it was.
+test("@release Escape closes one layer and returns focus to the task row", async ({ page }) => {
   test.setTimeout(60_000);
   await page.setViewportSize({ width: 1440, height: 900 });
   await login(page);
-  const id = await createTask(page, "Cursor capsule");
-  await page.goto("/tasks");
-  const row = page.locator(`[data-task-id="${id}"]`);
-  await expect(row).toBeVisible({ timeout: 20_000 });
-  // A press puts the cursor on the row and opens it; Escape folds it and
-  // leaves the cursor standing. An OPEN row wears the one fill of I1 and its
-  // capsule draws nothing, so the cursor's own tint is only readable folded.
-  await row.getByText("Cursor capsule", { exact: true }).click();
-  await expect(row.locator(".brain-task-row[data-expanded]")).toHaveCount(1);
+  const id = await createTask(page, "Keyboard return");
+  const dialog = await openTaskDialog(page, id, "Keyboard return");
+  const when = dialog.getByRole("button", { name: /^When:/ });
+  await when.click();
+  const panel = page.getByRole("dialog", { name: "When", exact: true });
+  await expect(panel).toBeVisible();
   await page.keyboard.press("Escape");
-  await expect(row.locator(".brain-task-row[data-expanded]")).toHaveCount(0);
-
-  /** Whether this row is wearing the cursor's fill. */
-  const tinted = () =>
-    row.evaluate((node) => {
-      const capsule = node.querySelector(
-        ".brain-task-row[data-selected] > .tree-row-capsule",
-      );
-      if (capsule === null) return false;
-      const paint = getComputedStyle(capsule).backgroundColor;
-      return paint !== "transparent" && !/,\s*0\)$/.test(paint);
-    });
-  const cursorHeld = () => row.locator(".brain-task-row[data-selected]").count();
-
-  expect(await tinted()).toBe(true);
-  expect(await cursorHeld()).toBe(1);
-
-  // A press outside takes the focus with it, so the tint goes. The cursor
-  // stays exactly where the reader left it.
-  await page.mouse.click(1380, 780);
-  await page.waitForTimeout(400);
-  expect(await tinted()).toBe(false);
-  expect(await cursorHeld()).toBe(1);
-
-  // And a Tab back into the column puts it on the same row.
-  await page.keyboard.press("Tab");
-  await page.waitForTimeout(400);
-  expect(await tinted()).toBe(true);
-  expect(await cursorHeld()).toBe(1);
-
-  // A FOLD THAT STARTS FROM A CHIP KEEPS THE PAINT. Escape out of the picker
-  // puts the focus back on the chip that opened it, and the Escape after it
-  // folds the row: the chips go, and the focus they were holding would fall to
-  // the body with nothing pressed, leaving the row with neither fill nor ring.
-  // It comes back to the row, which is a focus holder.
-  await row.getByText("Cursor capsule", { exact: true }).click();
-  await expect(row.locator(".brain-task-row[data-expanded]")).toHaveCount(1);
-  await row.getByRole("button", { name: /^When:/ }).click();
-  await expect(page.getByRole("dialog", { name: /^When:/ })).toBeVisible();
+  await expect(panel).toHaveCount(0);
+  await expect(dialog).toBeVisible();
+  await expect(when).toBeFocused();
   await page.keyboard.press("Escape");
-  await expect(page.getByRole("dialog", { name: /^When:/ })).toHaveCount(0);
-  // ONE DISMISSAL PER KEY, said in a real browser. Without this line the case
-  // reads the same on the old behaviour, where the first key took the panel
-  // and the row together and the second had nothing left to fold.
-  await expect(row.locator(".brain-task-row[data-expanded]")).toHaveCount(1);
+  await expect(dialog).toHaveCount(0);
+  const rowAction = page.locator(`[data-task-id="${id}"]`).getByRole("button", { name: "Keyboard return", exact: true });
+  await expect(rowAction).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(dialog).toBeVisible();
   await page.keyboard.press("Escape");
-  await expect(row.locator(".brain-task-row[data-expanded]")).toHaveCount(0);
-  await page.waitForTimeout(400);
-  expect(await tinted()).toBe(true);
-  expect(
-    await row.evaluate(
-      (node) => node.querySelector(".brain-task-row") === document.activeElement,
-    ),
-  ).toBe(true);
+  await expect(rowAction).toBeFocused();
 });
 
-test("@release @mobile a touch scroll over the list leaves the expanded row standing", async ({
-  page,
-}) => {
-  // `pointerdown` is the first event of a touch scroll, so a fold spent on the
-  // way down folded the row every time a finger dragged past it: on the one
-  // device where scrolling is how a reader gets anywhere. A press is a pointer
-  // that goes down and comes back up in the same place, and a drag is not one.
+test("@release @mobile touch scrolling keeps the task dialog open", async ({ page }) => {
   test.setTimeout(60_000);
   await login(page);
   const id = await createTask(page, "Reads while scrolling");
-  await page.goto("/tasks");
-  const row = page.locator(`[data-task-id="${id}"]`);
-  await expect(row).toBeVisible({ timeout: 20_000 });
-  await row.getByText("Reads while scrolling", { exact: true }).tap();
-  const capsule = row.locator(".brain-task-row[data-expanded]");
-  await expect(capsule).toHaveCount(1);
-  await page.waitForTimeout(500);
-
-  // A real finger, through the browser's own input pipeline: a dispatched
-  // event would prove nothing about the pointer events Chrome makes from it.
+  const dialog = await openTaskDialog(page, id, "Reads while scrolling");
+  await dialog.getByRole("textbox", { name: "Task notes" }).fill(Array.from({ length: 25 }, (_, i) => `Context line ${i + 1}`).join("\n"));
+  await dialog.getByRole("textbox", { name: "Task notes" }).blur();
   const touch = await page.context().newCDPSession(page);
   const at = (y: number) => ({ touchPoints: [{ x: 195, y }] });
   await touch.send("Input.dispatchTouchEvent", { type: "touchStart", ...at(700) });
@@ -683,13 +560,9 @@ test("@release @mobile a touch scroll over the list leaves the expanded row stan
     await touch.send("Input.dispatchTouchEvent", { type: "touchMove", ...at(y) });
   }
   await touch.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
-  await page.waitForTimeout(400);
-
-  await expect(capsule).toHaveCount(1);
-
-  // And a tap that stays where it landed still folds it.
-  await page.touchscreen.tap(195, 700);
-  await expect(capsule).toHaveCount(0);
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "Close task", exact: true }).tap();
+  await expect(dialog).toHaveCount(0);
 });
 
 /* TOAST_EXIT_SHOTS_DIR=<dir> shoots a lone task undo leaving, mid-exit. A

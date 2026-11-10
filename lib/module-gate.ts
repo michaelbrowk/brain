@@ -17,6 +17,7 @@ export type ModuleName = keyof ModuleSwitches;
 export const MODULE_API_PREFIXES: readonly (readonly [string, ModuleName])[] =
   Object.freeze([
     Object.freeze(["/api/tasks", "tasks"] as const),
+    Object.freeze(["/api/task-categories", "tasks"] as const),
     Object.freeze(["/api/mail", "mail"] as const),
   ]);
 

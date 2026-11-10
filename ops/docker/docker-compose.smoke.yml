@@ -1,6 +1,5 @@
-# The sample used by scripts/smoke-compose.mjs. The onboarding compose file is
-# designed in B; this one exists to prove the image boots web and mail from one
-# image with a shared socket volume.
+# Release smoke for the same web/mail/MIME topology as the onboarding file.
+# Credentials are deliberately not pre-seeded: bootstrap must create the key.
 services:
   web:
     image: ${BRAIN_SMOKE_IMAGE:?set BRAIN_SMOKE_IMAGE}
@@ -30,10 +29,31 @@ services:
     image: ${BRAIN_SMOKE_IMAGE:?set BRAIN_SMOKE_IMAGE}
     command: ["mail"]
     init: true
+    depends_on: [mail-mime]
     volumes:
       - mail-state:/var/lib/brain-mail
       - mail-credentials:/run/credentials/brain-mail
       - mail-socket:/run/brain-mail
+      - mail-mime-socket:/run/brain-mail-mime
+
+  mail-mime:
+    image: ${BRAIN_SMOKE_IMAGE:?set BRAIN_SMOKE_IMAGE}
+    command: ["mail-mime"]
+    init: true
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    # Two one-message children (128 MiB JS heap each), bounded as one pool.
+    mem_limit: 384m
+    cpus: 0.4
+    pids_limit: 32
+    ulimits:
+      nofile: 64
+      core: 0
+    volumes:
+      # Intentionally no credentials, mail state, notes, or host network.
+      - mail-mime-socket:/run/brain-mail-mime
 
 volumes:
   notes: {}
@@ -41,3 +61,4 @@ volumes:
   mail-state: {}
   mail-credentials: {}
   mail-socket: {}
+  mail-mime-socket: {}

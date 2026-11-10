@@ -275,7 +275,7 @@ const callToolResultSchema = z
 const initializeResultSchema = z
   .object({
     protocolVersion: z.literal(MCP_PROTOCOL_VERSION),
-    capabilities: z.record(z.unknown()),
+    capabilities: z.record(z.string(), z.unknown()),
     serverInfo: z
       .object({ name: z.string(), version: z.string() })
       .strict()

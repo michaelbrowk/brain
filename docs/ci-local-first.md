@@ -76,6 +76,13 @@ request.
 
 ## What GitHub runs
 
+`main` requires a pull request and a successful, up-to-date `check` from GitHub
+Actions, including for administrators. Force pushes and branch deletion are
+disabled; review conversations must be resolved. No second person's approval
+is required for this owner-operated repository. The required check runs on
+every pull request, including documentation-only changes, so it cannot remain
+pending because of a workflow path exclusion.
+
 Pull requests run the cheap hosted gate: `pnpm install`, an apt install of
 `ripgrep`, a gitleaks scan of the working tree, and `pnpm check` (type safety,
 unit tests, round-trips, mail-egress). The scan carries no push-only guard on
@@ -103,6 +110,14 @@ The full Playwright suite runs:
 - manually from the separate `Full E2E` workflow
 - every Saturday at 03:17 UTC
 - locally through `pnpm ci:local`
+
+The hosted full suite is split across four isolated runners, each retaining
+one Playwright worker because test files reset their notes fixture. Each shard
+has a 20-minute test deadline inside a 25-minute job. Failed runs keep HTML,
+traces, screenshots and videos for seven days, leaving time to upload them
+before GitHub stops the runner. This is diagnostic coverage, not a release
+artifact. It replaces the single runner that twice reached the job deadline
+without returning a suite result; the next full run must verify the new budget.
 
 This keeps broad regression coverage without spending a second runner and a
 second dependency install on every release. Keeping it in a separate workflow

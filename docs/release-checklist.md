@@ -2,6 +2,12 @@
 
 Automated checks run in CI. The device checks below remain mandatory because browser emulation does not reproduce the iOS keyboard, touch arbitration, or Safari viewport events faithfully.
 
+## Releases with protected main
+
+When main requires a pull request (including for administrators), prepare the version change in that pull request: update `package.json`, the stable image tag in `ops/docker/docker-compose.yml`, and the release notes. Run the local gates, merge through the required check, and wait for a successful push CI on the exact resulting main commit. Then create and push only the annotated `v<version>` tag at that commit. The existing Release workflow builds and verifies the artifacts and creates the draft; publish that draft only after it succeeds. Do not disable branch protection to let the older `pnpm release` helper push a version commit directly to main.
+
+For 0.24, older task files need no migration. Once a task has nonempty related page links, 0.23's strict parser skips that task (the Markdown file remains intact). Prefer a compatible roll-forward fix after those links have been used. Before a manual downgrade, retain a fresh raw backup; never automatically restore the pre-release notes snapshot over later edits. Empty links are omitted from the persisted record.
+
 ## Automated gate
 
 - `pnpm check`

@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   getStore: vi.fn(),
   getTask: vi.fn(),
+  readTaskDetails: vi.fn(),
   updateTask: vi.fn(),
   deleteTask: vi.fn(),
 }));
@@ -80,10 +81,12 @@ async function del(id = TASK_ID, query = "") {
 
 beforeEach(() => {
   mocks.getTask.mockReset().mockReturnValue(task());
+  mocks.readTaskDetails.mockReset().mockResolvedValue({task: task(), body: "", bodyRev: "da39a3ee5e6b"});
   mocks.updateTask.mockReset().mockResolvedValue(task());
   mocks.deleteTask.mockReset().mockResolvedValue(undefined);
   mocks.getStore.mockReset().mockResolvedValue({
     getTask: mocks.getTask,
+    readTaskDetails: mocks.readTaskDetails,
     updateTask: mocks.updateTask,
     deleteTask: mocks.deleteTask,
   });
@@ -93,7 +96,7 @@ describe("GET /api/tasks/[id]", () => {
   it("returns the record", async () => {
     const res = await get();
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ task: task() });
+    expect(await res.json()).toEqual({ task: task(), body: "", bodyRev: "da39a3ee5e6b" });
   });
 
   it("refuses a list query no single record derives", async () => {
@@ -354,5 +357,39 @@ describe("the clock on the patch surface", () => {
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: "unknown_field" });
     expect(mocks.updateTask).not.toHaveBeenCalled();
+  });
+});
+
+describe("task notes and context routes", () => {
+  it("forwards notes revision and context links in one patch", async () => {
+    const values = {body: "Notes", bodyRev: "0123456789ab", relatedPageIds: [PAGE_ID]};
+    const response = await patch(values);
+    expect(response.status).toBe(200);
+    expect(mocks.updateTask).toHaveBeenCalledWith(TASK_ID, expect.objectContaining(values));
+  });
+  it("returns a note conflict without turning it into a schedule conflict", async () => {
+    mocks.updateTask.mockRejectedValue(Object.assign(new Error("Notes changed elsewhere"), {name: "TaskBodyConflictError"}));
+    const response = await patch({body: "Notes", bodyRev: "0123456789ab"});
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({error: "conflict", reason: "Notes changed elsewhere"});
+  });
+  it("refuses malformed revision and duplicate links before store calls", async () => {
+    for (const value of [{body: "Notes", bodyRev: "bad"}, {relatedPageIds: [PAGE_ID, PAGE_ID]}]) {
+      expect((await patch(value)).status).toBe(400);
+    }
+    expect(mocks.updateTask).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("historical task id categories", () => {
+  it("retains GET, PATCH and DELETE for this valid id", async () => {
+    mocks.readTaskDetails.mockResolvedValue({task: task({id: "categories"}), body: "", bodyRev: "da39a3ee5e6b"});
+    expect((await get("categories")).status).toBe(200);
+    expect(mocks.readTaskDetails).toHaveBeenCalledWith("categories");
+    expect((await patch({title: "Renamed"}, "", "categories")).status).toBe(200);
+    expect(mocks.updateTask).toHaveBeenCalledWith("categories", expect.objectContaining({title: "Renamed"}));
+    expect((await del("categories")).status).toBe(200);
+    expect(mocks.deleteTask).toHaveBeenCalledWith("categories", undefined);
   });
 });

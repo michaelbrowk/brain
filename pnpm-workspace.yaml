@@ -70,27 +70,38 @@ ignoredOptionalDependencies:
 # already parsed. sprintf-js (moderate, under argparse ~1.0.2 with no fixed
 # release) and katex (low, fixed only in 0.18.2, outside the ^0.16 and ^0.17
 # its parents declare) stay as they are.
+# 2026-11-02 audit: close the current production advisories. Zod 4 is an
+# intentional application migration: no fixed Zod 3 release exists. SDK 1.32
+# uses the application's Zod 4 peer; zod-to-json-schema imports its /v3 entry.
+# Do not override every Zod 3 consumer: the local Cloudflare test pool uses
+# removed v3-only APIs and is not in the production dependency tree.
+# KaTeX and @hono/node-server also cross their parents' old ranges; exercise the
+# editor round-trips and MCP HTTP tests before release.
 overrides:
-  "@modelcontextprotocol/sdk@>=1.12.0 <1.31.0": 1.31.0
+  "katex@>=0.11.0 <0.18.2": 0.18.2
+  "@hono/node-server@>=1.0.0 <2.1.3": 2.1.3
+  "body-parser@>=2.0.0 <2.4.0": 2.4.0
+  "ip-address@>=10.0.0 <10.7.4": 10.7.4
+  "@modelcontextprotocol/sdk@>=1.12.0 <1.32.0": 1.32.0
   "baseline-browser-mapping@>=2.0.0 <2.11.0": 2.11.0
   "brace-expansion@>=1.0.0 <1.1.18": 1.1.18
   "brace-expansion@>=5.0.0 <5.0.9": 5.0.9
   "browserslist@>=4.0.0 <4.28.7": 4.28.7
   "deepmerge-ts@>=7.0.0 <8.0.0": 8.0.2
-  "dompurify@>=3.0.0 <3.4.16": 3.4.16
-  "fast-uri@>=3.0.0 <3.1.8": 3.1.8
-  "hono@>=4.0.0 <4.13.7": 4.13.7
+  "dompurify@>=3.0.0 <3.4.17": 3.4.17
+  "fast-uri@>=3.0.0 <3.1.9": 3.1.9
+  "hono@>=4.0.0 <4.13.11": 4.13.11
   "js-yaml@>=3.0.0 <3.15.2": 3.15.2
   "js-yaml@>=4.0.0 <4.3.1": 4.3.1
   "nanoid@>=3.0.0 <3.3.18": 3.3.18
-  "nodemailer@>=5.0.0 <10.0.9": 10.0.9
+  "nodemailer@>=5.0.0 <10.1.4": 10.1.4
   postcss: 8.5.26
   "prosemirror-view@>=1.0.0 <1.42.3": 1.42.3
-  "qs@>=6.0.0 <6.16.0": 6.16.0
+  "qs@>=6.0.0 <6.16.1": 6.16.1
   "sharp@>=0.35.0 <0.35.5": 0.35.5
   "source-map-js@>=1.0.0 <1.2.2": 1.2.2
   "undici@>=7.0.0 <7.29.0": 7.29.0
-  "undici@>=8.0.0 <8.10.2": 8.10.2
+  "undici@>=8.0.0 <8.12.2": 8.12.2
   "vue@>=3.5.0 <3.5.42": 3.5.42
 patchedDependencies:
   '@zone-eu/mailsplit@5.4.14': patches/@zone-eu__mailsplit@5.4.14.patch

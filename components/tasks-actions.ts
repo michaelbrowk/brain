@@ -42,6 +42,7 @@ export interface TaskFieldPatch {
   title?: string;
   deadline?: string | null;
   category?: string | null;
+  relatedPageIds?: string[] | null;
   repeat?: TaskRepeat | null;
   /** `HH:MM`, the reminder, and the evening of the day the task sits on. Both
    *  are statements about a DAY, so the store takes them off a record the same
@@ -394,6 +395,7 @@ function normalize(patch: TaskFieldPatch): Partial<TaskView> {
     ...(patch.title !== undefined ? { title: patch.title } : {}),
     ...(patch.deadline !== undefined ? { deadline: patch.deadline ?? undefined } : {}),
     ...(patch.category !== undefined ? { category: patch.category ?? undefined } : {}),
+    ...(patch.relatedPageIds !== undefined ? { relatedPageIds: patch.relatedPageIds ?? undefined } : {}),
     ...(patch.time !== undefined ? { time: patch.time ?? undefined } : {}),
     ...(patch.evening !== undefined ? { evening: patch.evening ?? undefined } : {}),
     // Clearing the rule clears the history with it, the way the record does:

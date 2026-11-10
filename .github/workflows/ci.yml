@@ -12,22 +12,8 @@ on:
   # without paying for packaging on every push (audit 2026-08-19).
   pull_request:
     branches: [main]
-    # Prose and pictures the gate never opens. A pull request is skipped only
-    # when every file it changes matches one of these, so the ordinary case —
-    # a re-captured screenshot alongside the code that changed it — still runs
-    # the whole gate.
-    #
-    # `docs/**` and `**/*.md` are deliberately not here. `pnpm check` reads
-    # five files under docs/ (`operations.md`, `gmail-oauth.md`,
-    # `mail-architecture.md`, and both mail operations guides) and
-    # `lib/notion/__fixtures__/structured.md` is a round-trip fixture; ignoring
-    # those would let a change to a gate input merge ungated.
-    paths-ignore:
-      - "docs/design/**"
-      - "AGENTS.md"
-      - "DESIGN.md"
-      - "PRODUCT.md"
-      - "README.md"
+    # A required status check must report on every pull request. Workflow-level
+    # path exclusions leave documentation-only changes waiting forever.
 
 permissions:
   contents: read

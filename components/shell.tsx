@@ -398,10 +398,13 @@ export function Shell({
   // Bumped by a task written anywhere but this tab (another tab, an MCP call,
   // the repeat rule advancing one). The surface refetches on it.
   const [taskSurfaceRevision, setTaskSurfaceRevision] = useState(0);
-  // Bumped by "New task": the surface puts the caret in its capture field.
-  // Consumed once by the ghost row itself (`tasks-ghost-row.tsx`), which
-  // remembers the last request it already turned into a focus.
+  // A pending New task request is acknowledged by the dialog's surface.
+  // Keep the serial separate so a later Tasks remount cannot replay it.
+  const taskCaptureSerial = useRef(0);
   const [taskCaptureRequest, setTaskCaptureRequest] = useState(0);
+  const taskCaptureHandled = useCallback((request: number) => {
+    setTaskCaptureRequest((current) => current === request ? 0 : current);
+  }, []);
   // Bumped by a notification written anywhere but this tab (the reminder scan,
   // the mail poll, another tab's read). The bell and Home's first row refetch
   // on it, through the one module both subscribe to.
@@ -461,6 +464,7 @@ export function Shell({
    *  and the shell cannot see it in its own tree, but the shell is what has
    *  to step back from it. */
   const [mailSheetOpen, setMailSheetOpen] = useState(false);
+  const [taskDialogOpen, setTaskDialogOpen] = useState(false);
   const [mobileViewport, setMobileViewport] = useState(false);
   const mobileSearchTabRef = useRef<HTMLButtonElement | null>(null);
   const mobilePagesTabRef = useRef<HTMLButtonElement | null>(null);
@@ -1988,7 +1992,7 @@ export function Shell({
    *  have to go and find. */
   const newTask = useCallback(() => {
     openTasks();
-    setTaskCaptureRequest((request) => request + 1);
+    setTaskCaptureRequest(++taskCaptureSerial.current);
   }, [openTasks]);
 
   /** "New message", the same way: the composer belongs to Mail's own column,
@@ -4946,16 +4950,16 @@ export function Shell({
   // one walk of the tree, memoized — recomputed only when the tree changes, not
   // on every keystroke (setPage used to trigger four full walks of it each)
   const { allPages, pinnedPages, allCategories } = useMemo(() => {
-    const all: { id: string; title: string; icon?: string; kind?: "app" }[] = [];
+    const all: { id: string; title: string; icon?: string; kind?: "app"; path?: string }[] = [];
     const pinned: { id: string; title: string; icon?: string; kind?: "app" }[] = [];
     const cats = new Set<string>();
-    const walk = (nodes: TreeNode[]) => {
+    const walk = (nodes: TreeNode[], ancestors: string[] = []) => {
       for (const n of nodes) {
-        const lite = { id: n.id, title: n.title, icon: n.icon, kind: n.kind };
+        const lite = { id: n.id, title: n.title, icon: n.icon, kind: n.kind, path: ancestors.join(" / ") };
         all.push(lite);
         if (n.pinned) pinned.push(lite);
         if (n.category) cats.add(n.category);
-        walk(n.children);
+        walk(n.children, [...ancestors, n.title]);
       }
     };
     walk(tree);
@@ -6133,6 +6137,7 @@ export function Shell({
     mobileViewport || focusMode || mobilePagesOpen || mobileSearchOpen;
 
   const mobileTabBarHidden =
+    taskDialogOpen ||
     mobileKeyboardOpen ||
     settingsActive ||
     trashOpen ||
@@ -6554,7 +6559,10 @@ export function Shell({
                 onToast={showToast}
                 refreshToken={taskSurfaceRevision}
                 captureRequest={taskCaptureRequest}
+                onCaptureHandled={taskCaptureHandled}
                 pageTitleOf={pageTitleOf}
+                pages={allPages}
+                onDialogOpenChange={setTaskDialogOpen}
                 onOpenPage={(pageId) => select(pageId)}
               />
             ) : modules.mail && mailOpen ? (

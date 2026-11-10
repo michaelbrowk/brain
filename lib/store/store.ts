@@ -41,9 +41,13 @@ import {
   scheduleCommit,
   logForPath,
   showPageAtRevision,
+  showAttachmentAtRevision,
   type Version,
 } from "./git";
 import { emitStore } from "./events";
+import { taskRecordFields } from "../tasks/model";
+import { taskBodySchema, taskCategorySchema, taskCategoryKey, normalizeTaskCategoryName, type TaskCategory } from "../tasks/details";
+import { readTaskCatalog, writeTaskCatalog } from "./task-categories";
 import {
   attachmentMimeTypeForName,
   canonicalAttachmentMimeType,
@@ -570,7 +574,7 @@ export class Store {
   // promise-chain queue fixes the whole class. NB: NOT reentrant — a mutator
   // wrapped in mutate() must never call another mutate()-wrapped method, or it
   // deadlocks waiting on itself. Composites that delegate to wrapped leaves
-  // (duplicatePage, renamePage, restoreVersion) deliberately stay unwrapped;
+  // (duplicatePage, renamePage) deliberately stay unwrapped;
   // emptyTrash instead owns one lock and calls its private unwrapped purge leaf.
   private mutationTail: Promise<unknown> = Promise.resolve();
 
@@ -661,15 +665,24 @@ export class Store {
 
   async init(): Promise<void> {
     await ensureWritableNotesRoot(this.root);
+    // No snapshot may record an app as deleted while its retired folder is
+    // waiting for recovery. Successful init resumes deferred snapshots below;
+    // a failed recovery keeps them paused, like the other startup journals.
+    await beginGitSnapshotBarrier(this.root);
     await this.ensureNotionStagingRoot().catch(rethrowStagingFailure);
     await this.reconcileMoveIntent();
     await this.reconcileBoardIntent();
     await reconcileAbortIntents(this.root);
     await this.loadTaskIndex();
     await this.rebuild();
-    await this.mutate(() =>
-      this.reconcileNotionStaging().catch(rethrowStagingFailure),
-    );
+    await this.mutate(async () => {
+      for (const entry of this.index.values()) {
+        if (this.readAppMeta(entry.meta.id) === null) continue;
+        await assertAppFolderIsNotAPage(entry.dir);
+        await recoverCrashedAppSwap(entry.dir);
+      }
+      await this.reconcileNotionStaging().catch(rethrowStagingFailure);
+    });
     resumeGitSnapshotsAfterRecovery(this.root);
     this.warnIfShareEditHasNoOrigin();
     this.childLinksBackfill = this.backfillChildPageLinks();
@@ -7807,9 +7820,35 @@ export class Store {
     expectedRev: string,
     src?: string,
   ): Promise<Page> {
-    const md = await this.markdownAt(id, sha);
-    if (md === null) throw new NotFoundError(id);
-    return this.writePage(id, md, expectedRev, "me", src);
+    return this.mutate(() => this.withGitSnapshotBarrier(async () => {
+      const current = await this.readPage(id);
+      if (current.rev !== expectedRev) {
+        throw new RevConflictError(current.rev, expectedRev);
+      }
+      const md = await this.markdownAt(id, sha);
+      if (md === null) throw new NotFoundError(id);
+      for (const name of referencedAttachmentNames(md)) {
+        const held = await this.readAttachmentFile(name, MAX_ATTACHMENT_BYTES);
+        if (held.ok) continue;
+        if (held.why !== "missing") throw new AttachmentStoreUnavailableError();
+        const data = await showAttachmentAtRevision(this.root, sha, name, MAX_ATTACHMENT_BYTES);
+        if (data === null) throw new NotFoundError(name);
+        validateAttachment({ data, originalName: name, mimeType: attachmentMimeTypeForName(name) });
+        const contentHash = createHash("sha256").update(data).digest("hex");
+        const namedHash = /^([0-9a-f]{64})(?:\.|$)/.exec(name)?.[1];
+        if (namedHash !== undefined && namedHash !== contentHash) {
+          throw new AttachmentStoreUnavailableError();
+        }
+        // Retain the historical name, including files from before content-
+        // addressed uploads, so the restored Markdown keeps its exact URLs.
+        const dir = assertInRoot(this.root, path.join(/* turbopackIgnore: true */ this.root, "_attachments"));
+        const identity = await ensureRealDirectory(dir);
+        await atomicWrite(assertInRoot(dir, path.join(dir, name)), data);
+        await assertRealDirectory(dir, identity);
+        scheduleCommit(this.root);
+      }
+      return this.writePageUnlocked(id, md, expectedRev, "me", src);
+    }));
   }
 
   private isDescendant(id: string, ancestorId: string): boolean {
@@ -7922,9 +7961,88 @@ export class Store {
     return { ...view, updatedByName: meta.updatedByName };
   }
 
-  /** The body a person wrote under a task's frontmatter, or the empty string.
-   *  Nothing in the app writes one, so this exists for the portable export,
-   *  which must not drop what it cannot show. */
+  /** The record and notes as one snapshot. The body hash protects a dialog
+   *  save from overwriting notes edited by another client. */
+  async readTaskDetails(id: string): Promise<{task: TaskView; body: string; bodyRev: string}> {
+    assertTaskId(id);
+    return this.mutate(async () => {
+      const task = this.getTask(id);
+      if (!task) throw new NotFoundError(id);
+      const body = await readTaskBody(this.root, id);
+      return {task, body, bodyRev: hashRev(body)};
+    });
+  }
+
+  /** Catalog entries outlive their tasks; legacy free-form names remain visible. */
+  async listTaskCategories(): Promise<TaskCategory[]> {
+    const categories = await readTaskCatalog(this.root);
+    const seen = new Set(categories.map(category => taskCategoryKey(category.name)));
+    for (const task of this.taskIndex.all()) {
+      if (!task.category || seen.has(taskCategoryKey(task.category))) continue;
+      categories.push({name: task.category});
+      seen.add(taskCategoryKey(task.category));
+    }
+    return categories;
+  }
+
+  async createTaskCategory(name: string, icon?: string, src?: string): Promise<TaskCategory> {
+    return this.mutate(async () => {
+      const parsed = taskCategorySchema.safeParse({name: normalizeTaskCategoryName(name), ...(icon === undefined ? {} : {icon})});
+      if (!parsed.success) throw new TaskValidationError("invalid category name or icon");
+      const current = await this.listTaskCategories();
+      const existing = current.find(category => taskCategoryKey(category.name) === taskCategoryKey(parsed.data.name));
+      const category = existing ?? parsed.data;
+      const catalog = await readTaskCatalog(this.root);
+      if (!catalog.some(entry => taskCategoryKey(entry.name) === taskCategoryKey(category.name))) {
+        await writeTaskCatalog(this.root, existing ? current : [...current, category]);
+        scheduleCommit(this.root);
+        emitStore({type: "task", id: "categories", src});
+      }
+      return category;
+    });
+  }
+
+  async updateTaskCategory(name: string, icon: string | null, src?: string): Promise<TaskCategory> {
+    return this.mutate(async () => {
+      const existing = (await this.listTaskCategories()).find(category => taskCategoryKey(category.name) === taskCategoryKey(name));
+      if (!existing) throw new TaskValidationError("category not found");
+      const parsed = taskCategorySchema.safeParse({name: existing.name, ...(icon === null ? {} : {icon})});
+      if (!parsed.success) throw new TaskValidationError("invalid category icon");
+      const catalog = await this.listTaskCategories();
+      const index = catalog.findIndex(entry => taskCategoryKey(entry.name) === taskCategoryKey(name));
+      catalog[index] = parsed.data;
+      await writeTaskCatalog(this.root, catalog);
+      scheduleCommit(this.root);
+      emitStore({type: "task", id: "categories", src});
+      return parsed.data;
+    });
+  }
+
+  async importTaskCategories(categories: TaskCategory[], src?: string): Promise<void> {
+    return this.mutate(async () => {
+      const catalog = await readTaskCatalog(this.root);
+      const current = await this.listTaskCategories();
+      const persisted = new Set(catalog.map(category => taskCategoryKey(category.name)));
+      const seen = new Set(current.map(category => taskCategoryKey(category.name)));
+      for (const raw of categories) {
+        const parsed = taskCategorySchema.safeParse(raw);
+        if (!parsed.success) throw new TaskValidationError("invalid imported category");
+        if (seen.has(taskCategoryKey(parsed.data.name))) {
+          if (!persisted.has(taskCategoryKey(parsed.data.name))) {
+            const index = current.findIndex(category => taskCategoryKey(category.name) === taskCategoryKey(parsed.data.name));
+            current[index] = {...parsed.data, name: current[index].name};
+          }
+          continue;
+        }
+        current.push(parsed.data);
+        seen.add(taskCategoryKey(parsed.data.name));
+      }
+      await writeTaskCatalog(this.root, current);
+      scheduleCommit(this.root);
+      emitStore({type: "task", id: "categories", src});
+    });
+  }
+
   async readTaskBody(id: string): Promise<string> {
     assertTaskId(id);
     return readTaskBody(this.root, id);
@@ -7956,6 +8074,7 @@ export class Store {
     const record = parseTask(raw);
     return this.mutate(async () => {
       this.assertLinkablePageUnlocked(record.page);
+      for (const pageId of record.relatedPageIds ?? []) this.assertLinkablePageUnlocked(pageId);
       const taken =
         this.taskIndex.get(record.id) !== undefined ||
         (await taskFileExists(this.root, record.id));
@@ -8122,6 +8241,9 @@ export class Store {
     return this.mutate(async () => {
       assertRepeatUnlinked(input.repeat, input.page);
       this.assertLinkablePageUnlocked(input.page);
+      const parsedRefs = parseTaskRefs(input.relatedPageIds);
+      for (const pageId of parsedRefs ?? []) this.assertLinkablePageUnlocked(pageId);
+      if (input.body !== undefined) assertTaskBody(input.body);
       const now = new Date().toISOString();
       const record = parseTask({
         id: nanoid(),
@@ -8131,6 +8253,7 @@ export class Store {
         ...(input.evening !== undefined ? { evening: input.evening } : {}),
         ...(input.deadline !== undefined ? { deadline: input.deadline } : {}),
         ...(input.category !== undefined ? { category: input.category } : {}),
+        ...(parsedRefs !== undefined ? { relatedPageIds: parsedRefs } : {}),
         ...(input.page !== undefined ? { page: input.page } : {}),
         ...(input.anchor !== undefined ? { anchor: input.anchor } : {}),
         ...(input.repeat !== undefined ? { repeat: input.repeat } : {}),
@@ -8140,7 +8263,7 @@ export class Store {
         created: now,
         updated: now,
       });
-      await this.writeTaskUnlocked(record, input.src);
+      await this.writeTaskUnlocked(record, input.src, input.body);
       return this.attributed(this.taskIndex.view(record.id) as TaskView);
     });
   }
@@ -8156,6 +8279,22 @@ export class Store {
       let current = this.taskIndex.get(id);
       if (!current) throw new NotFoundError(id);
       assertTodayUsage(current, patch);
+      if (patch.bodyRev !== undefined && patch.body === undefined) {
+        throw new TaskValidationError("bodyRev requires body");
+      }
+      if (patch.body !== undefined) {
+        assertTaskBody(patch.body);
+        if (typeof patch.bodyRev !== "string") throw new TaskValidationError("bodyRev is required when editing notes");
+        const body = await readTaskBody(this.root, id);
+        if (hashRev(body) !== patch.bodyRev) {
+          throw Object.assign(new Error("Notes changed elsewhere. Reload the task and try again."), {name: "TaskBodyConflictError"});
+        }
+      }
+      if (patch.relatedPageIds !== undefined && patch.relatedPageIds !== null) {
+        for (const pageId of parseTaskRefs(patch.relatedPageIds) ?? []) {
+          if (!current.relatedPageIds?.includes(pageId)) this.assertLinkablePageUnlocked(pageId);
+        }
+      }
       // A repeating task is never linked and never detached: the schema
       // refuses `repeat` beside `page`, so its completion can only be the
       // rule's, and the branch below cannot compete with the note's.
@@ -8189,7 +8328,7 @@ export class Store {
           return this.attributed(this.taskIndex.view(id) as TaskView);
         }
       }
-      await this.writeTaskUnlocked(applyTaskPatch(current, patch), patch.src);
+      await this.writeTaskUnlocked(applyTaskPatch(current, patch), patch.src, patch.body);
       return this.attributed(this.taskIndex.view(id) as TaskView);
     });
   }
@@ -8599,6 +8738,8 @@ function assertOnlyCompletion(patch: UpdateTaskPatch, subject: string): void {
     "evening",
     "deadline",
     "category",
+    "relatedPageIds",
+    "body",
     "repeat",
   ];
   for (const key of others) {
@@ -8667,6 +8808,15 @@ function mergeConcurrentTicks(
     canonicalPageMarkdown(markdown),
     parsed.markdown,
   );
+}
+
+function assertTaskBody(body: unknown): asserts body is string {
+  if (!taskBodySchema.safeParse(body).success) throw new TaskValidationError("notes must be text up to 100000 characters");
+}
+function parseTaskRefs(refs: unknown): string[] | undefined {
+  const parsed = taskRecordFields.shape.relatedPageIds.safeParse(refs);
+  if (!parsed.success) throw new TaskValidationError("relatedPageIds must be up to 64 unique page ids");
+  return parsed.data;
 }
 
 function parseTask(raw: unknown): TaskRecord {
@@ -8748,6 +8898,7 @@ function applyTaskPatch(
     delete next.remindedAt;
   }
   assignOrClear(next, "category", patch.category);
+  assignOrClear(next, "relatedPageIds", patch.relatedPageIds);
   assignOrClear(next, "repeat", patch.repeat);
   // `log` STAYS when the rule goes. Stopping a repeat leaves the instance as
   // an ordinary task, and its completions are the Logbook's: up to thirty
@@ -9296,7 +9447,10 @@ async function copyDirIfPresent(from: string, to: string): Promise<void> {
 async function directoryExists(dir: string): Promise<boolean> {
   return fs.stat(dir).then(
     (stats) => stats.isDirectory(),
-    () => false,
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return false;
+      throw error;
+    },
   );
 }
 
@@ -9305,7 +9459,7 @@ async function directoryExists(dir: string): Promise<boolean> {
  *  uses for its one reservation exception, asked on the write side so the two
  *  cannot disagree. An app's own set never holds one, because the name rule
  *  in `lib/apps/model.ts` refuses every `.md` at every depth. */
-/** RECOVER A CRASHED SWAP BEFORE ANY APP WRITE TOUCHES `app/`.
+/** Recover a crashed swap at startup and before an app write touches `app/`.
  *
  *  `writeAppFiles` swaps a staged set in by renaming `app/` out to
  *  `.app-next-old/` and `.app-next/` in. That pair is not one operation on
@@ -9319,25 +9473,35 @@ async function directoryExists(dir: string): Promise<boolean> {
  *  one state write carry nothing over and then delete the only surviving
  *  files.
  *
- *  Run by the rewrite AND by the state leaf, which no longer goes through the
+ *  Run before init resolves, by the rewrite AND by the state leaf, which no longer goes through the
  *  swap: the state write is by far the most frequent thing an app does, so it
  *  is the write most likely to be the next one after a crash, and the promise
  *  is that the next write finds the files. Two `stat`s in the ordinary case. */
 async function recoverCrashedAppSwap(dir: string): Promise<void> {
   const retired = path.join(dir, `${APP_STAGING_DIR}-old`);
+  let changed = false;
   if (await directoryExists(retired)) {
+    await assertRealDirectory(retired);
     if (await directoryExists(path.join(/*turbopackIgnore: true*/ dir, "app"))) {
+      await assertRealDirectory(path.join(/*turbopackIgnore: true*/ dir, "app"));
       await fs.rm(retired, { recursive: true, force: true });
     } else {
       await fs.rename(retired, path.join(/*turbopackIgnore: true*/ dir, "app"));
     }
+    changed = true;
   }
   // The staged set is only ever meaningful inside the one `writeAppFiles`
   // call that made it, so anything still here is a half-written folder a
   // crash left. Dropped after the decision above, never before it: in the
   // between-the-renames case it is exactly the half-written set that must NOT
   // become `app/`.
-  await fs.rm(path.join(dir, APP_STAGING_DIR), { recursive: true, force: true });
+  const staged = path.join(dir, APP_STAGING_DIR);
+  if (await directoryExists(staged)) {
+    await assertRealDirectory(staged);
+    await fs.rm(staged, { recursive: true, force: true });
+    changed = true;
+  }
+  if (changed) await syncDirectory(dir);
 }
 
 async function assertAppFolderIsNotAPage(dir: string): Promise<void> {

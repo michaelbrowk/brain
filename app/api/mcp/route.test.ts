@@ -334,6 +334,19 @@ describe("Notion MCP route validation", () => {
     expect(mocks.verifyMcpBearerToken).not.toHaveBeenCalled();
   });
 
+  it("bounds collection validation before malformed items can accumulate errors", async () => {
+    // This is only ~50 KB, far below the byte cap. It must be stopped by the
+    // SDK's element bound before schema validation or the app-store handler.
+    const response = await callTool("create_app_page", {
+      title: "Too many assets",
+      assets: Array.from({ length: 10_001 }, () => null),
+    }, 987);
+    const result = await rawToolText(response);
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("maximum of 10000 elements");
+    expect(mocks.getStore).not.toHaveBeenCalled();
+  });
+
   it("refuses a request body over the endpoint's cap before it is parsed", async () => {
     // The endpoint had no limit of its own: `requiredToolScopes` parsed
     // whatever arrived so it could pre-gate the batch, and the handler parsed

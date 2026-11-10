@@ -236,6 +236,16 @@ async function acquireStoreForImport() {
   }
 }
 
+// mcp-handler forwards these options to McpServer. Its older declaration
+// names ServerOptions, so keep the SDK's additional option on this object
+// rather than dropping it from the runtime call. The bound applies before
+// schema validation, where malformed arrays can otherwise allocate one error
+// per item even when the tool handler would reject the input.
+const mcpServerOptions = {
+  serverInfo: { name: "brain", version: "1.1.0" },
+  maxToolInputElements: 10_000,
+};
+
 const handler = createMcpHandler(
   (server) => {
     // The mail tools and the task tools live in their own modules because this
@@ -896,9 +906,7 @@ const handler = createMcpHandler(
       }),
     );
   },
-  {
-    serverInfo: { name: "brain", version: "1.1.0" },
-  },
+  mcpServerOptions,
   {
     basePath: "/api",
     maxDuration: 60,

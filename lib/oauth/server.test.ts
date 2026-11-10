@@ -204,17 +204,11 @@ describe("Brain MCP OAuth server", () => {
     await expect(verifyMcpBearerToken(oldToken.access_token)).resolves.toBeUndefined();
     await expect(verifyMcpBearerToken(upgradedToken.access_token)).resolves.toMatchObject({
       clientId: client.id,
-      scopes: [
-        "brain:read",
-        "brain:write",
-        "brain:import",
-        "brain:mail",
-        "brain:mail:send",
-      ],
+      scopes: ["brain:read", "brain:write", "brain:import"],
     });
   });
 
-  it("treats an existing owner write grant as the full owner API", async () => {
+  it("keeps a notes-only grant inside the permissions shown at consent", async () => {
     const client = await clientRegistration();
     const verifier = "owner-write-verifier".padEnd(43, "x");
     const request = await parseAuthorizationRequest(
@@ -234,16 +228,11 @@ describe("Brain MCP OAuth server", () => {
       }),
     );
 
+    expect(request.scopes).toEqual(["brain:read", "brain:write"]);
     expect(token.scope).toBe("brain:read brain:write");
     await expect(verifyMcpBearerToken(token.access_token)).resolves.toMatchObject({
       clientId: client.id,
-      scopes: [
-        "brain:read",
-        "brain:write",
-        "brain:import",
-        "brain:mail",
-        "brain:mail:send",
-      ],
+      scopes: request.scopes,
     });
   });
 
@@ -485,12 +474,13 @@ describe("Brain MCP OAuth server", () => {
 
   /** The other half of the same rule: a grant the owner approved on the
    *  consent screen does reach mail. */
-  it("hands an owner write grant the mail scopes the consent screen offered", async () => {
+  it("grants mail sending only when it was requested on the consent screen", async () => {
     const client = await clientRegistration();
     const verifier = "mail-grant-verifier".padEnd(43, "x");
     const request = await parseAuthorizationRequest(
-      authorizationParams(client.id, verifier, "brain:write"),
+      authorizationParams(client.id, verifier, "brain:write brain:mail:send"),
     );
+    expect(request.scopes).toContain("brain:mail:send");
     const redirect = await approveAuthorizationRequest(
       await createAuthorizationRequestToken(request),
     );

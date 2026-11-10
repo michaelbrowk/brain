@@ -78,8 +78,8 @@ describe("scope closure", () => {
     ]);
   });
 
-  it("widens an owner write grant to every scope, mail included", () => {
-    expect(ownerEffectiveScopes(["brain:read", "brain:write"])).toEqual([...MCP_SCOPES]);
+  it("does not add unapproved import or mail rights to a write grant", () => {
+    expect(ownerEffectiveScopes(["brain:read", "brain:write"])).toEqual(["brain:read", "brain:write"]);
   });
 
   it("leaves a read-only grant read-only", () => {

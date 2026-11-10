@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { threadId as currentThreadId } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { MCP_SCOPES, OAuthRequestError, type McpScope } from "./config";
+import { OAuthRequestError, type McpScope } from "./config";
 import {
   migrateOAuthStateForward,
   nextRefreshGeneration,
@@ -180,17 +180,11 @@ describe("durable OAuth state", () => {
     expect(apps[0].scopes).toEqual(["brain:read", "brain:mail", "brain:mail:send"]);
   });
 
-  it("lists what an owner write grant can reach, not only the words stored on it", async () => {
-    // `ownerEffectiveScopes` treats a verified owner write grant as the whole
-    // owner API, so a grant minted before the mail scopes existed reaches mail
-    // with no second consent. Settings has to say that, or the one screen a
-    // person revokes from is the one screen understating what it is revoking.
+  it("lists only the permissions an older notes-only grant can reach", async () => {
     const client = await register(store);
     await authorize(store, client.id, "w".repeat(43), ["brain:read", "brain:write"]);
-
     const apps = await store.listConnectedApps();
-
-    expect(apps[0].scopes).toEqual([...MCP_SCOPES]);
+    expect(apps[0].scopes).toEqual(["brain:read", "brain:write"]);
   });
 
   it("evicts the oldest unused DCR client when the bounded registry is full", async () => {

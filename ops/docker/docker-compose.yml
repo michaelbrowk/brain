@@ -1,5 +1,5 @@
-# The file the README's quickstart downloads. Two containers out of one image:
-# the web app, and the mail service it reaches over a Unix socket they share.
+# The README quickstart: web, mail and an isolated MIME parser from one image.
+# Only the appropriate pair of services shares each Unix-socket volume.
 #
 # Every credential is read from the .env file sitting beside this one, so a
 # copy of this file is never a copy of somebody's secrets. Its sibling
@@ -14,8 +14,8 @@ services:
     # Pinned to a published release; `pnpm release` moves this tag with the
     # version, so the file the quickstart downloads always installs the newest
     # one. Raise the tag by hand and run `docker compose up -d` again to
-    # upgrade; both services move together.
-    image: ghcr.io/michaelbrowk/brain:0.23.0
+    # upgrade; all three services move together.
+    image: ghcr.io/michaelbrowk/brain:0.24.0
     command: ["web"]
     init: true
     restart: unless-stopped
@@ -51,17 +51,40 @@ services:
       - mail-socket:/run/brain-mail
   mail:
     # The same published release as web.
-    image: ghcr.io/michaelbrowk/brain:0.23.0
+    image: ghcr.io/michaelbrowk/brain:0.24.0
     command: ["mail"]
     init: true
+    depends_on: [mail-mime]
     restart: unless-stopped
     volumes:
       - mail-state:/var/lib/brain-mail
       - mail-credentials:/run/credentials/brain-mail
       - mail-socket:/run/brain-mail
+      - mail-mime-socket:/run/brain-mail-mime
+
+  mail-mime:
+    image: ghcr.io/michaelbrowk/brain:0.24.0
+    command: ["mail-mime"]
+    init: true
+    restart: unless-stopped
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    # Two one-message children (128 MiB JS heap each), bounded as one pool.
+    mem_limit: 384m
+    cpus: 0.4
+    pids_limit: 32
+    ulimits:
+      nofile: 64
+      core: 0
+    volumes:
+      # Intentionally no credentials, mail state, notes, or host network.
+      - mail-mime-socket:/run/brain-mail-mime
 
 volumes:
   brain-state: {}
   mail-state: {}
   mail-credentials: {}
   mail-socket: {}
+  mail-mime-socket: {}

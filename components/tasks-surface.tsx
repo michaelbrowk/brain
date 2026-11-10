@@ -1,764 +1,170 @@
 "use client";
 
-// The Tasks canvas: the fourth shell surface, beside notes, mail and
-// settings. It owns its own head the way mail does, so the shell draws no
-// toolbar over it, and below that head it is five lists and the categories
-// that cross them.
-//
-// IT RENDERS, IT DOES NOT DERIVE. Which list a record is in and which group
-// inside it is `lib/tasks/lists.ts`, reached through `components/tasks-lists`;
-// the records and the reader's own day are `components/tasks-client`, which
-// the sidebar count reads from the same fetch. Nothing here asks a clock
-// twice or counts anything the column is not showing.
-
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-
-import { DUR, EASE_OUT, SPRING_MATERIALIZE, materializeFade } from "@/lib/motion";
-import type { TaskView } from "@/lib/tasks/model";
-
-import { type TasksListState } from "./shell/helpers";
-import { useTitleReveal } from "./shell/use-title-reveal";
-import { useTaskActions, type TaskFieldPatch } from "./tasks-actions";
-import {
-  TaskRequestError,
-  createTask,
-  mutateTasks,
-  reloadTasks,
-  useTasks,
-} from "./tasks-client";
-import { onTaskCommand, type TaskCommand } from "./tasks-commands";
-import { TasksGhostRow } from "./tasks-ghost-row";
-import { TasksListMenu, TasksListTitle } from "./tasks-list-menu";
-import {
-  EVENING_GROUP_KEY,
-  belongs,
-  categoriesOf,
-  countsFor,
-  headerLabel,
-  listOf,
-  longDayLabel,
-  sectionsFor,
-  type TaskCounts,
-  type TaskSection,
-  type TasksView,
-} from "./tasks-lists";
+import { useReducedMotion } from "framer-motion";
+import { isLinkedTask, type TaskView } from "@/lib/tasks/model";
+import { doneDayOf, listOf, logbookRows } from "@/lib/tasks/lists";
+import { taskCategoryKey } from "@/lib/tasks/details";
+import type { TasksListState } from "./shell/helpers";
 import { surfaceTakesKeys } from "./shell/surface-keys";
-import { ROW_KEYS, TasksRow, tomorrowOf, whenValueFor } from "./tasks-row";
+import { useTaskActions } from "./tasks-actions";
+import { createTask, createTaskCategory, deleteTask, listTaskCategories, mutateTasks, patchTask, reloadTasks, updateTaskCategory, useTasks, type TaskCategory, type TaskPatch } from "./tasks-client";
+import { onTaskCommand } from "./tasks-commands";
+import { TasksNavigation, TasksRail, viewLabel } from "./tasks-list-menu";
+import { TasksCompactRow } from "./tasks-compact-row";
+import { TasksTaskDialog, type TaskDialogDraft } from "./tasks-task-dialog";
+import type { TaskPageOption } from "./tasks-linked-pages";
+import { type TaskCounts, type TasksView, type TaskRow } from "./tasks-lists";
+import { tomorrowOf, whenValueFor } from "./tasks-row";
 import type { WhenValue } from "./tasks-when-picker";
-import { Button } from "./ui/button";
+import { EmojiPicker } from "./emoji-picker";
+import { Button, IconButton } from "./ui/button";
 import { Icon } from "./ui/icon";
 import { Empty } from "./ui/empty";
 import type { ToastOptions } from "./ui/primitives";
-import { ScrollEdge } from "./ui/scroll-edge";
 import { LAYER_IN_DOCUMENT } from "./use-layer-signal";
 
+export type { TaskFieldPatch } from "./tasks-actions";
+export type { TaskCounts } from "./tasks-lists";
 export interface TasksSurfaceProps {
-  /** The open list, or a category view. Navigation state, so Back and
-   *  Forward move through it and the shell owns it. */
   list?: TasksListState | null;
   onSelectList?: (list: TasksListState | null) => void;
   onToast?: (title: string, options?: ToastOptions) => void;
-  /** Bumped by the shell on every store event of type "task" this tab did
-   *  not write itself. A task changed somewhere else (another tab, an MCP
-   *  call, the repeat rule advancing one). The list refetches on it. */
   refreshToken?: number;
-  /** Bumped by "New task" from the palette: the caret goes to the capture
-   *  field. */
   captureRequest?: number;
-  /** A linked task names its note, and the chip in an expanded row opens it.
-   *  The tree lives in the shell, so the two arrive from there. */
+  onCaptureHandled?: (request: number) => void;
   pageTitleOf?: (pageId: string) => string | undefined;
+  pages?: readonly TaskPageOption[];
   onOpenPage?: (pageId: string) => void;
+  onDialogOpenChange?: (open: boolean) => void;
 }
+interface EditorState { key: number; task?: TaskView; category?: string; when: WhenValue }
+const noPages: readonly TaskPageOption[] = [];
 
-/** The column's own pair for the reveal the lone breadcrumb uses: the line is
- *  this scroller's top edge, and the flag goes on the surface, where the head
- *  pill waiting above can see it. */
-const TASKS_TITLE_REVEAL = {
-  scroller: ".brain-tasks-scroll",
-  host: ".brain-tasks",
-} as const;
-
-/** The morning entrance, once per calendar day. */
-const ENTRANCE_KEY = "brain.tasks.entrance";
-/** Total stagger ceiling. Past it every row arrives with no delay at all. */
-const ENTRANCE_CEILING = 0.42;
-const GROUP_STEP = 0.05;
-const RULE_STEP = 0.06;
-const ROW_STEP = 0.03;
-
-/** The capture row's own name in the layer register. Every other name there is
- *  a row's key, which is a record id (nanoid) or an id and a day: neither can
- *  carry a space, so this one cannot be mistaken for a row. */
-const CAPTURE_ROW_LAYER = "the capture row";
-
-export function TasksSurface({
-  list = null,
-  onSelectList,
-  onToast,
-  refreshToken = 0,
-  captureRequest = 0,
-  pageTitleOf,
-  onOpenPage,
-}: TasksSurfaceProps) {
-  const reduce = useReducedMotion() ?? false;
+export function TasksSurface({ list = null, onSelectList, onToast, refreshToken = 0, captureRequest = 0, onCaptureHandled, pageTitleOf, pages = noPages, onOpenPage, onDialogOpenChange }: TasksSurfaceProps) {
   const state = useTasks(refreshToken);
-  const today = state.day?.today ?? "";
-  const offsetMinutes = state.day?.offsetMinutes ?? 0;
-
-  const view: TasksView = useMemo(
-    () =>
-      list === null
-        ? { kind: "list", list: "today" }
-        : typeof list === "string"
-          ? { kind: "list", list }
-          : { kind: "category", category: list.category },
-    [list],
-  );
-
-  /** Every write a row can ask for, and the two sets that say which rows are
-   *  arriving and which are still folding. Shared with the Today block on
-   *  Home (`components/hub-today.tsx`), so a completion is one cycle and not
-   *  two implementations of one. */
+  const today = state.day?.today || "";
+  const offsetMinutes = state.day?.offsetMinutes || 0;
+  const reduce = useReducedMotion() ?? false;
+  const view: TasksView = useMemo(() => typeof list === "object" && list !== null ? { kind: "category", category: list.category } : { kind: "list", list: list || "today" }, [list]);
   const actions = useTaskActions({ today, offsetMinutes, onToast });
-  const { held, inserted } = actions;
+  const [catalog, setCatalog] = useState<TaskCategory[]>([]);
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({ completed: true });
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [editor, setEditor] = useState<EditorState | null>(null);
+  const surface = useRef<HTMLElement>(null);
+  const scroller = useRef<HTMLDivElement>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const returnFocus = useRef<HTMLElement | null>(null);
+  const serial = useRef(0);
+  const handledCapture = useRef(0);
+  const pendingNamedTask = useRef<string | null>(null);
+  const layerKeys = useRef(new WeakSet<KeyboardEvent>());
+  const categories = useMemo(() => {
+    const merged = new Map(catalog.map((entry) => [taskCategoryKey(entry.name), entry]));
+    for (const task of state.tasks) if (task.category && !merged.has(taskCategoryKey(task.category))) merged.set(taskCategoryKey(task.category), { name: task.category });
+    return [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }, [catalog, state.tasks]);
+  const navigationCategories = useMemo(() => state.tasks.some((task) => !task.category) ? [...categories, { name: "" }] : categories, [categories, state.tasks]);
+  const categoryFor = useCallback((name?: string) => categories.find((entry) => taskCategoryKey(entry.name) === taskCategoryKey(name || "")), [categories]);
+  const matches = useCallback((task: TaskView) => view.kind === "category" ? taskCategoryKey(task.category || "") === taskCategoryKey(view.category) : view.list === "all" || listOf(task, today, offsetMinutes) === view.list, [view, today, offsetMinutes]);
+  const active = useMemo(() => state.tasks.filter((task) => !task.done && matches(task)).sort((a, b) => {
+    const late = (task: TaskView) => !!(task.deadline && task.deadline < today || task.when && task.when !== "someday" && task.when < today);
+    return Number(late(b)) - Number(late(a)) || a.created.localeCompare(b.created);
+  }), [state.tasks, matches, today]);
+  const groups = useMemo(() => {
+    const result = new Map<string, { name: string; tasks: TaskView[] }>();
+    for (const task of active) { const key = taskCategoryKey(task.category || ""); const group = result.get(key); if (group) group.tasks.push(task); else result.set(key, { name: categoryFor(task.category)?.name || task.category || "No category", tasks: [task] }); }
+    return [...result.entries()].map(([key, group]) => ({ key, ...group }));
+  }, [active, categoryFor]);
+  const completed = useMemo(() => logbookRows(state.tasks, today, offsetMinutes).filter((row) => {
+    if (view.kind === "category") return taskCategoryKey(row.task.category || "") === taskCategoryKey(view.category);
+    if (view.list === "all" || view.list === "logbook") return true;
+    if (view.list === "today") return !!row.task.doneAt && doneDayOf(row.task.doneAt, offsetMinutes) === today;
+    return listOf({ ...row.task, done: false }, today, offsetMinutes) === view.list;
+  }), [state.tasks, today, offsetMinutes, view]);
+  const drawn: TaskRow[] = useMemo(() => [...active.map((task) => ({ key: task.id, task, untickable: true })), ...(!collapsed.completed ? completed : [])], [active, completed, collapsed.completed]);
 
-  const rows = useMemo(
-    () => state.tasks.map((task) => held.get(task.id) ?? task),
-    [held, state.tasks],
-  );
-  const sections = useMemo(
-    () => (today ? sectionsFor(rows, view, today, offsetMinutes) : []),
-    [offsetMinutes, rows, today, view],
-  );
-  const categories = useMemo(() => categoriesOf(state.tasks), [state.tasks]);
-
-  /** The column's cursor runs over ROWS and not over records, because the
-   *  Logbook draws one row per completion and a daily task has a month of
-   *  them under one id. Two rows that answered to one selection would light
-   *  together and fight over the capsule's `layoutId`. */
-  const drawn = useMemo(
-    () => sections.flatMap((section) => section.rows),
-    [sections],
-  );
-  /** A history row (a repeat's past completion) answers no key, so the
-   *  arrows step over it; only rows that can be acted on take the capsule. */
-  const order = useMemo(
-    () => drawn.filter((row) => row.untickable).map((row) => row.key),
-    [drawn],
-  );
-
-  /** AN EXPANSION DOES NOT SURVIVE THE COMPLETION IT IS OPEN OVER.
-   *
-   *  Tick the checkbox of a row whose chips are open and the chips would stay:
-   *  the box stops the press from reaching the row, `openRow` refuses an inert
-   *  row, and every key on it is dead, so a When menu and a category picker
-   *  would sit live over a record the reader has finished with and nothing
-   *  short of an arrow key would shut them.
-   *
-   *  Read off the RECORD and derived during the render, not cleared by the
-   *  gesture in an effect: a completion that arrives from another tab closes
-   *  it the same way, there is no frame in which the chips are drawn over a
-   *  struck title, and `react-hooks/set-state-in-effect` is right that a value
-   *  a render can compute is not state to write.
-   *
-   *  So an Undo puts the chips back where the reader left them, because they
-   *  never dismissed them. That is the one consequence of deriving rather than
-   *  clearing, and it is the behaviour Undo should have. */
-  const expandedKey =
-    drawn.find((row) => row.key === expandedId)?.task.done === true
-      ? null
-      : expandedId;
-
-  const entrance = useEntrance({
-    today,
-    replay: view.kind === "list" && view.list === "today",
-    ready: sections.length > 0,
-  });
-
-  /** A TASK LANDS IN THE LIST IT WAS TYPED INTO. Anything else files what the
-   *  reader has written somewhere they are not looking, with no feedback.
-   *
-   *  Today takes today, Upcoming takes tomorrow (the first day that list can
-   *  hold, since Upcoming is strictly after today), Someday takes the word,
-   *  a category view takes the word and no day, and the Inbox takes neither.
-   *  The Logbook has no ghost row at all: a task written straight into the
-   *  Logbook would have to be born completed, and nobody means that. */
-  const capture = useCallback(
-    (title: string, picked: WhenValue) => {
-      const seed =
-        view.kind === "category"
-          ? view.category
-            ? { category: view.category }
-            : {}
-          : view.list === "today"
-            ? { when: today }
-            : view.list === "upcoming"
-              ? { when: tomorrowOf(today) }
-              : view.list === "someday"
-                ? { when: "someday" }
-                : {};
-      // WHAT THE READER PICKED WINS over the list's own seed, and only what
-      // they picked: a line typed into Today with no picking still lands
-      // today, because an untouched chip answers `when: null` and overrides
-      // nothing. A clock and an evening both need a day, so neither travels
-      // without one.
-      const chosen =
-        picked.when === null
-          ? {}
-          : {
-              when: picked.when,
-              ...(picked.time !== null ? { time: picked.time } : {}),
-              ...(picked.evening ? { evening: true as const } : {}),
-            };
-      void createTask({ title, ...seed, ...chosen })
-        .then((task) => {
-          actions.markInserted(task.id);
-          mutateTasks((tasks) => [task, ...tasks]);
-        })
-        .catch((error: unknown) => {
-          onToast?.(
-            error instanceof TaskRequestError && error.message
-              ? error.message
-              : "That did not save",
-            { urgent: true },
-          );
-        });
-    },
-    [actions, onToast, today, view],
-  );
-
-  /** WHICH LAYERS ARE STANDING OVER THIS COLUMN, under the name of whatever
-   *  raised each one: a row's key, or the capture row's. A ref and not state,
-   *  because it is read on a keydown and nothing on screen is drawn from it,
-   *  so a render per panel would be a render for nobody.
-   *
-   *  A SET AND NOT ONE SLOT. Two names can stand at once — a chip pressed while
-   *  another panel is up raises the second before Radix takes the first down —
-   *  and one slot would let the older close empty a register the newer panel is
-   *  still standing in. The order the panels actually arrive in makes that
-   *  unreachable today; a set makes it unreachable without the argument. */
-  const layers = useRef(new Set<string>());
-  const noteLayer = useCallback((key: string, open: boolean) => {
-    if (open) layers.current.add(key);
-    else layers.current.delete(key);
-  }, []);
-
-  const selectNext = useCallback(
-    (afterId: string) => {
-      const at = order.indexOf(afterId);
-      setSelectedId(order[at + 1] ?? order[at - 1] ?? null);
-    },
-    [order],
-  );
-
-  const surfaceRef = useRef<HTMLElement | null>(null);
-  useArrowKeys({ surface: surfaceRef, order, selectedId, setSelectedId });
-  useEscapeLayers({ surface: surfaceRef, layers, setExpandedId });
-  useNamedTask({
-    tasks: state.tasks,
-    loading: state.loading,
-    today,
-    offsetMinutes,
-    view,
-    reduce,
-    onSelectList,
-    setSelectedId,
-  });
-
-  // The palette's two rows and the row's two keys are one action each.
+  useEffect(() => { let mounted = true; void listTaskCategories().then((entries) => { if (mounted) setCatalog(entries); }).catch(() => { /* Task-derived categories stay available if the catalog cannot load. */ }); return () => { mounted = false; }; }, [refreshToken]);
+  useEffect(() => { onDialogOpenChange?.(editor !== null); return () => onDialogOpenChange?.(false); }, [editor, onDialogOpenChange]);
+  useEffect(() => { scroller.current?.scrollTo?.({ top: 0 }); }, [list]);
+  const openTask = useCallback((task?: TaskView, invoker?: HTMLElement) => {
+    returnFocus.current = invoker || (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    setEditor({ key: ++serial.current, task, category: task?.category || (view.kind === "category" ? view.category || undefined : undefined), when: task ? { when: task.when || null, evening: !!task.evening, time: task.time || null } : { when: view.kind === "list" && view.list === "today" ? today : view.kind === "list" && view.list === "upcoming" ? tomorrowOf(today) : view.kind === "list" && view.list === "someday" ? "someday" : null, evening: false, time: null } });
+  }, [view, today]);
+  useEffect(() => { if (!today || !captureRequest || handledCapture.current === captureRequest) return; handledCapture.current = captureRequest; onCaptureHandled?.(captureRequest); queueMicrotask(() => openTask()); }, [captureRequest, today, openTask, onCaptureHandled]);
   useEffect(() => {
-    return onTaskCommand((command) => {
-      const row = drawn.find((entry) => entry.key === selectedId);
-      // A Logbook row that is history moves nothing, the same answer the bare
-      // letters give on the row itself.
-      if (!row || !row.untickable) return;
-      const move = COMMAND_KEYS[command];
-      void actions.rescheduleTask(
-        row.task,
-        whenValueFor(row.task, move.when(today)),
-        move.label,
-      );
-    });
-  }, [actions, drawn, selectedId, today]);
-
-  // Every list but the Logbook: see `capture`.
-  const capturable = !(view.kind === "list" && view.list === "logbook");
-  const counts = useCounts(state.tasks, today, offsetMinutes);
-  const empty =
-    today !== "" && sections.length === 0 && !state.loading && state.error === null;
-
-  /* THE CAPTION IS ONLY TODAY'S. "Today" is the one word on this surface whose
-     meaning is a date, so the line under it says which one, in full, the way a
-     note's meta line says when it was edited. Upcoming, Someday, the Inbox,
-     the Logbook and every category mean the same thing on every day of the
-     year, and a line under them would be reserved space with nothing to put in
-     it — the counts the reader might want are already on the group headers. */
-  const caption =
-    view.kind === "list" && view.list === "today" && today !== ""
-      ? longDayLabel(today)
-      : null;
-
-  const titleRef = useRef<HTMLButtonElement>(null);
-  useTitleReveal(titleRef, TASKS_TITLE_REVEAL);
-
-  return (
-    <section
-      ref={surfaceRef}
-      aria-label="Tasks"
-      data-testid="tasks-surface"
-      className="brain-tasks"
-    >
-      <div className="brain-tasks-scroll">
-        {/* the head floats over the rows at every width, so the edge is
-            unconditional and its height follows --mail-chrome in CSS (§7) */}
-        <ScrollEdge variant="blur" steps={1} />
-
-        {/* THE HEAD IS INSIDE THE THING IT FLOATS OVER. As a sibling of the
-            scroller it was a hole in the wheel's scroll chain: the pill is a
-            hit target from the moment it is up, which is the moment the
-            reader is scrolling, and the chain from it ran head → surface →
-            wrapper → the shell's scroller, not one of which scrolls anything
-            once the column binds to the window. It floats on the scroll
-            edge's own construction instead — sticky at the inset, its height
-            cancelled by its own negative margin — so it stands where it
-            always stood, takes no box in the flow, and a wheel over it
-            reaches the column it is standing on. */}
-        <header className="brain-tasks-head">
-          <TasksListMenu
-            view={view}
-            today={today}
-            categories={categories}
-            onSelect={(next) => onSelectList?.(next)}
-          />
-        </header>
-
-        <div className="brain-tasks-scrollfoot brain-tasks-scrollpad">
-          {/* The head a note has, in the note's own registers: the list's name
-              on paper where a page title stands, and the one caption Today
-              carries under it on the meta line's spacing. It comes FIRST, so
-              Tab reaches the switcher before the capture field and a reader
-              reads the column's name before its rows. */}
-          <div className="brain-tasks-title-block">
-            <TasksListTitle
-              view={view}
-              categories={categories}
-              titleRef={titleRef}
-              onSelect={(next) => onSelectList?.(next)}
-            />
-            {caption !== null && (
-              <div className="brain-page-meta text-caption">{caption}</div>
-            )}
-          </div>
-
-          {capturable && (
-            <ul className="brain-tasks-rows" aria-label="New task">
-              <TasksGhostRow
-                captureRequest={captureRequest}
-                today={today}
-                onCreate={capture}
-                onLayer={(open) => noteLayer(CAPTURE_ROW_LAYER, open)}
-              />
-            </ul>
-          )}
-
-          {state.error !== null && (
-            <div className="brain-tasks-message">
-              <Empty
-                icon="checklist-linear"
-                title="Tasks could not load"
-                hint={state.error}
-              />
-              <Button variant="quiet" onClick={() => reloadTasks()}>
-                Try again
-              </Button>
-            </div>
-          )}
-
-          <AnimatePresence initial={false}>
-            {sections.map((section, index) => (
-              <TaskGroup
-                key={section.group.key}
-                section={section}
-                index={index}
-                counted={view.kind === "list" && view.list === "logbook"}
-                reduce={reduce}
-                entrance={entrance}
-                held={held}
-                today={today}
-                offsetMinutes={offsetMinutes}
-                categories={categories.map((entry) => entry.category)}
-                selectedId={selectedId}
-                expandedId={expandedKey}
-                inserted={inserted}
-                pageTitleOf={pageTitleOf}
-                onOpenPage={onOpenPage}
-                onSelect={setSelectedId}
-                onSelectNext={selectNext}
-                onExpand={setExpandedId}
-                onComplete={actions.completeTask}
-                onReopen={(task, refusal) =>
-                  void actions.reopenTask(task, refusal)
-                }
-                onReschedule={actions.rescheduleTask}
-                onPatch={actions.patchField}
-                onFoldEnd={actions.releaseFold}
-                onLayer={noteLayer}
-              />
-            ))}
-          </AnimatePresence>
-
-          {empty && (
-            <motion.div
-              className="brain-tasks-empty"
-              {...(reduce
-                ? materializeFade
-                : {
-                    initial: { opacity: 0, scale: 0.96 },
-                    animate: { opacity: 1, scale: 1 },
-                    transition: SPRING_MATERIALIZE,
-                  })}
-            >
-              <Empty {...emptyFor(view, counts)} />
-            </motion.div>
-          )}
-        </div>
-        {/* Below md this column runs under the mobile tab bar exactly as the
-            mail one does (§7), and two lists in one slot are one design. */}
-        <ScrollEdge
-          variant="blur"
-          position="bottom"
-          steps={1}
-          size={90}
-          className="md:hidden"
-        />
-      </div>
-    </section>
-  );
-}
-
-/** ONE ROW, NAMED IN THE URL: `/tasks?task=<id>`.
- *
- *  Something outside this column points at one task: a notification, a row on
- *  Home, a link in a note. The column has to show it wherever it lives.
- *  The list is switched when the record is not in the open one, the capsule
- *  lands on the row, and the query LEAVES WITH IT: a `?task=` left in the bar
- *  would take the reader back to that row every time they came to Tasks, and
- *  the open list is navigation state the shell already owns.
- *
- *  A missing id selects nothing and says nothing: a link to a task somebody
- *  has since deleted is not an error to report to whoever followed it. The
- *  query still leaves, because that is an answer too, and one left standing is
- *  read again on every refetch. The records have to be in before it can be
- *  told apart from a record that has not loaded yet, which is what `loading`
- *  is read for. */
-function useNamedTask({
-  tasks,
-  loading,
-  today,
-  offsetMinutes,
-  view,
-  reduce,
-  onSelectList,
-  setSelectedId,
-}: {
-  tasks: readonly TaskView[];
-  loading: boolean;
-  today: string;
-  offsetMinutes: number;
-  view: TasksView;
-  reduce: boolean;
-  onSelectList?: (list: TasksListState | null) => void;
-  setSelectedId: (id: string | null) => void;
-}) {
-  // THE URL IS THE STATE, so there is none of its own here: the query is read
-  // on every run and taken off once it has been ANSWERED, which is what stops
-  // the next run. `nav` exists only so Back and Forward cause a run at all,
-  // and `asked` carries the id across a list switch, because opening a list is
-  // a navigation and the query may not survive it.
-  const [nav, setNav] = useState(0);
-  const asked = useRef<string | null>(null);
-
-  useEffect(() => {
-    const bump = () => setNav((count) => count + 1);
-    window.addEventListener("popstate", bump);
-    return () => window.removeEventListener("popstate", bump);
-  }, []);
-
-  useEffect(() => {
-    const id = taskParam() ?? asked.current;
-    if (id === null || today === "") return;
-    const task = tasks.find((entry) => entry.id === id);
-    if (task === undefined) {
-      // Not loaded yet is not the same answer as not there.
-      if (loading) return;
-      // NOTHING TO ACT ON, and nothing said: a link to a task somebody has
-      // since deleted is not an error to report to whoever followed it. The
-      // query comes off all the same, because the surface HAS answered it:
-      // there is no such task. A `?task=` left standing is read again on every
-      // dependency change, so an id that becomes resolvable later would select
-      // that row and scroll the column long after the reader followed the
-      // link.
-      asked.current = null;
-      clearTaskParam();
-      return;
+    function openNamed() {
+      const id = new URLSearchParams(window.location.search).get("task") || pendingNamedTask.current;
+      if (!id || !today || state.loading) return;
+      const task = state.tasks.find((entry) => entry.id === id);
+      if (task) { pendingNamedTask.current = null; openTask(task); }
+      const url = new URL(window.location.href); url.searchParams.delete("task"); window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
     }
-    if (!belongs(task, view, today, offsetMinutes)) {
-      // The list the record lives in, which the shell opens. This runs again
-      // once it has, and the row is drawn by then.
-      asked.current = id;
-      onSelectList?.(listOf(task, today, offsetMinutes));
-      return;
+    queueMicrotask(openNamed); window.addEventListener("popstate", openNamed);
+    return () => window.removeEventListener("popstate", openNamed);
+  }, [state.tasks, state.loading, today, openTask]);
+  const moveTask = useCallback(async (task: TaskView, when: string, label: string) => { try { await actions.rescheduleTask(task, whenValueFor(task, when), label); } finally { actions.releaseFold(task.id); } }, [actions]);
+  useEffect(() => onTaskCommand((command) => { const row = drawn.find((entry) => entry.key === selectedId); if (!row?.untickable || row.task.done) return; void moveTask(row.task, command === "move-today" ? today : "someday", command === "move-today" ? "Today" : "Someday").catch(() => {}); }), [drawn, selectedId, today, moveTask]);
+  useEffect(() => {
+    const capture = (event: KeyboardEvent) => { if (document.querySelector(LAYER_IN_DOCUMENT)) layerKeys.current.add(event); };
+    const key = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || layerKeys.current.has(event) || editor || !surfaceTakesKeys(surface.current)) return;
+      if (event.target instanceof Element && event.target.closest("input,textarea,[contenteditable]")) return;
+      const meta = event.metaKey || event.ctrlKey;
+      const rows = drawn.filter((entry) => entry.untickable);
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); const at = rows.findIndex((entry) => entry.key === selectedId); const next = rows[Math.max(0, Math.min(rows.length - 1, at + (event.key === "ArrowDown" ? 1 : -1)))]; if (next) { setSelectedId(next.key); surface.current?.querySelector<HTMLButtonElement>(`[data-row-key="${CSS.escape(next.key)}"] .tasks-compact-open`)?.focus(); } return; }
+      if (!meta && !event.altKey && event.key.toLowerCase() === "n") { event.preventDefault(); openTask(); return; }
+      const selected = rows.find((entry) => entry.key === selectedId); if (!selected || selected.task.done) return;
+      if (meta && event.key === "Enter") { event.preventDefault(); void actions.completeTask(selected.task).catch(() => {}); return; }
+      const when = meta && event.key === "]" ? tomorrowOf(today) : !meta && event.key.toLowerCase() === "t" ? today : !meta && event.key.toLowerCase() === "s" ? "someday" : null;
+      if (when) { event.preventDefault(); void moveTask(selected.task, when, when === today ? "Today" : when === "someday" ? "Someday" : "Tomorrow").catch(() => {}); }
+    };
+    window.addEventListener("keydown", capture, true); window.addEventListener("keydown", key);
+    return () => { window.removeEventListener("keydown", capture, true); window.removeEventListener("keydown", key); };
+  }, [editor, drawn, selectedId, today, actions, moveTask, openTask]);
+  function restoreFocus() { if (returnFocus.current?.isConnected) returnFocus.current.focus(); else { const mobile = surface.current?.querySelector<HTMLButtonElement>(".tasks-narrow-navigation button"); if (mobile && getComputedStyle(mobile.parentElement!).display !== "none") mobile.focus(); else heading.current?.focus(); } }
+  async function createCategory(name: string) { const saved = await createTaskCategory(name); setCatalog((entries) => [...entries.filter((entry) => taskCategoryKey(entry.name) !== taskCategoryKey(saved.name)), saved]); return saved; }
+  async function setIcon(name: string, icon: string | null) { try { const saved = await updateTaskCategory(name, icon); setCatalog((entries) => [...entries.filter((entry) => taskCategoryKey(entry.name) !== taskCategoryKey(saved.name)), saved]); } catch (error) { onToast?.(error instanceof Error ? error.message : "Couldn’t update this icon", { urgent: true }); } }
+  function emoji(name: string, large = false) { const icon = categoryFor(name)?.icon; return <EmojiPicker hasIcon={!!icon} onPick={(next) => void setIcon(name, next)} onRemove={() => void setIcon(name, null)}><IconButton type="button" size={large ? 36 : 28} className={large ? "tasks-category-emoji tasks-category-emoji-large" : "tasks-category-emoji"} aria-label={`${icon ? "Change" : "Add"} category icon: ${name}`}><span aria-hidden>{icon || <Icon name="document-text" size={large ? 24 : 16} />}</span></IconButton></EmojiPicker>; }
+  async function save(draft: TaskDialogDraft) {
+    const task = draft.baseline || editor?.task;
+    let saved: TaskView;
+    if (task) {
+      const patch: TaskPatch = { body: draft.body, bodyRev: draft.bodyRev };
+      if (!isLinkedTask(task) && draft.title !== task.title) patch.title = draft.title;
+      if ((task.category || null) !== (draft.category || null)) patch.category = draft.category || null;
+      if ((task.when || null) !== draft.when.when) patch.when = draft.when.when;
+      if (!!task.evening !== draft.when.evening) patch.evening = draft.when.evening ? true : null;
+      if ((task.time || null) !== draft.when.time) patch.time = draft.when.time;
+      if ((task.deadline || null) !== draft.deadline) patch.deadline = draft.deadline;
+      if (JSON.stringify(task.repeat || null) !== JSON.stringify(draft.repeat)) patch.repeat = draft.repeat;
+      if (JSON.stringify(task.relatedPageIds || []) !== JSON.stringify(draft.relatedPageIds)) patch.relatedPageIds = draft.relatedPageIds;
+      saved = await patchTask(task.id, patch);
+      mutateTasks((entries) => entries.map((entry) => entry.id === saved.id ? saved : entry));
+    } else {
+      saved = await createTask({ title: draft.title, body: draft.body, relatedPageIds: draft.relatedPageIds, ...(draft.category ? { category: draft.category } : {}), ...(draft.when.when ? { when: draft.when.when } : {}), ...(draft.when.evening ? { evening: true } : {}), ...(draft.when.time ? { time: draft.when.time } : {}), ...(draft.deadline ? { deadline: draft.deadline } : {}), ...(draft.repeat ? { repeat: draft.repeat } : {}) });
+      mutateTasks((entries) => [saved, ...entries]); actions.markInserted(saved.id);
     }
-    asked.current = null;
-    setSelectedId(id);
-    const row = document.querySelector<HTMLElement>(
-      `.brain-task-row-item[data-task-id="${CSS.escape(id)}"]`,
-    );
-    row?.scrollIntoView?.({ block: "center", behavior: reduce ? "auto" : "smooth" });
-    clearTaskParam();
-  }, [loading, nav, offsetMinutes, onSelectList, reduce, setSelectedId, tasks, today, view]);
+    onToast?.(task ? "Changes saved" : "Task created");
+  }
+  async function remove() { if (!editor?.task) return; const id = editor.task.id; await deleteTask(id); mutateTasks((entries) => entries.filter((entry) => entry.id !== id)); onToast?.("Task deleted"); }
+  function row(entry: TaskRow, finished = false) { return <TasksCompactRow key={entry.key} task={entry.task} rowKey={entry.key} historic={!entry.untickable} selected={selectedId === entry.key} today={today} offsetMinutes={offsetMinutes} reduce={reduce} pageTitle={entry.task.page ? pageTitleOf?.(entry.task.page) || pages.find((page) => page.id === entry.task.page)?.title : undefined} categoryIcon={categoryFor(entry.task.category)?.icon} showCategory={finished && view.kind !== "category"} showPlan={view.kind === "category" || view.list !== "today"} onOpen={openTask} onSelect={setSelectedId} onComplete={actions.completeTask} onReopen={actions.reopenTask} />; }
+  const label = view.kind === "category" ? categoryFor(view.category)?.name || view.category || "No category" : viewLabel(view);
+  return <section ref={surface} aria-label="Tasks" data-testid="tasks-surface" className="brain-tasks tasks-workspace">
+    <TasksRail view={view} categories={navigationCategories} onSelect={(next) => onSelectList?.(next)} onNew={() => openTask()} />
+    <div className="tasks-narrow-navigation"><TasksNavigation view={view} categories={navigationCategories} onSelect={(next) => onSelectList?.(next)} /></div>
+    <div className="tasks-workspace-scroll" ref={scroller}><div className="tasks-workspace-canvas">
+      <header className="tasks-workspace-header">{view.kind === "category" && view.category && emoji(view.category, true)}<h1 ref={heading} tabIndex={-1} className="text-title">{label}</h1></header>
+      {state.error && <div className="tasks-workspace-message"><Empty icon="checklist-linear" title="Tasks could not load" hint={state.error} /><Button variant="quiet" onClick={() => reloadTasks()}>Try again</Button></div>}
+      {!state.loading && !state.error && groups.length === 0 && <div className="tasks-workspace-empty"><Empty icon="checklist-linear" title="Nothing here" /></div>}
+      {groups.map((group) => <section key={group.key} className="tasks-workspace-group">{view.kind !== "category" && <div className="tasks-group-heading">{group.key && emoji(group.name)}<button type="button" aria-expanded={!collapsed[group.key]} onClick={() => setCollapsed((current) => ({ ...current, [group.key]: !current[group.key] }))}><h2 className="text-subheading">{group.name}</h2><Icon name={collapsed[group.key] ? "alt-arrow-right" : "alt-arrow-down"} size={14} /></button></div>}{!collapsed[group.key] && <ul>{group.tasks.map((task) => row({ key: task.id, task, untickable: true }))}</ul>}</section>)}
+      {completed.length > 0 && <section className="tasks-workspace-completed"><button type="button" className="tasks-completed-toggle text-control" aria-expanded={!collapsed.completed} onClick={() => setCollapsed((current) => ({ ...current, completed: !current.completed }))}><Icon name={collapsed.completed ? "alt-arrow-right" : "alt-arrow-down"} size={14} />Completed<span className="text-caption">{completed.length}</span></button>{!collapsed.completed && <ul>{completed.map((entry) => row(entry, true))}</ul>}</section>}
+    </div></div>
+    <button type="button" className="brain-mobile-new tasks-tablet-new fixed brain-touch-min focus-inset" data-hidden={editor ? "" : undefined} inert={editor ? true : undefined} aria-label="Add task" onClick={() => openTask()}><span className="brain-mobile-new-circle"><Icon name="add" size={17} /></span></button>
+    {editor && <TasksTaskDialog key={editor.key} task={editor.task} category={editor.category} when={editor.when} today={today} categories={categories} pages={pages} onCreateCategory={createCategory} onSave={save} onDelete={editor.task ? remove : undefined} onClose={() => setEditor(null)} onOpenPage={onOpenPage} onReturnFocus={restoreFocus} />}
+  </section>;
 }
-
-function taskParam(): string | null {
-  if (typeof window === "undefined") return null;
-  const id = new URLSearchParams(window.location.search).get("task");
-  return id === null || id === "" ? null : id;
-}
-
-/** The rest of the URL and the shell's navigation state both stand: only the
- *  one query this surface answers to comes off. */
-function clearTaskParam(): void {
-  if (typeof window === "undefined") return;
-  const url = new URL(window.location.href);
-  if (!url.searchParams.has("task")) return;
-  url.searchParams.delete("task");
-  window.history.replaceState(
-    window.history.state,
-    "",
-    `${url.pathname}${url.search}${url.hash}`,
-  );
-}
-
-/** The palette's rows and the row's keys resolve through one table. */
-const COMMAND_KEYS: Record<TaskCommand, (typeof ROW_KEYS)[string]> = {
-  "move-today": ROW_KEYS.t as (typeof ROW_KEYS)[string],
-  "move-someday": ROW_KEYS.s as (typeof ROW_KEYS)[string],
-};
-
-/** The fields a chip inside an expanded row can set. Its one home is
- *  `components/tasks-actions`, beside the write that applies it; re-exported
- *  for the callers that already had the type from here. */
-export type { TaskFieldPatch };
-
-function TaskGroup({
-  section,
-  index,
-  counted,
-  reduce,
-  entrance,
-  held,
-  today,
-  offsetMinutes,
-  categories,
-  selectedId,
-  expandedId,
-  inserted,
-  pageTitleOf,
-  onOpenPage,
-  onSelect,
-  onSelectNext,
-  onExpand,
-  onComplete,
-  onReopen,
-  onReschedule,
-  onPatch,
-  onFoldEnd,
-  onLayer,
-}: {
-  section: TaskSection;
-  index: number;
-  /** The Logbook is the one list whose headers carry their size. */
-  counted: boolean;
-  reduce: boolean;
-  entrance: boolean;
-  held: ReadonlyMap<string, TaskView>;
-  today: string;
-  offsetMinutes: number;
-  categories: string[];
-  selectedId: string | null;
-  expandedId: string | null;
-  inserted: ReadonlySet<string>;
-  pageTitleOf?: (pageId: string) => string | undefined;
-  onOpenPage?: (pageId: string) => void;
-  onSelect: (id: string) => void;
-  onSelectNext: (afterId: string) => void;
-  onExpand: (id: string | null) => void;
-  onComplete: (task: TaskView, refusal?: string) => Promise<void>;
-  onReopen: (task: TaskView, refusal?: string) => void;
-  onReschedule: (task: TaskView, value: WhenValue, label: string) => Promise<void>;
-  onPatch: (task: TaskView, patch: TaskFieldPatch) => void;
-  onFoldEnd: (id: string) => void;
-  /** Whether one of this group's rows has a layer open above it. */
-  onLayer: (rowKey: string, open: boolean) => void;
-}) {
-  const groupDelay = Math.min(index * GROUP_STEP, ENTRANCE_CEILING);
-  // The count is what the LIST holds, so a row still folding is already out
-  // of it: one decrement at 1300, and the row leaves at 1520.
-  const count = section.rows.filter((row) => !held.has(row.task.id)).length;
-
-  return (
-    <motion.section
-      className="brain-tasks-section"
-      exit={{
-        opacity: 0,
-        height: 0,
-        transition: {
-          opacity: { duration: DUR.fast },
-          height: { duration: DUR.page, ease: EASE_OUT },
-        },
-      }}
-    >
-      {section.group.label !== null && (
-        <div className="brain-tasks-section-head">
-          {/* Spec 2. THE EVENING IS A PART OF THE DAY, not one more category,
-              and the moon is what says so: every other header on this surface
-              is a word a person typed or a date. It arrives with the label it
-              belongs to rather than appearing under it. `lib/tasks/lists.ts`
-              says a group carries no glyph and the renderer draws this one. */}
-          {section.group.key === EVENING_GROUP_KEY && (
-            <motion.span
-              aria-hidden
-              className="brain-tasks-section-moon"
-              initial={entrance ? { opacity: 0 } : false}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0, transition: { duration: DUR.fast, delay: 0 } }}
-              transition={{
-                duration: DUR.base,
-                ease: EASE_OUT,
-                delay: reduce ? 0 : groupDelay,
-              }}
-            >
-              <Icon name="moon-linear" size={14} />
-            </motion.span>
-          )}
-          <motion.h2
-            className="brain-tasks-section-label text-label"
-            initial={entrance ? (reduce ? { opacity: 0 } : { opacity: 0, y: -4 }) : false}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, transition: { duration: DUR.fast, delay: 0 } }}
-            transition={{
-              duration: DUR.base,
-              ease: EASE_OUT,
-              delay: reduce ? 0 : groupDelay,
-            }}
-          >
-            {section.group.label}
-            {counted && (
-              /* One decrement, not a race: the number the optimistic write
-                 moved at 1300 crossfades while the row below it is still
-                 folding. Keyed on the count, so a re-render with the same
-                 number does not blink. */
-              <AnimatePresence mode="popLayout" initial={false}>
-                <motion.span
-                  key={count}
-                  className="brain-tasks-section-count"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0, transition: { duration: DUR.fast } }}
-                  transition={{ duration: DUR.fast }}
-                >
-                  {countSuffix(count)}
-                </motion.span>
-              </AnimatePresence>
-            )}
-          </motion.h2>
-          <motion.span
-            aria-hidden
-            className="brain-tasks-rule"
-            initial={entrance && !reduce ? { scaleX: 0 } : false}
-            animate={{ scaleX: 1 }}
-            exit={
-              reduce
-                ? { opacity: 0, transition: { duration: DUR.fast, delay: 0 } }
-                : { scaleX: 0, transition: { duration: DUR.page, ease: EASE_OUT, delay: 0 } }
-            }
-            transition={{
-              duration: DUR.page,
-              ease: EASE_OUT,
-              delay: reduce ? 0 : Math.min(groupDelay + RULE_STEP, ENTRANCE_CEILING),
-            }}
-          />
-        </div>
-      )}
-      <ul className="brain-tasks-rows">
-        {section.rows.map(({ key, task, untickable }, row) => (
-          <TasksRow
-            key={key}
-            rowKey={key}
-            historic={!untickable}
-            task={task}
-            today={today}
-            offsetMinutes={offsetMinutes}
-            reduce={reduce}
-            selected={key === selectedId}
-            expanded={key === expandedId}
-            categories={categories}
-            pageTitle={task.page ? pageTitleOf?.(task.page) : undefined}
-            entrance={
-              entrance
-                ? {
-                    delay: Math.min(groupDelay + row * ROW_STEP, ENTRANCE_CEILING),
-                  }
-                : inserted.has(task.id)
-                  ? "insert"
-                  : false
-            }
-            onSelect={onSelect}
-            onSelectNext={onSelectNext}
-            onExpand={onExpand}
-            onComplete={onComplete}
-            onReopen={onReopen}
-            onReschedule={onReschedule}
-            onPatch={onPatch}
-            onFoldEnd={onFoldEnd}
-            onOpenPage={onOpenPage}
-            onLayer={onLayer}
-          />
-        ))}
-      </ul>
-    </motion.section>
-  );
-}
-
-/** `Today` + ` · 5`. The word and its size are two boxes so the size can
- *  crossfade on its own; the separator keeps its leading space so the two
- *  read as one string, and `headerLabel` stays the one spelling of that
- *  string for anything that needs it in one piece. */
-function countSuffix(count: number): string {
-  return headerLabel("", count);
-}
-
-/** The two numbers the empty states report. Its one home is
- *  `components/tasks-lists`, beside the derive that says which list a record
- *  is in; Home's Today block reads the same one. */
-export type { TaskCounts };
-
-function useCounts(
-  tasks: readonly TaskView[],
-  today: string,
-  offsetMinutes: number,
-): TaskCounts {
-  return useMemo(
-    () => countsFor(tasks, today, offsetMinutes),
-    [offsetMinutes, tasks, today],
-  );
-}
-
-/** Seven states, and the two Today hints are alternatives rather than both. */
 export function emptyFor(
   view: TasksView,
   counts: TaskCounts,
@@ -801,147 +207,4 @@ export function emptyFor(
     title: "Nothing done yet",
     hint: "Completed tasks land here, by day",
   };
-}
-
-/** ONCE PER CALENDAR DAY, on the first mount of Today.
- *
- *  The flag flips in a microtask after the first render that has sections,
- *  the `entranceDone` pattern Mail's unified list uses, so rows mounted later
- *  render settled. The day is remembered across mounts, because a reader who
- *  walks to Mail and back has not earned the morning twice; and a date change
- *  in an open tab does not replay it either, since the flag is already down.
- */
-function useEntrance({
-  today,
-  replay,
-  ready,
-}: {
-  today: string;
-  replay: boolean;
-  ready: boolean;
-}): boolean {
-  const [done, setDone] = useState(false);
-  const play = !done && ready && replay && lastEntranceDay() !== today;
-
-  // The flag goes down in a microtask right after the first render that had
-  // rows, never as a synchronous setState inside the effect. Rows that
-  // animated their mount ignore a later `initial`, so the flip only reaches
-  // the ones mounted after it.
-  useEffect(() => {
-    if (done || !ready || !today) return;
-    queueMicrotask(() => setDone(true));
-  });
-
-  useEffect(() => {
-    if (play) rememberEntranceDay(today);
-  }, [play, today]);
-
-  return play;
-}
-
-function lastEntranceDay(): string | null {
-  try {
-    return window.localStorage.getItem(ENTRANCE_KEY);
-  } catch {
-    // a browser with storage off gets the entrance once per mount
-    return null;
-  }
-}
-
-function rememberEntranceDay(today: string): void {
-  try {
-    window.localStorage.setItem(ENTRANCE_KEY, today);
-  } catch {
-    // same
-  }
-}
-
-/** The column's own cursor. The capsule flows between rows on `layoutId`, so
- *  what moves here is one string. */
-function useArrowKeys({
-  surface,
-  order,
-  selectedId,
-  setSelectedId,
-}: {
-  /** The column's root: a column on its way out moves no cursor. */
-  surface: React.RefObject<HTMLElement | null>;
-  order: readonly string[];
-  selectedId: string | null;
-  setSelectedId: (id: string | null) => void;
-}) {
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-      const target = event.target as HTMLElement | null;
-      if (target?.closest?.("input, textarea, [contenteditable]")) return;
-      if (!surfaceTakesKeys(surface.current)) return;
-      if (order.length === 0) return;
-      event.preventDefault();
-      const at = selectedId === null ? -1 : order.indexOf(selectedId);
-      const next =
-        event.key === "ArrowDown"
-          ? Math.min(at + 1, order.length - 1)
-          : Math.max(at - 1, 0);
-      setSelectedId(order[next] ?? null);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [order, selectedId, setSelectedId, surface]);
-}
-
-/** ESCAPE PEELS ONE LAYER AT A TIME.
- *
- *  One key used to close the calendar AND fold the row under it: the picker
- *  answered on its own element, this listener answered on the window, and a
- *  reader who asked for the panel to go lost the row they were working in. A
- *  press outside has never spent two dismissals at once — the panel takes the
- *  press and the row is the next one — and the key says the same sentence.
- *  Escape #1 closes the layer and leaves the row standing with the focus back
- *  on the control that opened it, Escape #2 folds the row. Things behaves this
- *  way.
- *
- *  THE ROW SAYS WHETHER IT HAS A LAYER, and this asks it rather than looking:
- *  every panel a chip opens is portalled to the end of the document, and the
- *  caret in a title is an `input` with no flag on anything.
- *
- *  AND A LAYER NOBODY REPORTED IS STILL A LAYER. The register holds what this
- *  column draws; ⌘K over an open row draws a modal it never hears about, and
- *  the key that dismissed it was folding the row underneath — the same double
- *  dismissal this hook exists to remove, one level up. So the document is read
- *  too, for the shapes a portalled layer has and for nothing that stands
- *  permanently (`LAYER_IN_DOCUMENT` keeps that reasoning).
- *
- *  AND THE PHASE IS WHAT MAKES EITHER ANSWER READABLE. Radix dismisses its own
- *  layers from a `keydown` listener on the DOCUMENT in the capture phase
- *  (`@radix-ui/react-dismissable-layer`), and a panel that is not React's
- *  takes itself out of the document inside that same key. The window's capture
- *  phase is the FIRST stop a key makes, before the document's, so both the
- *  register and the document are read while the layer is still there to be
- *  read. Take the `true` off the listener below and the row folds on the key
- *  that closed the panel. */
-function useEscapeLayers({
-  surface,
-  layers,
-  setExpandedId,
-}: {
-  /** The column's root: a column on its way out folds no row. */
-  surface: React.RefObject<HTMLElement | null>;
-  /** The names of the layers standing over the column. Empty means none. */
-  layers: React.RefObject<Set<string>>;
-  setExpandedId: (id: string | null) => void;
-}) {
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      if (!surfaceTakesKeys(surface.current)) return;
-      // The layer's key, and the layer's own listener is the one that answers
-      // it. The row is the next one.
-      if (layers.current.size > 0) return;
-      if (document.querySelector(LAYER_IN_DOCUMENT) !== null) return;
-      setExpandedId(null);
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [layers, setExpandedId, surface]);
 }

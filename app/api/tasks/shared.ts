@@ -5,6 +5,7 @@ import type { ListName, TaskAnchor, TaskRepeat } from "@/lib/store";
 // than the store's barrel, so validating a request never depends on the Store
 // being reachable.
 import { TASK_ID_RE, taskRecordFields } from "@/lib/tasks/model";
+import { taskBodySchema } from "@/lib/tasks/details";
 
 /** What the two task route files share: the query contract, the field
  *  allowlists and the one error shape. Nothing here reads a clock. */
@@ -129,6 +130,8 @@ export interface CreateBody {
   evening?: true;
   deadline?: string;
   category?: string;
+  relatedPageIds?: string[];
+  body?: string;
   page?: string;
   anchor?: TaskAnchor;
   repeat?: TaskRepeat;
@@ -143,6 +146,9 @@ export const PATCH_FIELDS = [
   "evening",
   "deadline",
   "category",
+  "relatedPageIds",
+  "body",
+  "bodyRev",
   "repeat",
   "done",
   "expectedWhen",
@@ -176,6 +182,9 @@ export const patchBodySchema = z
     evening: patchFields.evening.nullable(),
     deadline: patchFields.deadline.nullable(),
     category: patchFields.category.nullable(),
+    relatedPageIds: patchFields.relatedPageIds.nullable(),
+    body: taskBodySchema.optional(),
+    bodyRev: z.string().regex(/^[a-f0-9]{12}$/).optional(),
     repeat: patchFields.repeat.nullable(),
     done: patchFields.done,
     // Not a field to set: the `when` of the instance the caller was looking
@@ -204,6 +213,9 @@ export interface PatchBody {
   evening?: true | null;
   deadline?: string | null;
   category?: string | null;
+  relatedPageIds?: string[] | null;
+  body?: string;
+  bodyRev?: string;
   repeat?: TaskRepeat | null;
   done?: boolean;
   /** Not a field to set: the `when` of the instance the caller was looking at,

@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync, existsSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync, existsSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync, type SpawnOptions, type SpawnSyncOptionsWithStringEncoding } from "node:child_process";
@@ -732,6 +732,61 @@ describe("install.sh run, upgrade, uninstall", () => {
     expect(r.status).toBe(1);
     expect(r.stderr).toBe("Run this with sudo: it installs Docker and needs root for that.\n");
     expect(r.stdout).toBe("");
+  });
+
+  it.each(["double-slash", "dot-dot", "symlink", "relative"])("uninstall protects the real notes directory through %s", (variant) => {
+    const first = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "" });
+    const notes = path.join(first.installDir, "data", "notes"); mkdirSync(notes, { recursive: true });
+    writeFileSync(path.join(notes, "keep.md"), "keep");
+    const link = path.join(first.installDir, "notes-link"); symlinkSync(notes, link);
+    const configured = variant === "double-slash" ? `${first.installDir}//data/notes`
+      : variant === "dot-dot" ? `${first.installDir}/data/../data/notes`
+      : variant === "relative" ? "data/notes" : link;
+    writeFileSync(path.join(first.installDir, ".env"), `NOTES_ROOT=${configured}\n`);
+    const r = rerun(first, ["--uninstall"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).not.toContain(`would run: rm -rf -- ${path.join(first.installDir, "data")}\n`);
+    expect(r.stdout).not.toContain(`would run: rm -rf -- ${link}\n`);
+    expect(readFileSync(path.join(notes, "keep.md"), "utf8")).toBe("keep");
+  });
+
+  it("uninstall stops before compose down when the configured notes path cannot be resolved", () => {
+    const first = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "" });
+    writeFileSync(path.join(first.installDir, ".env"), `NOTES_ROOT=${first.installDir}/missing\n`);
+    const r = rerun(first, ["--uninstall"]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("nothing was stopped or removed");
+    expect(r.stdout).not.toMatch(/down|rm /);
+  });
+
+  it.each(["install directory", "ancestor", "root", "root symlink", "relative dot", "symlink", "default notes symlink", "default notes root symlink"])("uninstall refuses when notes contain the installation via %s", (variant) => {
+    const r = runInstall({}, ["--uninstall"], {}, undefined, (dir) => {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(path.join(dir, "keep.md"), "note inside the installation");
+      writeFileSync(path.join(dir, "docker-compose.yml"), "services: {}\n");
+      let notes = dir;
+      if (variant === "ancestor") notes = path.dirname(dir);
+      if (variant === "root") notes = "/";
+      if (variant === "relative dot") notes = ".";
+      if (variant === "root symlink") {
+        notes = path.join(dir, "root-link"); symlinkSync("/", notes);
+      }
+      if (variant === "symlink") {
+        notes = path.join(dir, "notes-link"); symlinkSync(dir, notes);
+      }
+      if (variant === "default notes symlink" || variant === "default notes root symlink") {
+        symlinkSync(variant === "default notes root symlink" ? "/" : path.dirname(dir), path.join(dir, "notes"));
+        notes = path.join(dir, "my-notes"); mkdirSync(notes);
+      }
+      writeFileSync(path.join(dir, ".env"), `NOTES_ROOT=${notes}\n`);
+    });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("notes directory contains the install directory");
+    expect(r.stdout).not.toMatch(/down|rm /);
+    expect(r.calls()).not.toMatch(/compose .*down|systemctl/);
+    expect(readFileSync(path.join(r.installDir, "keep.md"), "utf8")).toBe("note inside the installation");
+    expect(existsSync(path.join(r.installDir, ".env"))).toBe(true);
+    expect(existsSync(path.join(r.installDir, "docker-compose.yml"))).toBe(true);
   });
 
   it("uninstall with nothing installed says nothing, since no notes directory exists to name", () => {

@@ -360,28 +360,50 @@ finish() {
 # the one this script wrote, then every entry of the install directory except
 # the notes directory and every directory that contains it. The notes path
 # comes from .env, so notes moved elsewhere inside the directory are spared as
-# well, and the default notes directory is spared whatever .env says. The
-# comparison is textual: a NOTES_ROOT spelled with a doubled slash, through a
-# symlink or as a relative path is not recognised and not protected. Docker
-# or Caddy already gone is no reason to stop before the removal and the last
-# sentence.
+# well, and the default notes directory is spared whatever .env says. Resolve
+# every directory before stopping anything: string-prefix checks on the .env
+# value do not protect notes reached through symlinks, doubled slashes or `..`.
 uninstall() {
+  [ -d "$INSTALL_DIR" ] || return 0
   local notes=""
   if [ -f "$INSTALL_DIR/.env" ]; then notes="$(file_value "$INSTALL_DIR/.env" NOTES_ROOT)"; fi
-  notes="${notes%/}"
+  if [ "$notes" != "/" ]; then notes="${notes%/}"; fi
   NOTES_DIR="${notes:-$INSTALL_DIR/notes}"
+  case "$NOTES_DIR" in /*) ;; *) NOTES_DIR="$INSTALL_DIR/$NOTES_DIR" ;; esac
+  local real_notes real_default real_install real_entry entry protected
+  real_notes="$(cd -P -- "$NOTES_DIR" 2>/dev/null && pwd -P)" || die "Cannot resolve the notes directory $NOTES_DIR; nothing was stopped or removed. Restore the path before uninstalling."
+  real_install="$(cd -P -- "$INSTALL_DIR" && pwd -P)" || die "Cannot resolve the install directory; nothing was stopped or removed."
+  real_default="$real_install/notes"
+  if [ -e "$INSTALL_DIR/notes" ] || [ -L "$INSTALL_DIR/notes" ]; then
+    real_default="$(cd -P -- "$INSTALL_DIR/notes" 2>/dev/null && pwd -P)" || die "Cannot resolve the default notes directory; nothing was stopped or removed."
+  fi
+  # If notes contain the installation, every candidate below could itself be
+  # note content. There is no safe automatic deletion plan for this layout.
+  for protected in "$real_notes" "$real_default"; do
+    # Root contains every absolute installation. Do not derive its glob from
+    # an empty quoted expansion: Bash 3 and Bash 5 match that differently.
+    if [ "$protected" = "/" ] || [[ "$real_install/" == "$protected/"* ]]; then
+      die "The notes directory contains the install directory; nothing was stopped or removed. Move the installation outside the notes directory before uninstalling."
+    fi
+  done
+  local removable=()
+  for entry in "$INSTALL_DIR"/* "$INSTALL_DIR"/.env "$INSTALL_DIR"/.docker-compose.yml.new; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    if [ -d "$entry" ]; then
+      real_entry="$(cd -P -- "$entry" 2>/dev/null && pwd -P)" || die "Cannot resolve $entry; nothing was stopped or removed."
+    else
+      real_entry="$(cd -P -- "$(dirname -- "$entry")" && pwd -P)/$(basename -- "$entry")"
+    fi
+    case "$real_notes/" in "$real_entry"/*) continue ;; esac
+    case "$real_default/" in "$real_entry"/*) continue ;; esac
+    removable+=("$entry")
+  done
   if [ -f "$INSTALL_DIR/docker-compose.yml" ]; then compose down -v || true; fi
   if caddyfile_is_ours; then
     run rm -f "$CADDYFILE"
     run systemctl reload caddy || true
   fi
-  local entry
-  for entry in "$INSTALL_DIR"/* "$INSTALL_DIR"/.env "$INSTALL_DIR"/.docker-compose.yml.new; do
-    [ -e "$entry" ] || continue
-    # The notes directory itself or one of its ancestors, and the default
-    # notes directory: a misread .env must not cost the notes.
-    case "$NOTES_DIR/" in "$entry"/*) continue ;; esac
-    case "$INSTALL_DIR/notes/" in "$entry"/*) continue ;; esac
+  for entry in "${removable[@]}"; do
     run rm -rf -- "$entry"
   done
   if [ -d "$NOTES_DIR" ]; then say "Your notes are still in $NOTES_DIR."; fi

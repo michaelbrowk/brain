@@ -598,8 +598,7 @@ export async function verifyMcpBearerToken(
   // `[...MCP_SCOPES]` handed it whatever the newest release advertises, which
   // is how appending the two mail names widened an env-var credential with no
   // consent screen, no Connected apps row and no Revoke button behind it. The
-  // grant path below is where mail is reached, through `ownerEffectiveScopes`
-  // and a screen the owner approved.
+  // grant path below reaches mail only when that scope was explicitly approved.
   if (verifyMcpToken(`Bearer ${token}`)) {
     return {
       token,

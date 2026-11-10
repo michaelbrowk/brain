@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "encryption": {
+    "algorithm": "aes-256-gcm",
+    "iv": "m7BdqZoKrXWr5r7O",
+    "ciphertext": "IwsQWtmDQrd1pJWYs_SY9HDJ7V0rX6kZvS0ocMmpPIyB65UIKENyhuWdtgpdjSEgLwfMcpWLgQkf7j4f8J-inCAOMHL16fTfo-t2ULUXF_nxkoyWRfG9IHbHgR5Lj_17Mfv2SsdGZBNxuD4hlT8UCyjPSu2Zt1uk7n91xAKn0eSm4yhKh5s4mKYakEW9riB1IucHXYYLRySXByHbGpWlN5blslNWHFJrl9WlMnApan_xtcMfMLduG2z0ypCfbMyXlylMiNfSmbWyruRIA8DPqi-e1vLLgunRfq4ayX4UG3KwKuGLZZvfAzWWX7IkNo7CP5EwkJec9Jo",
+    "tag": "iwMkWSAB_KpzVac0bp9SzA"
+  }
+}

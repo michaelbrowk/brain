@@ -92,7 +92,7 @@ const instantField = z.preprocess(fromYamlInstant, instantSchema);
  *  is one owner setting, so a day and a clock in a file mean the same thing on
  *  every device the owner uses. */
 const timeSchema = z
-  .string({ invalid_type_error: 'write it as "HH:MM"' })
+  .string({ error: 'write it as "HH:MM"' })
   .regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'write it as "HH:MM"');
 
 const pad2 = (value: number): string => String(value).padStart(2, "0");
@@ -215,6 +215,8 @@ export const taskRecordFields = z
     remindedAt: instantField.optional(),
     deadline: dayField.optional(),
     category: boundedText(200).optional(),
+    /** Context only; independent of the source checkbox page/anchor. */
+    relatedPageIds: z.array(idSchema).max(64).refine(ids => new Set(ids).size === ids.length, "duplicate page ids").optional(),
     /** The note that holds the checkbox, for a linked task. */
     page: idSchema.optional(),
     anchor: taskAnchorSchema.optional(),
@@ -361,7 +363,12 @@ export type ParseTaskRecordResult =
  *  file, so the index skips it with a warning and leaves it alone. */
 export function parseTaskRecord(raw: unknown): ParseTaskRecordResult {
   const parsed = taskRecordSchema.safeParse(raw);
-  if (parsed.success) return { ok: true, task: parsed.data };
+  if (parsed.success) {
+    // Empty context is absence, so an ordinary task remains readable by the
+    // strict pre-context schema and removing the last link restores that shape.
+    if (parsed.data.relatedPageIds?.length === 0) delete parsed.data.relatedPageIds;
+    return { ok: true, task: parsed.data };
+  }
   const issue = parsed.error.issues[0];
   const key = issue?.path.join(".");
   const message = issue?.message ?? "does not match the task record shape";

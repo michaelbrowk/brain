@@ -6,7 +6,6 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MotionRender } from "@/test/framer-motion-mock";
-import { DUR } from "@/lib/motion";
 import { ShellSidebar, type ShellSidebarProps } from "./sidebar";
 
 const harness = { reduce: false };
@@ -179,53 +178,32 @@ describe("ShellSidebar tasks row", () => {
     expect(onOpenTasks).toHaveBeenCalledTimes(1);
   });
 
-  it("shows the open-today count on the Tasks row and nothing when it is zero", async () => {
+  it("keeps the Tasks navigation free of counts even when the shared store supplies one", async () => {
     await render({ tasksOpenTodayCount: 3 });
-    expect(navRow("Tasks")?.querySelector(".tree-row-count")?.textContent).toBe("3");
-
+    expect(navRow("Tasks")?.querySelector(".tree-row-count")).toBeNull();
     await render({ tasksOpenTodayCount: 0 });
     expect(navRow("Tasks")?.querySelector(".tree-row-count")).toBeNull();
+  });
 
-    await render();
+  it("does not mount an animated count when task totals change", async () => {
+    await render({ tasksOpenTodayCount: 3 });
+    await render({ tasksOpenTodayCount: 8 });
+    expect(countRender()).toBeUndefined();
+    expect(navRow("Tasks")?.textContent).toBe("Tasks");
+  });
+
+  it("keeps the same count-free navigation under reduced motion", async () => {
+    harness.reduce = true;
+    await render({ tasksOpenTodayCount: 3 });
+    expect(countRender()).toBeUndefined();
     expect(navRow("Tasks")?.querySelector(".tree-row-count")).toBeNull();
   });
 
-  it("crossfades the count when it changes, the way a group header's count does", async () => {
-    // A completion decrements this number while the reader is looking at
-    // Mail or a note, which is the whole reason the chip exists. The group
-    // header in the Tasks column crossfades its own count at DUR.fast, and
-    // one number changing in two places should not change in two ways.
-    await render({ tasksOpenTodayCount: 3 });
-    const chip = countRender();
-    expect(chip?.motion.initial).toEqual({ opacity: 0 });
-    expect(chip?.motion.animate).toEqual({ opacity: 1 });
-    expect(chip?.motion.exit).toEqual({
-      opacity: 0,
-      transition: { duration: DUR.fast },
-    });
-    expect(chip?.motion.transition).toEqual({ duration: DUR.fast });
-    expect(navRow("Tasks")?.querySelector(".tree-row-count")?.textContent).toBe("3");
-  });
-
-  it("collapses that crossfade under reduced motion", async () => {
-    harness.reduce = true;
-    await render({ tasksOpenTodayCount: 3 });
-
-    const chip = countRender();
-    expect(chip?.motion.transition).toEqual({ duration: 0 });
-    expect(chip?.motion.exit).toEqual({ opacity: 0, transition: { duration: 0 } });
-  });
-
-  it("keeps the count and the update dot on their own rows", async () => {
+  it("retains the unrelated Settings update indicator", async () => {
     await render({ tasksOpenTodayCount: 2 });
-
-    // The two marks belong to two rows and no row is ever handed both, so
-    // the precedence inside `NavRow` is unreachable rather than untested:
-    // what is worth holding is WHICH row wears which mark.
     const dot = document.querySelector('[aria-label="Update available"]');
     expect(dot?.closest("button.tree-row")?.textContent).toContain("Settings");
-    const count = document.querySelector(".tree-row-count");
-    expect(count?.closest("button.tree-row")?.textContent).toContain("Tasks");
+    expect(navRow("Tasks")?.querySelector(".tree-row-count")).toBeNull();
   });
 });
 

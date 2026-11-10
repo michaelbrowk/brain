@@ -90,7 +90,7 @@ ssh tunnel that reaches it from another computer.
 
 ### Or by hand
 
-Brain runs as two containers — the web app and the mail service — against a
+Brain runs as three containers — web, mail and an isolated MIME parser — against a
 folder of Markdown files you keep. You need Docker with Compose v2 (the
 `docker compose` command, not the older `docker-compose`) and a 130 MB image
 download. On macOS the Docker VM has to share the folder you point

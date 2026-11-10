@@ -178,6 +178,7 @@ export function MobileTabBar({
           be two products wearing one plus. The sheet form is the menu's own
           (`new-menu.tsx`), the form the When picker and the composer already
           take below md. */}
+      {tasksActive ? <button type="button" aria-label="Add task" aria-hidden={hidden || undefined} data-hidden={hidden ? "" : undefined} tabIndex={hidden ? -1 : undefined} className="brain-mobile-new fixed brain-touch-min focus-inset" onClick={onNewTask}><span className="brain-mobile-new-circle" aria-hidden><Icon name="add" size={17} /></span></button> : (
       <NewMenu
         onPickTemplate={onNew}
         onNewTask={onNewTask}
@@ -198,6 +199,7 @@ export function MobileTabBar({
           </span>
         </button>
       </NewMenu>
+      )}
     </>
   );
 }

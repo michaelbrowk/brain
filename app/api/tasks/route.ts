@@ -115,6 +115,8 @@ export async function POST(req: NextRequest) {
       ...(input.evening !== undefined ? { evening: input.evening } : {}),
       ...(input.deadline !== undefined ? { deadline: input.deadline } : {}),
       ...(input.category !== undefined ? { category: input.category } : {}),
+      ...(input.relatedPageIds !== undefined ? { relatedPageIds: input.relatedPageIds } : {}),
+      ...(input.body !== undefined ? { body: input.body } : {}),
       ...(input.page !== undefined ? { page: input.page } : {}),
       ...(input.anchor !== undefined ? { anchor: input.anchor } : {}),
       ...(input.repeat !== undefined ? { repeat: input.repeat } : {}),

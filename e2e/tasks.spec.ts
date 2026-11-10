@@ -553,13 +553,39 @@ test("@release @mobile touch scrolling keeps the task dialog open", async ({ pag
   const dialog = await openTaskDialog(page, id, "Reads while scrolling");
   await dialog.getByRole("textbox", { name: "Task notes" }).fill(Array.from({ length: 25 }, (_, i) => `Context line ${i + 1}`).join("\n"));
   await dialog.getByRole("textbox", { name: "Task notes" }).blur();
+  const scroller = dialog.locator(".tasks-detail-body");
+  const bounds = await scroller.boundingBox();
+  expect(bounds).not.toBeNull();
+  const before = await scroller.evaluate((node) => node.scrollTop);
+  // Filling a growing textarea can already put the body at its bottom.
+  // Drag toward available content, rather than overscrolling that boundary.
+  const direction = before > 0 ? 1 : -1;
+  const x = bounds!.x + bounds!.width / 2;
+  const startY = bounds!.y + bounds!.height / 2 - direction * 80;
+  // Await listener installation before sending any touch event. This test-
+  // only signal is written by native scrollend, never by a delay or a tap.
+  // The next tap then closes the task instead of stopping an active fling.
+  await scroller.evaluate((node) => {
+    const from = node.scrollTop;
+    node.removeAttribute("data-e2e-scroll-delta");
+    const finished = (event: Event) => {
+      if (event.target !== node || Math.abs(node.scrollTop - from) < 1) return;
+      node.setAttribute("data-e2e-scroll-delta", String(Math.abs(node.scrollTop - from)));
+      node.removeEventListener("scrollend", finished);
+    };
+    node.addEventListener("scrollend", finished);
+  });
   const touch = await page.context().newCDPSession(page);
-  const at = (y: number) => ({ touchPoints: [{ x: 195, y }] });
-  await touch.send("Input.dispatchTouchEvent", { type: "touchStart", ...at(700) });
-  for (const y of [690, 660, 620, 580, 540]) {
-    await touch.send("Input.dispatchTouchEvent", { type: "touchMove", ...at(y) });
+  const at = (y: number) => ({ touchPoints: [{ x, y }] });
+  await touch.send("Input.dispatchTouchEvent", { type: "touchStart", ...at(startY) });
+  for (const distance of [10, 40, 80, 120, 160]) {
+    await touch.send("Input.dispatchTouchEvent", { type: "touchMove", ...at(startY + direction * distance) });
   }
   await touch.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await expect.poll(async () => Number(await scroller.getAttribute("data-e2e-scroll-delta")), {
+    timeout: 10_000,
+    message: "The touch gesture must move and finish scrolling the task body",
+  }).toBeGreaterThan(8);
   await expect(dialog).toBeVisible();
   await dialog.getByRole("button", { name: "Close task", exact: true }).tap();
   await expect(dialog).toHaveCount(0);

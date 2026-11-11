@@ -640,14 +640,34 @@ test("@release task properties and page picker fit desktop, tablet and phone", a
   test.setTimeout(90_000);
   await login(page);
   const id = await createTask(page, "Property geometry");
+  const withMetadata = await browserJson(page, `/api/tasks/${id}`, {
+    method: "PATCH",
+    body: { deadline: localToday() },
+  });
+  expect(withMetadata.ok, JSON.stringify(withMetadata.body)).toBeTruthy();
   for (const width of [1440, 1024, 390]) {
     await page.setViewportSize({ width, height: 900 });
     const dialog = await openTaskDialog(page, id, "Property geometry");
+    await page.mouse.move(0, 0);
+    // Let any hover tint finish before comparing the resting controls. The
+    // dialog's materialisation scale must not become a height difference.
+    for (const control of [
+      dialog.getByRole("button", { name: /^Category:/ }),
+      dialog.getByRole("button", { name: "Repeat", exact: true }),
+    ]) await expect(control).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
     const measured = await dialog.evaluate((node) => {
       const box = node.getBoundingClientRect();
       const properties = [...node.querySelectorAll(".tasks-detail-properties button")].map((child) => {
         const rect = child.getBoundingClientRect();
-        return { label: child.getAttribute("aria-label") || child.textContent, left: rect.left, right: rect.right };
+        const style = getComputedStyle(child);
+        return {
+          label: child.getAttribute("aria-label") || child.textContent,
+          left: rect.left, right: rect.right,
+          appearance: {
+            font: style.font, letterSpacing: style.letterSpacing,
+            height: style.height, background: style.backgroundColor, shadow: style.boxShadow,
+          },
+        };
       });
       return { left: box.left, right: box.right, properties, overflow: node.scrollWidth - node.clientWidth };
     });
@@ -659,6 +679,11 @@ test("@release task properties and page picker fit desktop, tablet and phone", a
       expect(property.left, `${property.label} at ${width}`).toBeGreaterThanOrEqual(measured.left);
       expect(property.right, `${property.label} at ${width}`).toBeLessThanOrEqual(measured.right);
     }
+    const category = measured.properties.find((property) => property.label?.startsWith("Category:"));
+    const repeat = measured.properties.find((property) => property.label === "Repeat");
+    expect(category).toBeTruthy();
+    expect(repeat).toBeTruthy();
+    expect(repeat!.appearance, `Repeat matches the other properties at ${width}`).toEqual(category!.appearance);
     await dialog.getByRole("button", { name: "Add page", exact: true }).click();
     const picker = page.getByRole("dialog", { name: "Link pages", exact: true });
     await expect(picker).toBeVisible();
@@ -668,6 +693,47 @@ test("@release task properties and page picker fit desktop, tablet and phone", a
     expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width - 15);
     await picker.getByRole("button", { name: "Done", exact: true }).click();
     await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    if (width === 1440) {
+      const row = page.locator(`[data-task-id="${id}"]`);
+      const compact = row.locator(".tasks-compact-row");
+      const checkbox = row.getByRole("checkbox", { name: "Complete Property geometry", exact: true });
+      const metadata = row.locator(".tasks-compact-meta");
+      const fillOpacity = () => compact.evaluate((node) => Number(getComputedStyle(node, "::before").opacity));
+      // Hovering either independent control must paint the same complete row.
+      await checkbox.hover();
+      await expect.poll(fillOpacity).toBe(1);
+      const fill = await compact.evaluate((node) => {
+        const box = node.getBoundingClientRect();
+        const style = getComputedStyle(node, "::before");
+        return {
+          left: box.left + parseFloat(style.left), right: box.right - parseFloat(style.right),
+          top: box.top + parseFloat(style.top), bottom: box.bottom - parseFloat(style.bottom),
+          background: style.backgroundColor,
+        };
+      });
+      expect(fill.background).not.toBe("rgba(0, 0, 0, 0)");
+      for (const content of [checkbox, metadata]) {
+        const box = await content.boundingBox();
+        expect(box).not.toBeNull();
+        expect(fill.left).toBeLessThan(box!.x);
+        expect(fill.right).toBeGreaterThan(box!.x + box!.width);
+        expect(fill.top).toBeLessThan(box!.y);
+        expect(fill.bottom).toBeGreaterThan(box!.y + box!.height);
+      }
+      await metadata.hover();
+      await expect.poll(fillOpacity).toBe(1);
+      await page.mouse.move(0, 0);
+      await expect.poll(fillOpacity).toBe(0);
+      const box = await compact.boundingBox();
+      expect(box).not.toBeNull();
+      expect(fill.left).toBeLessThan(box!.x);
+      // The new painted inset is also a target, rather than decorative padding.
+      await page.mouse.click((fill.left + box!.x) / 2, (fill.top + fill.bottom) / 2);
+      await expect(dialog).toBeVisible();
+      await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+      await expect(dialog).toHaveCount(0);
+    }
   }
 });
 

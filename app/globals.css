@@ -7558,7 +7558,41 @@ html[data-kbd] .brain-task-row:focus-visible {
    its own compact inline controls; these rules belong to the Tasks surface. */
 .tasks-workspace{flex-direction:row;min-width:0;overflow:hidden}.tasks-rail{flex:0 0 224px;width:224px;padding:var(--canvas-top) 12px 24px;overflow-y:auto;overscroll-behavior:contain}.tasks-rail-spacer{height:36px}.tasks-rail-views{margin-top:16px}.tasks-rail-label{color:var(--ink-3);padding:0 10px;margin:24px 0 8px}.tasks-rail-add.btn{display:flex;gap:10px;margin-top:20px;padding-inline:10px;color:var(--ink-2)}.tasks-workspace-scroll{flex:1;min-width:0;min-height:0;overflow-y:auto;overscroll-behavior:contain}.tasks-workspace-canvas{width:100%;max-width:764px;margin-inline:auto;padding:var(--canvas-top) 32px 64px}.tasks-workspace-header{display:flex;align-items:center;gap:12px;margin-bottom:24px}.tasks-workspace-header h1{margin:0;overflow-wrap:anywhere}.tasks-workspace-group+.tasks-workspace-group{margin-top:24px}.tasks-group-heading{display:flex;align-items:center;gap:10px;margin-bottom:8px}.tasks-group-heading>button:last-child{display:flex;align-items:center;gap:10px;flex:1;min-width:0;min-height:24px;text-align:left}.tasks-group-heading h2{margin:0}.tasks-group-heading>button:last-child>svg{margin-left:auto;color:var(--ink-3);opacity:0}.tasks-category-emoji.icon-btn{flex-shrink:0;margin-inline:-5px;font-size:16px;line-height:1}.tasks-category-emoji-large.icon-btn{margin-inline:-6px;font-size:24px}.tasks-workspace-group ul,.tasks-workspace-completed ul{list-style:none;padding:0;margin:0}.tasks-compact-row{position:relative;min-height:44px}.tasks-compact-row>.brain-task-boxcell{position:absolute;z-index:1;left:0;top:12px;width:28px;height:20px;min-height:0;padding:0;align-items:center}.tasks-compact-open{display:block;min-width:0;width:100%;min-height:44px;padding:12px 0 12px 32px;border-radius:4px;text-align:left;cursor:pointer}.tasks-compact-title{display:block;min-height:20px;min-width:0;color:var(--ink);overflow-wrap:anywhere}.tasks-compact-item:not(:last-child)>.tasks-compact-row::after{content:"";position:absolute;left:32px;right:0;bottom:0;height:1px;background:var(--hair);pointer-events:none}.tasks-compact-meta{display:flex;align-items:center;flex-wrap:wrap;gap:4px 12px;color:var(--ink-3);margin-top:4px}.tasks-compact-meta>span{display:inline-flex;align-items:center;gap:4px;max-width:100%}.tasks-compact-meta svg{flex-shrink:0}.tasks-compact-meta [data-overdue]{color:var(--red)}.tasks-compact-item[data-done] .tasks-compact-title{color:var(--ink-3);text-decoration:line-through}.tasks-compact-open:disabled{cursor:default}.tasks-workspace-completed{margin-top:24px}.tasks-completed-toggle{display:flex;align-items:center;gap:8px;min-height:32px;color:var(--ink-3);margin-bottom:8px}.tasks-workspace-empty,.tasks-workspace-message{padding:40px 0}.tasks-narrow-navigation{display:none}.tasks-tablet-new.brain-mobile-new{display:none}.tasks-tablet-new[data-hidden]{visibility:hidden;pointer-events:none}
 .tasks-group-heading>button:last-child:focus-visible>svg{opacity:1}
-@media (hover: hover){.tasks-group-heading>button:last-child:hover>svg{opacity:1}.tasks-compact-open:not(:disabled):hover .tasks-compact-title{color:var(--ink-2)}}
+/* Keep the task's text, checkbox and separator aligned while its shared
+   hover fill and clickable area extend into the surrounding row inset. */
+.tasks-compact-row { isolation: isolate; }
+.tasks-compact-open {
+  width: calc(100% + 16px);
+  margin-inline: -8px;
+  padding-inline: 40px 8px;
+  border-radius: var(--r-row);
+}
+.tasks-compact-row::before {
+  content: "";
+  position: absolute;
+  inset: 0 -8px;
+  z-index: -1;
+  border-radius: var(--r-row);
+  background-color: var(--blue-tint);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms var(--ease-out);
+}
+@media (hover: hover) {
+  .tasks-group-heading>button:last-child:hover>svg { opacity: 1; }
+  .tasks-compact-row:has(> .tasks-compact-open:not(:disabled)):hover::before {
+    opacity: 1;
+    transition-duration: 80ms;
+  }
+}
+.tasks-compact-row:has(> .tasks-compact-open:not(:disabled)):active::before,
+html[data-kbd] .tasks-compact-row:has(> .tasks-compact-open:focus-visible)::before {
+  opacity: 1;
+  transition-duration: 80ms;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tasks-compact-row::before { transition: none; }
+}
 @media(max-width:1159px){.tasks-rail{display:none}.tasks-workspace-header{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.tasks-narrow-navigation{position:absolute;z-index:var(--z-toolbar);top:calc(var(--inset) + env(safe-area-inset-top,0px));left:var(--inset);max-width:calc(100% - var(--inset)*2);display:flex}.tasks-workspace-canvas{padding-top:calc(var(--inset) + env(safe-area-inset-top,0px) + 36px + 8px)}.tasks-group-heading>button:last-child>svg{opacity:1}}
 @media(min-width:768px) and (max-width:1159px){.tasks-tablet-new.brain-mobile-new{display:grid}.tasks-workspace-canvas{padding-bottom:calc(var(--tabbar-h) + 48px)}}
 @media(max-width:767px){.tasks-workspace-canvas{padding-inline:16px;padding-bottom:calc(48px + var(--tabbar-reserve))}.tasks-compact-meta{gap:4px 10px}}

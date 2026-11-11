@@ -1077,10 +1077,12 @@ test("@release holding a task reorders it and moves categories without losing co
     // Await the real hold sensor, not a fixed delay or a test-only DOM flag.
     await expect(workspace).toHaveAttribute("data-dragging", "");
   };
-  const saveDrop = async (x: number, y: number, feedback: Locator, edgeY?: number) => {
+  const saveDrop = async (x: number, y: number, feedback: Locator, edgeY?: number, categoryRight?: number) => {
     await page.mouse.move(x, y, { steps: 12 });
     await expect(feedback).toBeVisible();
     if (edgeY !== undefined) await expect.poll(async () => Math.abs((await feedback.boundingBox())!.y - edgeY)).toBeLessThanOrEqual(2);
+    // Visibility alone misses an opaque drag preview covering the destination.
+    if (categoryRight !== undefined) await expect.poll(async () => (await page.getByTestId("tasks-drag-overlay").boundingBox())!.x).toBeGreaterThanOrEqual(categoryRight);
     const [response] = await Promise.all([
       page.waitForResponse((entry) => entry.url().endsWith(`/api/tasks/${last.id}/move`) && entry.request().method() === "POST"),
       page.mouse.up(),
@@ -1110,7 +1112,7 @@ test("@release holding a task reorders it and moves categories without losing co
   const categoryBounds = await destinationButton.boundingBox();
   expect(categoryBounds).not.toBeNull();
   await beginDrag();
-  await saveDrop(categoryBounds!.x + 70, categoryBounds!.y + categoryBounds!.height / 2, destinationButton.and(page.locator("[data-drop-into]")));
+  await saveDrop(categoryBounds!.x + 70, categoryBounds!.y + categoryBounds!.height / 2, destinationButton.and(page.locator("[data-drop-into]")), undefined, categoryBounds!.x + categoryBounds!.width);
   await expect(row(last.id)).toHaveCount(0);
   const moved = await read();
   expect(moved.task.category).toBe(destination);

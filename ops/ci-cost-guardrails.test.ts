@@ -99,12 +99,14 @@ describe("CI cost guardrails", () => {
       "- name: Check type safety, tests, round-trips, and worker\n" +
         "        run: pnpm check\n",
     );
-    expect(workflow).toContain(
-      "- name: Install runtime search dependency\n" +
-        "        run: |\n" +
-        "          sudo apt-get update\n" +
-        "          sudo apt-get install --yes ripgrep\n",
-    );
+    const releaseWorkflow = readFileSync(path.join(process.cwd(), ".github", "workflows", "release.yml"), "utf8");
+    for (const source of [workflow, releaseWorkflow, fullE2eWorkflow]) {
+      expect(source).toContain("runs-on: ubuntu-24.04\n");
+      expect(source).toContain(
+        "- name: Install runtime search dependency\n" +
+          "        run: bash scripts/bootstrap-runtime-search.sh\n",
+      );
+    }
   });
 
   it("runs the compact browser gate before the main build and smokes", () => {

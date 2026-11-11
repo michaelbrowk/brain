@@ -2,7 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { DndContext, DragOverlay, MouseSensor, TouchSensor, pointerWithin, useDndContext, useDraggable, useDroppable, useSensor, useSensors, type CollisionDetection, type DragMoveEvent, type DragOverEvent, type DragStartEvent } from "@dnd-kit/core";
+import { DndContext, DragOverlay, MouseSensor, TouchSensor, pointerWithin, useDndContext, useDraggable, useDroppable, useSensor, useSensors, type CollisionDetection, type DragMoveEvent, type DragOverEvent, type DragStartEvent, type Modifier } from "@dnd-kit/core";
 import type { TaskView } from "@/lib/tasks/model";
 import { taskCategoryKey } from "@/lib/tasks/details";
 import { resolveTaskDrop, type TaskDragTarget, type TaskDropIntent } from "./tasks-drag-intent";
@@ -11,6 +11,11 @@ import { TreeInsertion } from "./ui/tree-row";
 interface TasksDragState { activeId: string | null; intent: TaskDropIntent | null; enabled: boolean }
 const TaskDragState = createContext<TasksDragState>({ activeId: null, intent: null, enabled: false });
 export function useTasksDragState() { return useContext(TaskDragState); }
+
+// Keep the full-size preview out of the category rail throughout the gesture.
+// Only its drawing is clamped: raw pointer coordinates still choose the drop.
+const keepPreviewInTaskColumn: Modifier = ({ transform }) => ({ ...transform, x: Math.max(0, transform.x) });
+const taskPreviewModifiers = [keepPreviewInTaskColumn];
 
 function coordinates(event: Event): { x: number; y: number } | null {
   if ("touches" in event) {
@@ -89,7 +94,7 @@ export function TasksDragProvider({ tasks, disabled, children, renderOverlay, on
     <TaskDragState.Provider value={state}>
       {children}
       {typeof document !== "undefined" && createPortal(<>
-        <DragOverlay dropAnimation={null} style={{ zIndex: "var(--z-modal)" }}>
+        <DragOverlay modifiers={taskPreviewModifiers} dropAnimation={null} style={{ zIndex: "var(--z-modal)" }}>
           {active && <div className="tasks-drag-overlay" data-testid="tasks-drag-overlay" aria-hidden inert>{renderOverlay(active)}</div>}
         </DragOverlay>
         <TasksDragInsertion />

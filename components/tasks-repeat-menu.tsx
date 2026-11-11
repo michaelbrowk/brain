@@ -6,6 +6,7 @@ import { Fragment, useState } from "react";
 import type { TaskRepeat, TaskView, WeekDay } from "@/lib/tasks/model";
 
 import { weekdayOf } from "./tasks-lists";
+import { Button } from "./ui/button";
 import { Icon } from "./ui/icon";
 import { useLayerSignal } from "./use-layer-signal";
 
@@ -120,6 +121,7 @@ export function TasksRepeatMenu({
   today,
   onSet,
   onOpenChange,
+  variant = "chip",
 }: {
   task: TaskView;
   today: string;
@@ -127,6 +129,7 @@ export function TasksRepeatMenu({
   /** THE MENU SAYS WHEN IT IS STANDING, so the row underneath it knows Escape
    *  is this menu's before it is the row's. */
   onOpenChange?: (open: boolean) => void;
+  variant?: "chip" | "property";
 }) {
   const [open, setOpen] = useState(false);
   useLayerSignal(open, onOpenChange);
@@ -145,7 +148,13 @@ export function TasksRepeatMenu({
   return (
     <Dropdown.Root open={open} onOpenChange={setOpen}>
       <Dropdown.Trigger asChild>
-        <button
+        {variant === "property" ? (
+          <Button type="button" variant="quiet" className="tasks-detail-property" data-task-control aria-label={spoken}>
+            <Icon name="restart" size={16} />
+            <span>{label}</span>
+            <Icon name="alt-arrow-down" size={14} />
+          </Button>
+        ) : <button
           type="button"
           className="chip"
           data-task-control
@@ -155,7 +164,7 @@ export function TasksRepeatMenu({
             <Icon name="restart" size={14} />
           </span>
           {label}
-        </button>
+        </button>}
       </Dropdown.Trigger>
       <Dropdown.Portal>
         <Dropdown.Content

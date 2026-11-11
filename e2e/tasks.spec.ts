@@ -551,7 +551,7 @@ test("@release the linked pages picker scrolls by wheel and keeps the task draft
   const choices = list.getByRole("checkbox");
   await expect(choices).toHaveCount(20);
   const last = choices.last();
-  const selectedPage = notes.get((await last.innerText()).trim());
+  const selectedPage = notes.get((await last.locator(".tasks-page-copy > .text-control").innerText()).trim());
   expect(selectedPage).toBeTruthy();
   const before = await taskScrollPositions(page);
   await wheelPickerTo(page, list, "bottom");

@@ -1878,6 +1878,18 @@ html[data-kbd] [contenteditable]:focus-visible {
   opacity: 1;
   transition-duration: 80ms;
 }
+/* Tasks uses weight and filled icons for selection; hover stays shared. */
+@media (hover: hover) {
+  .tasks-rail .tree-row[data-selected]:hover,
+  .tasks-rail .tree-row[data-selected][data-hover] {
+    background-color: var(--fill-glass-hover);
+    transition-duration: 80ms;
+  }
+}
+.tasks-rail .tree-row[data-selected]:active {
+  background-color: var(--fill-glass-hover);
+  transition-duration: 80ms;
+}
 .tree-row[data-dragging] {
   background-color: var(--fill-glass-selected);
   box-shadow: var(--lift);

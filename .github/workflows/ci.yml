@@ -78,7 +78,9 @@ jobs:
         run: pnpm check
       - name: Install release browser
         if: github.event_name == 'push'
-        run: pnpm exec playwright install --with-deps chromium
+        run: |
+          pnpm exec playwright install chromium
+          node scripts/verify-ci-browser.mjs
       - name: Run compact release browser gate
         if: github.event_name == 'push'
         run: pnpm test:e2e:release

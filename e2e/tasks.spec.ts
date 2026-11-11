@@ -213,6 +213,15 @@ async function taskScrollPositions(page: Page) {
   }));
 }
 
+/** A raw outside click skips locator stability checks. Wait for this menu's
+ * own entrance before dismissal: Radix arms its document listener after mount.
+ * Descendant animations are irrelevant and may be continuous. */
+async function settleTaskPickerEntrance(picker: Locator) {
+  await picker.evaluate((node) => Promise.all(
+    node.getAnimations().map((animation) => animation.finished.catch(() => undefined)),
+  ));
+}
+
 /** Type at the end of a paragraph without touching any other line. */
 async function appendToParagraph(page: Page, text: string, addition: string) {
   const paragraph = page
@@ -518,6 +527,8 @@ test("@release the category picker scrolls by wheel inside the task dialog", asy
   await expect(category).toBeFocused();
   await category.click();
   await expect(picker).toBeVisible();
+  await expect(picker.getByRole("textbox", { name: "Category name", exact: true })).toBeFocused();
+  await settleTaskPickerEntrance(picker);
   await page.mouse.click(1380, 760);
   await expect(picker).toHaveCount(0);
   await expect(dialog).toBeVisible();
@@ -779,14 +790,17 @@ test("@release task context menus complete, undo and remove categories without l
     await expect(menu).toBeVisible();
   };
   const confirmation = (title: string) => page.getByRole("alertdialog", { name: `Delete “${title}”?`, exact: true });
-  const rail = page.getByRole("navigation", { name: "Task categories", exact: true });
-  const categoryButton = rail.getByRole("button", { name: category, exact: true });
+  // Modal layers hide the rail from accessibility while it remains on screen.
+  // An absence assertion must prove deletion, not this temporary aria-hidden.
+  const rail = page.getByRole("navigation", { name: "Task categories", exact: true, includeHidden: true });
+  const categoryButton = rail.getByRole("button", { name: category, exact: true, includeHidden: true });
 
   await page.goto("/tasks");
   await expect(categoryButton).toBeVisible({ timeout: 20_000 });
   await page.getByRole("navigation", { name: "Tasks views", exact: true }).getByRole("button", { name: "Today", exact: true }).click();
-  await openMenu(categoryButton);
   await expect(page.getByRole("heading", { level: 1, name: "Today", exact: true })).toBeVisible();
+  await openMenu(categoryButton);
+  await expect(page.getByRole("heading", { level: 1, name: "Today", exact: true, includeHidden: true })).toBeVisible();
   await menu.getByRole("menuitem", { name: "Complete all tasks", exact: true }).click();
   const batchToast = page.locator('[aria-live="polite"] .brain-toast').filter({ hasText: "2 tasks completed" });
   await expect(batchToast.getByRole("button", { name: "Undo", exact: true })).toHaveCount(1);
@@ -807,13 +821,15 @@ test("@release task context menus complete, undo and remove categories without l
   await openMenu(categoryButton);
   await menu.getByRole("menuitem", { name: "Delete category…", exact: true }).click();
   await confirmation(category).getByRole("button", { name: "Delete category", exact: true }).click();
+  await expect(confirmation(category)).toHaveCount(0);
   await expect(categoryButton).toHaveCount(0);
   await expect(page.getByRole("heading", { level: 1, name: "All tasks", exact: true })).toBeVisible();
-  const emptyButton = rail.getByRole("button", { name: emptyCategory, exact: true });
+  const emptyButton = rail.getByRole("button", { name: emptyCategory, exact: true, includeHidden: true });
   await openMenu(emptyButton);
   await expect(menu.getByRole("menuitem", { name: "Complete all tasks", exact: true })).toBeDisabled();
   await menu.getByRole("menuitem", { name: "Delete category…", exact: true }).click();
   await confirmation(emptyCategory).getByRole("button", { name: "Delete category", exact: true }).click();
+  await expect(confirmation(emptyCategory)).toHaveCount(0);
   await expect(emptyButton).toHaveCount(0);
   await page.reload();
   await expect(page.getByTestId("tasks-surface")).toBeVisible({ timeout: 20_000 });
@@ -907,6 +923,8 @@ test("@release outside press dismisses a child picker before the task draft", as
   await dialog.getByRole("button", { name: /^When:/ }).click();
   const panel = page.getByRole("dialog", { name: "When", exact: true });
   await expect(panel).toBeVisible();
+  await expect(panel.locator('[role="gridcell"][tabindex="0"]')).toBeFocused();
+  await settleTaskPickerEntrance(panel);
   await page.mouse.click(1380, 760);
   await expect(panel).toHaveCount(0);
   await expect(dialog).toBeVisible();

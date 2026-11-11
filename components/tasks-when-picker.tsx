@@ -826,6 +826,7 @@ export function TasksWhenPicker({
   value,
   today,
   mode = "when",
+  modal = false,
   onPick,
   onOpenChange,
   trigger,
@@ -834,6 +835,8 @@ export function TasksWhenPicker({
   value: WhenValue;
   today: string;
   mode?: "when" | "deadline";
+  /** Own the scroll lock when this portal is opened inside a task dialog. */
+  modal?: boolean;
   onPick: (value: WhenValue) => void;
   /** THE PANEL SAYS WHEN IT IS STANDING. Escape peels one layer at a time, so
    *  the row this chip sits on has to know the key is the picker's before it
@@ -851,6 +854,7 @@ export function TasksWhenPicker({
   const sheetRef = useRef<HTMLDivElement | null>(null);
   const pickRef = useRef(onPick);
   const valueRef = useRef(value);
+  const focusPickerRef = useRef<(() => void) | null>(null);
   /** TRUE ONCE THE POPOVER HAS BEEN ASKED TO CLOSE, by Done, by a quick row,
    *  by Escape or by a tap outside. Read in the teardown below, which also
    *  runs when a dependency changes under an OPEN popover, which is a remount
@@ -904,6 +908,7 @@ export function TasksWhenPicker({
         onDone: close,
       });
       host.append(handle.element);
+      focusPickerRef.current = handle.focus;
       handle.focus();
       /** THE WRITE LANDS WHEN THE POPOVER HAS GONE, and not a frame earlier.
        *  A reschedule folds the row downward, and a fold that starts while
@@ -914,6 +919,7 @@ export function TasksWhenPicker({
        *  FIRST, so "the panel has gone" is a fact the write can be measured
        *  against rather than a claim about React's commit order. */
       return () => {
+        focusPickerRef.current = null;
         handle.destroy();
         if (closing.current) handle.commit();
       };
@@ -937,6 +943,7 @@ export function TasksWhenPicker({
 
   return (
     <Popover.Root
+      modal={modal}
       open={open}
       onOpenChange={(next) => {
         // A TAP OUTSIDE IS AN ANSWER, and Radix's own dismissals come through
@@ -967,7 +974,11 @@ export function TasksWhenPicker({
           sideOffset={6}
           collisionPadding={8}
           aria-label={ariaLabel}
-          onOpenAutoFocus={(event) => event.preventDefault()}
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            // The parent dialog's focus trap is paused only once this scope opens.
+            if (modal) focusPickerRef.current?.();
+          }}
           className={sheet ? undefined : "brain-menu brain-when-panel z-[var(--z-modal)]"}
         >
           {sheet ? (

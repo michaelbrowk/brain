@@ -26,8 +26,9 @@
 // the tab reload before it ever wrote, and the merge would never be reached.
 import { mkdirSync } from "node:fs";
 import path from "node:path";
-import { expect, test, type Browser, type Page } from "playwright/test";
+import { expect, test, type Browser, type Locator, type Page } from "playwright/test";
 
+import { shiftDay } from "../lib/tasks/calendar";
 import { parseTaskLines } from "../lib/tasks/task-lines";
 import { freshNotes } from "./fresh-notes";
 
@@ -180,10 +181,35 @@ async function openTaskDialog(page: Page, id: string, title: string) {
   const row = page.locator(`[data-task-id="${id}"]`);
   await expect(row).toBeVisible({ timeout: 20_000 });
   await row.getByRole("button", { name: title, exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: title, exact: true });
+  // A modal child picker temporarily hides this parent from assistive
+  // technology; it must still stay mounted and visibly hold the task draft.
+  const dialog = page.getByRole("dialog", { name: title, exact: true, includeHidden: true });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
   return dialog;
+}
+
+/** Drive the browser's wheel path, not scrollTop/scrollIntoView: those bypass
+ *  the modal scroll lock that used to cancel gestures in body-ported pickers. */
+async function wheelPickerTo(page: Page, scroller: Locator, edge: "top" | "bottom") {
+  const extent = await scroller.evaluate((node) => node.scrollHeight - node.clientHeight);
+  expect(extent, "The picker fixture must overflow").toBeGreaterThan(1);
+  const bounds = await scroller.boundingBox();
+  expect(bounds).not.toBeNull();
+  await page.mouse.move(bounds!.x + bounds!.width / 2, bounds!.y + bounds!.height / 2);
+  // A small horizontal component also exercises diagonal trackpad gestures.
+  await page.mouse.wheel(8, (edge === "bottom" ? 1 : -1) * (extent + bounds!.height));
+  await expect.poll(() => scroller.evaluate((node, target) =>
+    target === "top" ? node.scrollTop : node.scrollHeight - node.clientHeight - node.scrollTop,
+  edge), { message: `The wheel must reach the picker ${edge}` }).toBeLessThan(1);
+}
+
+async function taskScrollPositions(page: Page) {
+  return page.evaluate(() => ({
+    window: window.scrollY,
+    panels: [...document.querySelectorAll(".tasks-workspace-scroll, .tasks-detail-body")]
+      .map((node) => ({ className: node.className, top: node.scrollTop })),
+  }));
 }
 
 /** Type at the end of a paragraph without touching any other line. */
@@ -442,6 +468,148 @@ test("@release consecutive task lines sit as close together as consecutive bulle
 /* The task dialog keeps the old protections: child panels do not dismiss
  * their parent, calendar choices remain a draft until Save, and real pointer,
  * keyboard and touch interactions leave focus and layout in a usable state. */
+
+test("@release the category picker scrolls by wheel inside the task dialog", async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  let id = "";
+  for (let index = 1; index <= 20; index++) {
+    const number = String(index).padStart(2, "0");
+    const created = await browserJson(page, "/api/tasks", {
+      method: "POST",
+      body: {
+        title: `Wheel task ${number}`,
+        category: `Wheel category ${number}`,
+        when: localToday(),
+        body: index === 1 ? Array.from({ length: 30 }, (_, line) => `Context line ${line + 1}`).join("\n") : "",
+      },
+    });
+    expect(created.ok, JSON.stringify(created.body)).toBeTruthy();
+    if (index === 1) id = (created.body as { task: { id: string } }).task.id;
+  }
+  const dialog = await openTaskDialog(page, id, "Wheel task 01");
+  await dialog.getByRole("button", { name: "Category: Wheel category 01", exact: true }).click();
+  const picker = page.getByRole("dialog", { name: "Choose or create a category", exact: true });
+  await expect(picker.getByRole("textbox", { name: "Category name", exact: true })).toBeFocused();
+  const list = picker.getByRole("group", { name: "Categories", exact: true });
+  const before = await taskScrollPositions(page);
+  await expect.poll(() => page.locator(".tasks-workspace-scroll").evaluate((node) => node.scrollHeight - node.clientHeight)).toBeGreaterThan(100);
+  await expect.poll(() => dialog.locator(".tasks-detail-body").evaluate((node) => node.scrollHeight - node.clientHeight)).toBeGreaterThan(100);
+  await wheelPickerTo(page, list, "bottom");
+  await expect(picker.getByRole("button", { name: "Remove category", exact: true })).toBeInViewport();
+  await wheelPickerTo(page, list, "top");
+  await expect(picker.getByRole("button", { name: "Wheel category 01", exact: true })).toBeInViewport();
+  await wheelPickerTo(page, list, "bottom");
+  expect(await taskScrollPositions(page)).toEqual(before);
+  await expect(dialog).toBeVisible();
+  const last = picker.getByRole("button", { name: "Wheel category 20", exact: true });
+  await expect(last).toBeInViewport();
+  await last.click();
+  await expect(picker).toHaveCount(0);
+  const category = dialog.getByRole("button", { name: "Category: Wheel category 20", exact: true });
+  await expect(category).toBeFocused();
+  await category.click();
+  await expect(picker).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(picker).toHaveCount(0);
+  await expect(dialog).toBeVisible();
+  await expect(category).toBeFocused();
+  await category.click();
+  await expect(picker).toBeVisible();
+  await page.mouse.click(1380, 760);
+  await expect(picker).toHaveCount(0);
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  const saved = await browserJson(page, `/api/tasks/${id}`);
+  expect((saved.body as { task: { category?: string } }).task.category).toBe("Wheel category 20");
+});
+
+test("@release the linked pages picker scrolls by wheel and keeps the task draft", async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const notes = new Map<string, string>();
+  for (let index = 1; index <= 20; index++) {
+    const title = `Wheel page ${String(index).padStart(2, "0")}`;
+    const created = await browserJson(page, "/api/page", {
+      method: "POST",
+      body: { title, markdown: "Synthetic context for the picker scroll regression.\n" },
+    });
+    expect(created.ok, JSON.stringify(created.body)).toBeTruthy();
+    notes.set(title, (created.body as { id: string }).id);
+  }
+  const id = await createTask(page, "Wheel linked pages");
+  const dialog = await openTaskDialog(page, id, "Wheel linked pages");
+  await dialog.getByRole("textbox", { name: "Task notes", exact: true }).fill("Keep this unsaved context");
+  const addPage = dialog.getByRole("button", { name: "Add page", exact: true });
+  await addPage.click();
+  const picker = page.getByRole("dialog", { name: "Link pages", exact: true });
+  await picker.getByRole("textbox", { name: "Search pages", exact: true }).fill("Wheel page");
+  const list = picker.getByRole("group", { name: "Pages", exact: true });
+  const choices = list.getByRole("checkbox");
+  await expect(choices).toHaveCount(20);
+  const last = choices.last();
+  const selectedPage = notes.get((await last.innerText()).trim());
+  expect(selectedPage).toBeTruthy();
+  const before = await taskScrollPositions(page);
+  await wheelPickerTo(page, list, "bottom");
+  await expect(last).toBeInViewport();
+  await wheelPickerTo(page, list, "top");
+  await expect(choices.first()).toBeInViewport();
+  await wheelPickerTo(page, list, "bottom");
+  expect(await taskScrollPositions(page)).toEqual(before);
+  await last.click();
+  await expect(last).toBeChecked();
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(picker).toHaveCount(0);
+  await expect(addPage).toBeFocused();
+  await expect(dialog.getByRole("textbox", { name: "Task notes", exact: true })).toHaveValue("Keep this unsaved context");
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  const saved = await browserJson(page, `/api/tasks/${id}`);
+  expect((saved.body as { task: { relatedPageIds?: string[] } }).task.relatedPageIds).toEqual([selectedPage]);
+});
+
+test("@release task calendars scroll by wheel in a short desktop window", async ({ page }) => {
+  test.setTimeout(60_000);
+  await page.setViewportSize({ width: 1440, height: 360 });
+  await login(page);
+  const id = await createTask(page, "Calendar wheel boundary");
+  const dialog = await openTaskDialog(page, id, "Calendar wheel boundary");
+  for (const name of ["When", "Deadline"]) {
+    const trigger = dialog.getByRole("button", { name: new RegExp(`^${name}:`) });
+    await trigger.click();
+    const picker = page.getByRole("dialog", { name, exact: true });
+    await expect(picker).toBeVisible();
+    const focusedDay = picker.locator('[role="gridcell"][tabindex="0"]');
+    await expect(focusedDay).toBeFocused();
+    const day = await focusedDay.getAttribute("data-day");
+    expect(day).toBeTruthy();
+    const selected = picker.getByRole("gridcell", { selected: true });
+    const selectionBefore = await selected.evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-day")));
+    await page.keyboard.press("ArrowRight");
+    await expect(focusedDay).toHaveAttribute("data-day", shiftDay(day!, 1));
+    await expect(focusedDay).toBeFocused();
+    expect(await selected.evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-day")))).toEqual(selectionBefore);
+    const list = picker.locator(".brain-when-scroll");
+    const before = await taskScrollPositions(page);
+    await wheelPickerTo(page, list, "bottom");
+    await wheelPickerTo(page, list, "top");
+    await wheelPickerTo(page, list, "bottom");
+    expect(await taskScrollPositions(page)).toEqual(before);
+    const done = picker.getByRole("button", { name: "Done", exact: true });
+    await expect(done).toBeInViewport();
+    await done.click();
+    await expect(picker).toHaveCount(0);
+    await expect(dialog).toBeVisible();
+    await expect(trigger).toBeFocused();
+  }
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+});
 
 test("@release a calendar day stays in the task draft until Save", async ({ page }) => {
   test.setTimeout(60_000);

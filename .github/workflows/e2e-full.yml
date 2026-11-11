@@ -35,7 +35,10 @@ jobs:
       - name: Install runtime search dependency
         run: bash scripts/bootstrap-runtime-search.sh
       - run: pnpm install --frozen-lockfile
-      - run: pnpm exec playwright install --with-deps chromium
+      - name: Install release browser
+        run: |
+          pnpm exec playwright install chromium
+          node scripts/verify-ci-browser.mjs
       # Each runner owns its notes/state root. Keep Playwright's single worker:
       # test files reset the shared fixture and cannot run concurrently there.
       # Stop before the job deadline so failures retain their diagnostic files.

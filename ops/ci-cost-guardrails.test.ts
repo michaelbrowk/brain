@@ -106,6 +106,10 @@ describe("CI cost guardrails", () => {
         "- name: Install runtime search dependency\n" +
           "        run: bash scripts/bootstrap-runtime-search.sh\n",
       );
+      expect(source).toContain(
+        "          pnpm exec playwright install chromium\n" +
+          "          node scripts/verify-ci-browser.mjs\n",
+      );
     }
   });
 

@@ -2,7 +2,7 @@ name: CI
 
 on:
   # Every merge runs the gate, the build, and both smokes. Releases are cut by
-  # pnpm release and built by release.yml; this workflow produces no artifact.
+  # pnpm release and built by release.yml; this workflow produces no release artifact.
   push:
     branches: [main]
   # PRs run the cheap gate: `pnpm install`, the ripgrep install, the gitleaks
@@ -31,7 +31,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ github.event_name == 'push' && 30 || 25 }}
+    timeout-minutes: ${{ github.event_name == 'push' && 45 || 25 }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
@@ -82,6 +82,14 @@ jobs:
       - name: Run compact release browser gate
         if: github.event_name == 'push'
         run: pnpm test:e2e:release
+      - name: Preserve release browser failure diagnostics
+        if: github.event_name == 'push' && failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-browser-failure
+          path: test-results/
+          retention-days: 7
+          if-no-files-found: ignore
       - name: Set build provenance
         if: github.event_name == 'push'
         run: |

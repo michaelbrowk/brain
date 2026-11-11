@@ -27,7 +27,7 @@ export function TasksLinkedPages({ value, pages, onChange, onOpenChange }: {
   function toggle(id: string) { if (!value.includes(id) && value.length >= 64) return; onChange(value.includes(id) ? value.filter((entry) => entry !== id) : [...new Set([...value, id])]); }
   return <section className="tasks-linked-pages" aria-label="Linked pages">
     <div className="tasks-linked-heading"><span className="tasks-detail-label text-table">Linked pages</span>
-      <Popover.Root open={open} onOpenChange={(next) => { if (next) setOpen(true); else close(); }}>
+      <Popover.Root modal open={open} onOpenChange={(next) => { if (next) setOpen(true); else close(); }}>
         <Popover.Trigger asChild><Button type="button" variant="quiet" className="tasks-add-page"><Icon name="add" size={16} />Add page</Button></Popover.Trigger>
         <Popover.Portal><Popover.Content side="bottom" align="start" sideOffset={6} collisionPadding={16} className="brain-menu tasks-picker tasks-page-picker z-[var(--z-modal)]" aria-label="Link pages" onOpenAutoFocus={(event) => { event.preventDefault(); input.current?.focus(); }} onEscapeKeyDown={(event) => { event.preventDefault(); event.stopPropagation(); close(); }}>
           <div className="tasks-picker-panel">

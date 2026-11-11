@@ -44,7 +44,8 @@ export function TasksCategoryPicker({ value, categories, onSelect, onCreate, onO
     catch (failure) { setError(failure instanceof Error ? failure.message : "Couldn’t create this category. Try again."); }
     finally { setPending(false); }
   }
-  return <Popover.Root open={open} onOpenChange={(next) => { if (pending) return; if (next) setOpen(true); else close(); }}>
+  // This portal sits outside the task dialog; own the scroll lock while open.
+  return <Popover.Root modal open={open} onOpenChange={(next) => { if (pending) return; if (next) setOpen(true); else close(); }}>
     <Popover.Trigger asChild><Button type="button" variant="quiet" className="tasks-detail-property" aria-label={`Category: ${value || "No category"}`}><TaskCategoryGlyph icon={current?.icon} /><span>{value || "No category"}</span><Icon name="alt-arrow-down" size={14} /></Button></Popover.Trigger>
     <Popover.Portal><Popover.Content side="bottom" align="start" sideOffset={6} collisionPadding={16} className="brain-menu tasks-picker tasks-category-picker z-[var(--z-modal)]" aria-label="Choose or create a category" onOpenAutoFocus={(event) => { event.preventDefault(); input.current?.focus(); }} onEscapeKeyDown={(event) => { event.preventDefault(); event.stopPropagation(); if (!pending) close(); }}>
       <div className="tasks-picker-panel">

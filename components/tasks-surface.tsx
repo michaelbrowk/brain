@@ -5,10 +5,13 @@ import { useReducedMotion } from "framer-motion";
 import { isLinkedTask, type TaskView } from "@/lib/tasks/model";
 import { doneDayOf, listOf, logbookRows } from "@/lib/tasks/lists";
 import { taskCategoryKey } from "@/lib/tasks/details";
+import { compareTaskOrder, planTaskMove, type TaskMoveInput } from "@/lib/tasks/order";
+import { TasksDragProvider, TasksCategoryDrop } from "./tasks-drag";
+import { restoreTaskPlacement, taskPositionChanged } from "./tasks-drag-intent";
 import type { TasksListState } from "./shell/helpers";
 import { surfaceTakesKeys } from "./shell/surface-keys";
 import { useTaskActions } from "./tasks-actions";
-import { createTask, createTaskCategory, deleteTask, deleteTaskCategory, listTaskCategories, mutateTasks, patchTask, reloadTasks, updateTaskCategory, useTasks, type TaskCategory, type TaskPatch } from "./tasks-client";
+import { moveTask as persistTaskMove, createTask, createTaskCategory, deleteTask, deleteTaskCategory, listTaskCategories, mutateTasks, patchTask, reloadTasks, updateTaskCategory, useTasks, type TaskCategory, type TaskPatch } from "./tasks-client";
 import { onTaskCommand } from "./tasks-commands";
 import { TasksNavigation, TasksRail, viewLabel } from "./tasks-list-menu";
 import { TasksCompactRow } from "./tasks-compact-row";
@@ -57,6 +60,12 @@ export function TasksSurface({ list = null, onSelectList, onToast, refreshToken 
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [confirmation, setConfirmation] = useState<DeleteConfirmation | null>(null);
   const [categoryPending, setCategoryPending] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const [movePending, setMovePending] = useState(false);
+  const [moveAnnouncement, setMoveAnnouncement] = useState("");
+  const movePendingRef = useRef(false);
+  const tasksRef = useRef(state.tasks);
+  useEffect(() => { tasksRef.current = state.tasks; }, [state.tasks]);
   const surface = useRef<HTMLElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
@@ -73,7 +82,7 @@ export function TasksSurface({ list = null, onSelectList, onToast, refreshToken 
     for (const task of state.tasks) if (task.category && !merged.has(taskCategoryKey(task.category))) merged.set(taskCategoryKey(task.category), { name: task.category });
     return [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
   }, [catalog, state.tasks]);
-  const navigationCategories = useMemo(() => state.tasks.some((task) => !task.category) ? [...categories, { name: "" }] : categories, [categories, state.tasks]);
+  const navigationCategories = useMemo(() => [...categories, { name: "" }], [categories]);
   const categoryFor = useCallback((name?: string) => categories.find((entry) => taskCategoryKey(entry.name) === taskCategoryKey(name || "")), [categories]);
   const matches = useCallback((task: TaskView) => view.kind === "category" ? taskCategoryKey(task.category || "") === taskCategoryKey(view.category) : view.list === "all" || listOf(task, today, offsetMinutes) === view.list, [view, today, offsetMinutes]);
   const active = useMemo(() => state.tasks.filter((task) => !task.done && matches(task)).sort((a, b) => {
@@ -83,15 +92,66 @@ export function TasksSurface({ list = null, onSelectList, onToast, refreshToken 
   const groups = useMemo(() => {
     const result = new Map<string, { name: string; tasks: TaskView[] }>();
     for (const task of active) { const key = taskCategoryKey(task.category || ""); const group = result.get(key); if (group) group.tasks.push(task); else result.set(key, { name: categoryFor(task.category)?.name || task.category || "No category", tasks: [task] }); }
-    return [...result.entries()].map(([key, group]) => ({ key, ...group }));
-  }, [active, categoryFor]);
+    return [...result.entries()].map(([key, group]) => ({ key, ...group, tasks: group.tasks.sort((a, b) => compareTaskOrder(a, b, today)) }));
+  }, [active, categoryFor, today]);
   const completed = useMemo(() => logbookRows(state.tasks, today, offsetMinutes).filter((row) => {
     if (view.kind === "category") return taskCategoryKey(row.task.category || "") === taskCategoryKey(view.category);
     if (view.list === "all" || view.list === "logbook") return true;
     if (view.list === "today") return !!row.task.doneAt && doneDayOf(row.task.doneAt, offsetMinutes) === today;
     return listOf({ ...row.task, done: false }, today, offsetMinutes) === view.list;
   }), [state.tasks, today, offsetMinutes, view]);
-  const drawn: TaskRow[] = useMemo(() => [...active.map((task) => ({ key: task.id, task, untickable: true })), ...(!collapsed.completed ? completed : [])], [active, completed, collapsed.completed]);
+  const drawn: TaskRow[] = useMemo(() => [...groups.flatMap((group) => group.tasks).map((task) => ({ key: task.id, task, untickable: true })), ...(!collapsed.completed ? completed : [])], [groups, completed, collapsed.completed]);
+
+  const expandDragCategory = useCallback((category: string) => setCollapsed((current) => current[category] ? { ...current, [category]: false } : current), []);
+  const focusMovedTask = useCallback((id: string) => {
+    requestAnimationFrame(() => {
+      const row = surface.current?.querySelector<HTMLButtonElement>(`[data-row-key="${CSS.escape(id)}"] .tasks-compact-open`);
+      if (row) row.focus({ preventScroll: true });
+      else (surface.current?.querySelector<HTMLButtonElement>(".tasks-narrow-navigation button")?.getClientRects().length ? surface.current?.querySelector<HTMLButtonElement>(".tasks-narrow-navigation button") : heading.current)?.focus({ preventScroll: true });
+    });
+  }, []);
+  async function placeTask(id: string, input: TaskMoveInput, undo = false) {
+    if (movePendingRef.current) return;
+    const before = tasksRef.current;
+    const source = before.find((task) => task.id === id);
+    if (!source) return;
+    let planned: ReturnType<typeof planTaskMove>;
+    try { planned = planTaskMove(before, id, input); }
+    catch (error) { onToast?.(error instanceof Error ? error.message : "Couldn’t move this task", { urgent: true }); return; }
+    if (!taskPositionChanged(before, planned.tasks, id, today)) return;
+    const siblings = before.filter((task) => !task.done && taskCategoryKey(task.category || "") === taskCategoryKey(source.category || "")).sort((a, b) => compareTaskOrder(a, b, today));
+    const inverse: TaskMoveInput = { category: source.category || null, beforeId: siblings[siblings.findIndex((task) => task.id === id) + 1]?.id || null, today };
+    movePendingRef.current = true; setMovePending(true); setSelectedId(id); setMoveAnnouncement("");
+    try {
+      mutateTasks((entries) => planTaskMove(entries, id, input).tasks);
+      const saved = await persistTaskMove(id, input);
+      // The move owns only category and position: an edit/completion arriving
+      // during the request must not be replaced by this response's snapshot.
+      mutateTasks((entries) => entries.map((entry) => {
+        if (entry.id !== id || entry.order !== planned.task.order || taskCategoryKey(entry.category || "") !== taskCategoryKey(planned.task.category || "")) return entry;
+        const next = { ...entry, order: saved.order };
+        if (saved.category) next.category = saved.category; else delete next.category;
+        return next;
+      }));
+      reloadTasks();
+      setMoveAnnouncement(`${source.title} moved${input.category ? ` to ${input.category}` : " to No category"}.`);
+      onToast?.(undo ? "Move undone" : "Task moved", undo ? undefined : { actionLabel: "Undo", onAction: () => {
+        const current = tasksRef.current.find((entry) => entry.id === id);
+        if (!current || current.done || current.order !== saved.order || taskCategoryKey(current.category || "") !== taskCategoryKey(saved.category || "")) {
+          onToast?.("This task changed. Its move can no longer be undone.", { urgent: true });
+          return;
+        }
+        void placeTask(id, inverse, true);
+      } });
+    } catch (error) {
+      mutateTasks((entries) => restoreTaskPlacement(entries, before, planned.tasks, id));
+      reloadTasks();
+      setMoveAnnouncement("Task move could not be saved.");
+      onToast?.(error instanceof Error ? error.message : "Couldn’t move this task", { urgent: true });
+    } finally {
+      movePendingRef.current = false; setMovePending(false); focusMovedTask(id);
+    }
+  }
 
   useEffect(() => { let mounted = true; void listTaskCategories().then((entries) => { if (mounted) setCatalog(entries); }).catch(() => { /* Task-derived categories stay available if the catalog cannot load. */ }); return () => { mounted = false; }; }, [refreshToken]);
   useEffect(() => { onDialogOpenChange?.(editor !== null || confirmation !== null); return () => onDialogOpenChange?.(false); }, [editor, confirmation, onDialogOpenChange]);
@@ -113,14 +173,24 @@ export function TasksSurface({ list = null, onSelectList, onToast, refreshToken 
     return () => window.removeEventListener("popstate", openNamed);
   }, [state.tasks, state.loading, today, openTask]);
   const moveTask = useCallback(async (task: TaskView, when: string, label: string) => { try { await actions.rescheduleTask(task, whenValueFor(task, when), label); } finally { actions.releaseFold(task.id); } }, [actions]);
-  useEffect(() => onTaskCommand((command) => { const row = drawn.find((entry) => entry.key === selectedId); if (!row?.untickable || row.task.done) return; void moveTask(row.task, command === "move-today" ? today : "someday", command === "move-today" ? "Today" : "Someday").catch(() => {}); }), [drawn, selectedId, today, moveTask]);
+  useEffect(() => onTaskCommand((command) => { if (dragging) return; const row = drawn.find((entry) => entry.key === selectedId); if (!row?.untickable || row.task.done) return; void moveTask(row.task, command === "move-today" ? today : "someday", command === "move-today" ? "Today" : "Someday").catch(() => {}); }), [drawn, selectedId, today, moveTask, dragging]);
   useEffect(() => {
     const capture = (event: KeyboardEvent) => { if (document.querySelector(LAYER_IN_DOCUMENT)) layerKeys.current.add(event); };
     const key = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || layerKeys.current.has(event) || editor || confirmation || !surfaceTakesKeys(surface.current)) return;
+      if (event.defaultPrevented || dragging || layerKeys.current.has(event) || editor || confirmation || !surfaceTakesKeys(surface.current)) return;
       if (event.target instanceof Element && event.target.closest("input,textarea,[contenteditable]")) return;
       const meta = event.metaKey || event.ctrlKey;
       const rows = drawn.filter((entry) => entry.untickable);
+      if (event.altKey && event.shiftKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+        const focused = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-row-key]")?.dataset.rowKey : selectedId;
+        const group = groups.find((entry) => entry.tasks.some((task) => task.id === focused));
+        if (!group || !focused) return;
+        event.preventDefault();
+        const index = group.tasks.findIndex((task) => task.id === focused);
+        if (event.key === "ArrowUp" && index > 0) void placeTask(focused, { category: group.tasks[index].category || null, beforeId: group.tasks[index - 1].id, today });
+        else if (event.key === "ArrowDown" && index < group.tasks.length - 1) void placeTask(focused, { category: group.tasks[index].category || null, beforeId: group.tasks[index + 2]?.id || null, today });
+        return;
+      }
       if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); const at = rows.findIndex((entry) => entry.key === selectedId); const next = rows[Math.max(0, Math.min(rows.length - 1, at + (event.key === "ArrowDown" ? 1 : -1)))]; if (next) { setSelectedId(next.key); surface.current?.querySelector<HTMLButtonElement>(`[data-row-key="${CSS.escape(next.key)}"] .tasks-compact-open`)?.focus(); } return; }
       if (!meta && !event.altKey && event.key.toLowerCase() === "n") { event.preventDefault(); openTask(); return; }
       const selected = rows.find((entry) => entry.key === selectedId); if (!selected || selected.task.done) return;
@@ -130,7 +200,7 @@ export function TasksSurface({ list = null, onSelectList, onToast, refreshToken 
     };
     window.addEventListener("keydown", capture, true); window.addEventListener("keydown", key);
     return () => { window.removeEventListener("keydown", capture, true); window.removeEventListener("keydown", key); };
-  }, [editor, confirmation, drawn, selectedId, today, actions, moveTask, openTask]);
+  });
   function fallbackFocus() { const mobile = surface.current?.querySelector<HTMLButtonElement>(".tasks-narrow-navigation button"); return mobile && getComputedStyle(mobile.closest(".tasks-narrow-navigation")!).display !== "none" ? mobile : heading.current; }
   function restoreFocus() { (returnFocus.current?.isConnected ? returnFocus.current : fallbackFocus())?.focus(); }
   function restoreAfterRemoval(invoker: HTMLElement | null) { requestAnimationFrame(() => { if (!invoker?.isConnected && document.activeElement === document.body) fallbackFocus()?.focus({ preventScroll: true }); }); }
@@ -204,22 +274,23 @@ export function TasksSurface({ list = null, onSelectList, onToast, refreshToken 
     onToast?.(task ? "Changes saved" : "Task created");
   }
   async function remove() { if (!editor?.task) return; const id = editor.task.id; await deleteTask(id); mutateTasks((entries) => entries.filter((entry) => entry.id !== id)); onToast?.("Task deleted"); }
-  function row(entry: TaskRow, finished = false) { return <TasksCompactRow key={entry.key} task={entry.task} rowKey={entry.key} historic={!entry.untickable} selected={selectedId === entry.key} today={today} offsetMinutes={offsetMinutes} reduce={reduce} pageTitle={entry.task.page ? pageTitleOf?.(entry.task.page) || pages.find((page) => page.id === entry.task.page)?.title : undefined} categoryIcon={categoryFor(entry.task.category)?.icon} showCategory={finished && view.kind !== "category"} showPlan={view.kind === "category" || view.list !== "today"} onOpen={openTask} onSelect={setSelectedId} onComplete={actions.completeTask} onReopen={actions.reopenTask} onOpenPage={onOpenPage} onDelete={requestDeleteTask} onContextActionSettled={restoreTaskContextFocus} />; }
+  function row(entry: TaskRow, finished = false, preview = false) { return <TasksCompactRow preview={preview} key={entry.key} task={entry.task} rowKey={entry.key} historic={!entry.untickable} selected={selectedId === entry.key} today={today} offsetMinutes={offsetMinutes} reduce={reduce} pageTitle={entry.task.page ? pageTitleOf?.(entry.task.page) || pages.find((page) => page.id === entry.task.page)?.title : undefined} categoryIcon={categoryFor(entry.task.category)?.icon} showCategory={finished && view.kind !== "category"} showPlan={view.kind === "category" || view.list !== "today"} onOpen={openTask} onSelect={setSelectedId} onComplete={actions.completeTask} onReopen={actions.reopenTask} onOpenPage={onOpenPage} onDelete={requestDeleteTask} onContextActionSettled={restoreTaskContextFocus} />; }
   const label = view.kind === "category" ? categoryFor(view.category)?.name || view.category || "No category" : viewLabel(view);
-  return <section ref={surface} aria-label="Tasks" data-testid="tasks-surface" className="brain-tasks tasks-workspace">
+  return <TasksDragProvider tasks={groups.flatMap((group) => group.tasks)} disabled={movePending || categoryPending || !!editor || !!confirmation || state.loading || !!state.error} onActiveChange={setDragging} onExpandCategory={expandDragCategory} onMove={(id, intent) => { void placeTask(id, { category: intent.category, beforeId: intent.beforeId, today }); }} renderOverlay={(task) => <ul>{row({ key: task.id, task, untickable: true }, false, true)}</ul>}><section ref={surface} aria-label="Tasks" data-testid="tasks-surface" data-dragging={dragging ? "" : undefined} className="brain-tasks tasks-workspace">
+    <span className="sr-only" role="status" aria-live="polite">{moveAnnouncement}</span>
     <TasksRail view={view} categories={navigationCategories} onSelect={(next) => onSelectList?.(next)} onNew={() => openTask()} categoryActions={categoryActions} />
     <div className="tasks-narrow-navigation"><TasksNavigation view={view} categories={navigationCategories} onSelect={(next) => onSelectList?.(next)} categoryActions={categoryActions} /></div>
     <div className="tasks-workspace-scroll" ref={scroller}><div className="tasks-workspace-canvas">
       <TasksContextMenu category actions={view.kind === "category" ? categoryActions(view.category) : []}><header tabIndex={-1} className="tasks-workspace-header">{view.kind === "category" && view.category && emoji(view.category, true)}<h1 ref={heading} tabIndex={-1} className="text-title">{label}</h1></header></TasksContextMenu>
       {state.error && <div className="tasks-workspace-message"><Empty icon="checklist-linear" title="Tasks could not load" hint={state.error} /><Button variant="quiet" onClick={() => reloadTasks()}>Try again</Button></div>}
       {!state.loading && !state.error && groups.length === 0 && <div className="tasks-workspace-empty"><Empty icon="checklist-linear" title="Nothing here" /></div>}
-      {groups.map((group) => <section key={group.key} className="tasks-workspace-group">{view.kind !== "category" && <TasksContextMenu category actions={categoryActions(group.key ? group.name : "")}><div tabIndex={-1} className="tasks-group-heading">{group.key && emoji(group.name)}<button type="button" aria-expanded={!collapsed[group.key]} onClick={() => setCollapsed((current) => ({ ...current, [group.key]: !current[group.key] }))}><h2 className="text-subheading">{group.name}</h2><Icon name={collapsed[group.key] ? "alt-arrow-right" : "alt-arrow-down"} size={14} /></button></div></TasksContextMenu>}{!collapsed[group.key] && <ul>{group.tasks.map((task) => row({ key: task.id, task, untickable: true }))}</ul>}</section>)}
+      {groups.map((group) => <TasksCategoryDrop key={group.key} category={group.key ? group.name : ""}>{view.kind !== "category" && <TasksContextMenu category actions={categoryActions(group.key ? group.name : "")}><div tabIndex={-1} className="tasks-group-heading">{group.key && emoji(group.name)}<button type="button" aria-expanded={!collapsed[group.key]} onClick={() => setCollapsed((current) => ({ ...current, [group.key]: !current[group.key] }))}><h2 className="text-subheading">{group.name}</h2><Icon name={collapsed[group.key] ? "alt-arrow-right" : "alt-arrow-down"} size={14} /></button></div></TasksContextMenu>}{!collapsed[group.key] && <ul>{group.tasks.map((task) => row({ key: task.id, task, untickable: true }))}</ul>}</TasksCategoryDrop>)}
       {completed.length > 0 && <section className="tasks-workspace-completed"><button type="button" className="tasks-completed-toggle text-control" aria-expanded={!collapsed.completed} onClick={() => setCollapsed((current) => ({ ...current, completed: !current.completed }))}><Icon name={collapsed.completed ? "alt-arrow-right" : "alt-arrow-down"} size={14} />Completed<span className="text-caption">{completed.length}</span></button>{!collapsed.completed && <ul>{completed.map((entry) => row(entry, true))}</ul>}</section>}
     </div></div>
     <button type="button" className="brain-mobile-new tasks-tablet-new fixed brain-touch-min focus-inset" data-hidden={editor || confirmation ? "" : undefined} inert={editor || confirmation ? true : undefined} aria-label="Add task" onClick={() => openTask()}><span className="brain-mobile-new-circle"><Icon name="add" size={17} /></span></button>
     {editor && <TasksTaskDialog key={editor.key} task={editor.task} category={editor.category} when={editor.when} today={today} categories={categories} pages={pages} onCreateCategory={createCategory} onSave={save} onDelete={editor.task ? remove : undefined} onClose={() => setEditor(null)} onOpenPage={onOpenPage} onReturnFocus={restoreFocus} />}
     <ConfirmDialog open={confirmation !== null} onOpenChange={(open) => { if (!open) setConfirmation(null); }} title={confirmation?.kind === "category" ? `Delete “${confirmation.name}”?` : `Delete “${confirmation?.task.title || "this task"}”?`} description={confirmation?.kind === "category" ? "Tasks will be kept without a category." : confirmation && isLinkedTask(confirmation.task) ? "The task will be removed from Tasks. Its source checkbox will be kept." : undefined} confirmLabel={confirmation?.kind === "category" ? "Delete category" : "Delete task"} onConfirm={() => void confirmDelete()} returnFocus={() => confirmationFocus.current?.isConnected ? confirmationFocus.current : fallbackFocus()} />
-  </section>;
+  </section></TasksDragProvider>;
 }
 export function emptyFor(
   view: TasksView,

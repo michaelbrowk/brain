@@ -1,5 +1,7 @@
 "use client";
 
+import { useTaskCategoryDrop } from "./tasks-drag";
+
 import * as Dropdown from "@radix-ui/react-dropdown-menu";
 import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
@@ -304,7 +306,12 @@ export function TasksNavigation({ view, categories, onSelect, categoryActions }:
 export function TasksRail({ view, categories, onSelect, onNew, categoryActions }: TaskNavigationProps & { onNew: () => void }) {
   const value = view.kind === "category" ? `category:${view.category}` : view.list;
   return <aside className="tasks-rail" aria-label="Tasks navigation"><div className="tasks-rail-spacer" aria-hidden /><nav className="tasks-rail-views" aria-label="Tasks views">{TASKS_DESTINATIONS.map((entry) => <button type="button" key={entry.list} className="tree-row focus-inset" data-selected={value === entry.list ? "" : undefined} aria-current={value === entry.list ? "page" : undefined} onClick={() => onSelect(entry.list)}><span className="tree-row-glyph" aria-hidden><Icon name={entry.icon} size={16} variant={value === entry.list ? "bold" : "linear"} /></span><span className="tree-row-title">{entry.label}</span></button>)}</nav>
-    {categories.length > 0 && <><div className="tasks-rail-label text-label">Categories</div><nav aria-label="Task categories">{categories.map((entry) => <TasksContextMenu key={entry.name} category actions={categoryActions?.(entry.name) || []}><button type="button" className="tree-row focus-inset" data-selected={value === `category:${entry.name}` ? "" : undefined} aria-current={value === `category:${entry.name}` ? "page" : undefined} onClick={() => onSelect({ category: entry.name })}>{navigationGlyph(entry.icon, value === `category:${entry.name}`)}<span className="tree-row-title">{entry.name || "No category"}</span></button></TasksContextMenu>)}</nav></>}
+    {categories.length > 0 && <><div className="tasks-rail-label text-label">Categories</div><nav aria-label="Task categories">{categories.map((entry) => <TasksRailCategory key={entry.name} entry={entry} selected={value === `category:${entry.name}`} onSelect={onSelect} actions={categoryActions?.(entry.name) || []} />)}</nav></>}
     <Button type="button" variant="quiet" className="tasks-rail-add" onClick={onNew}><Icon name="add" size={16} />Add task</Button>
   </aside>;
+}
+
+function TasksRailCategory({ entry, selected, onSelect, actions }: { entry: TaskNavigationCategory; selected: boolean; onSelect: TaskNavigationProps["onSelect"]; actions: readonly TasksContextAction[] }) {
+  const { setNodeRef, dropInto, dragging } = useTaskCategoryDrop(entry.name, "rail");
+  return <TasksContextMenu category actions={actions} disabled={dragging}><button ref={setNodeRef} type="button" className="tree-row focus-inset" data-selected={selected ? "" : undefined} data-drop-into={dropInto ? "" : undefined} aria-current={selected ? "page" : undefined} onClick={() => onSelect({ category: entry.name })}>{navigationGlyph(entry.icon, selected)}<span className="tree-row-title">{entry.name || "No category"}</span></button></TasksContextMenu>;
 }

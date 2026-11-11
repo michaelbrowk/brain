@@ -8,7 +8,7 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: process.env.CI ? 1 : 0,
-  reporter: process.env.CI ? "github" : "list",
+  reporter: process.env.CI ? [["line"], ["github"]] : "list",
   use: {
     baseURL: e2eOrigin,
     trace: "on-first-retry",

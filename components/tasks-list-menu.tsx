@@ -285,7 +285,7 @@ interface TaskNavigationProps {
   onSelect: (next: TasksListState | null) => void;
   categoryActions?: (name: string) => readonly TasksContextAction[];
 }
-function navigationGlyph(icon?: string) { return <span className="tree-row-glyph" aria-hidden>{icon || <Icon name="document-text" size={16} />}</span>; }
+function navigationGlyph(icon?: string, selected = false) { return <span className="tree-row-glyph" aria-hidden>{icon || <Icon name="document-text" size={16} variant={selected ? "bold" : "linear"} />}</span>; }
 
 export function TasksNavigation({ view, categories, onSelect, categoryActions }: TaskNavigationProps) {
   const [open, setOpen] = useState(false);
@@ -303,8 +303,8 @@ export function TasksNavigation({ view, categories, onSelect, categoryActions }:
 
 export function TasksRail({ view, categories, onSelect, onNew, categoryActions }: TaskNavigationProps & { onNew: () => void }) {
   const value = view.kind === "category" ? `category:${view.category}` : view.list;
-  return <aside className="tasks-rail" aria-label="Tasks navigation"><div className="tasks-rail-spacer" aria-hidden /><nav className="tasks-rail-views" aria-label="Tasks views">{TASKS_DESTINATIONS.map((entry) => <button type="button" key={entry.list} className="tree-row focus-inset" data-selected={value === entry.list ? "" : undefined} aria-current={value === entry.list ? "page" : undefined} onClick={() => onSelect(entry.list)}>{value === entry.list && <span className="tree-row-capsule" aria-hidden />}<span className="tree-row-glyph" aria-hidden><Icon name={entry.icon} size={16} variant={value === entry.list ? "bold" : "linear"} /></span><span className="tree-row-title">{entry.label}</span></button>)}</nav>
-    {categories.length > 0 && <><div className="tasks-rail-label text-label">Categories</div><nav aria-label="Task categories">{categories.map((entry) => <TasksContextMenu key={entry.name} category actions={categoryActions?.(entry.name) || []}><button type="button" className="tree-row focus-inset" data-selected={value === `category:${entry.name}` ? "" : undefined} aria-current={value === `category:${entry.name}` ? "page" : undefined} onClick={() => onSelect({ category: entry.name })}>{value === `category:${entry.name}` && <span className="tree-row-capsule" aria-hidden />}{navigationGlyph(entry.icon)}<span className="tree-row-title">{entry.name || "No category"}</span></button></TasksContextMenu>)}</nav></>}
+  return <aside className="tasks-rail" aria-label="Tasks navigation"><div className="tasks-rail-spacer" aria-hidden /><nav className="tasks-rail-views" aria-label="Tasks views">{TASKS_DESTINATIONS.map((entry) => <button type="button" key={entry.list} className="tree-row focus-inset" data-selected={value === entry.list ? "" : undefined} aria-current={value === entry.list ? "page" : undefined} onClick={() => onSelect(entry.list)}><span className="tree-row-glyph" aria-hidden><Icon name={entry.icon} size={16} variant={value === entry.list ? "bold" : "linear"} /></span><span className="tree-row-title">{entry.label}</span></button>)}</nav>
+    {categories.length > 0 && <><div className="tasks-rail-label text-label">Categories</div><nav aria-label="Task categories">{categories.map((entry) => <TasksContextMenu key={entry.name} category actions={categoryActions?.(entry.name) || []}><button type="button" className="tree-row focus-inset" data-selected={value === `category:${entry.name}` ? "" : undefined} aria-current={value === `category:${entry.name}` ? "page" : undefined} onClick={() => onSelect({ category: entry.name })}>{navigationGlyph(entry.icon, value === `category:${entry.name}`)}<span className="tree-row-title">{entry.name || "No category"}</span></button></TasksContextMenu>)}</nav></>}
     <Button type="button" variant="quiet" className="tasks-rail-add" onClick={onNew}><Icon name="add" size={16} />Add task</Button>
   </aside>;
 }

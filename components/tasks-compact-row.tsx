@@ -34,7 +34,7 @@ export function TasksCompactRow({ task, rowKey, historic, selected, today, offse
   // Every logbook projection, including the latest undoable occurrence,
   // shares its id with the live series. Its context menu must never edit it.
   const contextActions: TasksContextAction[] = historic || rowKey !== task.id ? [
-    { key: "occurrence", icon: "check-read-linear", label: "Completed occurrence", disabled: true, onSelect: () => {} },
+    { key: "occurrence", icon: "check-read-linear", label: "Past occurrence", disabled: true, onSelect: () => {} },
   ] : [
     { key: "open", icon: "document-text-linear", label: "Open task", onSelect: (invoker) => { if (invoker) onOpen(task, invoker); } },
     { key: "complete", icon: task.done ? "restart-linear" : "check-read-linear", label: task.done ? "Mark incomplete" : "Complete task", disabled: pending, onSelect: () => void toggle(true) },

@@ -25,10 +25,10 @@ const criticalFlows = readFileSync(
 );
 
 describe("CI cost guardrails", () => {
-  it("allows the push-only release gates 30 minutes and keeps PRs at 25", () => {
+  it("allows the push-only release gates 45 minutes and keeps PRs at 25", () => {
     const parsed = matter(`---\n${workflow}\n---\n`).data;
     expect(parsed.jobs.check["timeout-minutes"]).toBe(
-      "${{ github.event_name == 'push' && 30 || 25 }}",
+      "${{ github.event_name == 'push' && 45 || 25 }}",
     );
   });
 
@@ -169,9 +169,24 @@ describe("CI cost guardrails", () => {
     }
   });
 
-  it("never uploads a deploy artifact from the push workflow", () => {
-    expect(workflow).not.toContain("actions/upload-artifact@");
-    expect(workflow).not.toContain("retention-days:");
+  it("uploads only failed browser diagnostics, never a deploy artifact", () => {
+    const parsed = matter(`---\n${workflow}\n---\n`).data;
+    const uploads = (parsed.jobs.check.steps as Array<{ uses?: string }>).filter(
+      (step) => step.uses?.startsWith("actions/upload-artifact@"),
+    );
+    expect(uploads).toEqual([
+      {
+        name: "Preserve release browser failure diagnostics",
+        if: "github.event_name == 'push' && failure()",
+        uses: "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+        with: {
+          name: "release-browser-failure",
+          path: "test-results/",
+          "retention-days": 7,
+          "if-no-files-found": "ignore",
+        },
+      },
+    ]);
   });
 
   it("runs the forbidden-path check before the slow gates", () => {

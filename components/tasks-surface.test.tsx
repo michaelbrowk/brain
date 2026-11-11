@@ -259,7 +259,7 @@ describe("Tasks context menus", () => {
     await click(el(".tasks-completed-toggle"));
     for (const row of [...host.querySelectorAll<HTMLElement>(".tasks-workspace-completed .tasks-compact-item")]) {
       await contextMenu(row);
-      expect(menuItems().map((item) => item.textContent)).toEqual(["Completed occurrence"]);
+      expect(menuItems().map((item) => item.textContent)).toEqual(["Past occurrence"]);
       expect(menuItems()[0].getAttribute("data-disabled")).not.toBeNull();
       await key("Escape", el('[role="menu"]')); await settle();
     }

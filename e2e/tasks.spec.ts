@@ -904,9 +904,11 @@ test("@release task context menus complete, undo and remove categories without l
   if (await completed.getAttribute("aria-expanded") === "false") await completed.click();
   for (const entry of history.task.log!) {
     const occurrence = page.locator(`[data-row-key="${recurringId}:${entry.completedAt}"]`);
-    await openMenu(occurrence.locator(".tasks-compact-meta"));
+    // The historic title button is disabled. Invoke its enabled context-menu
+    // row instead of asking Playwright to wait for that button to enable.
+    await openMenu(occurrence);
     await expect(menu.getByRole("menuitem")).toHaveCount(1);
-    await expect(menu.getByRole("menuitem", { name: "Completed occurrence", exact: true })).toBeDisabled();
+    await expect(menu.getByRole("menuitem", { name: "Past occurrence", exact: true })).toBeDisabled();
     await page.keyboard.press("Escape");
     await expect(menu).toHaveCount(0);
   }

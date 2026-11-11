@@ -908,7 +908,7 @@ test("@release task context menus complete, undo and remove categories without l
     // row instead of asking Playwright to wait for that button to enable.
     await openMenu(occurrence);
     await expect(menu.getByRole("menuitem")).toHaveCount(1);
-    await expect(menu.getByRole("menuitem", { name: "Completed occurrence", exact: true })).toBeDisabled();
+    await expect(menu.getByRole("menuitem", { name: "Past occurrence", exact: true })).toBeDisabled();
     await page.keyboard.press("Escape");
     await expect(menu).toHaveCount(0);
   }

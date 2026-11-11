@@ -109,6 +109,20 @@ describe("task hold gesture", () => {
     await mouse("mousedown", 200, 120, button); await advance(250); expect(active()).toBe(false);
     await mouse("mouseup"); expect(move).not.toHaveBeenCalled();
   });
+  it("clamps only preview X continuously while the raw pointer still chooses a rail category", async () => {
+    await mount(); await mouse("mousedown", 200, 120, rowButton()); await advance(220);
+    const preview = () => document.querySelector<HTMLElement>('[data-testid="tasks-drag-overlay"]')!.parentElement!.style.transform;
+    await mouse("mousemove", 240, 132);
+    expect(preview()).toContain("translate3d(40px, 12px, 0)");
+    // The clamp applies before entering the rail too, without a target-driven jump.
+    await mouse("mousemove", 180, 132);
+    expect(preview()).toContain("translate3d(0px, 12px, 0)");
+    await mouse("mousemove", 40, 128);
+    expect(preview()).toContain("translate3d(0px, 8px, 0)");
+    expect(host.querySelector("[data-rail][data-drop-into]")).not.toBeNull();
+    await mouse("mouseup", 40, 128);
+    expect(move).toHaveBeenCalledWith("a", expect.objectContaining({ category: "Empty", beforeId: null }));
+  });
   it("uses only actual category targets and cancels outside the Tasks targets", async () => {
     await mount(); await mouse("mousedown", 200, 120, rowButton()); await advance(220);
     await mouse("mousemove", 40, 120); expect(host.querySelector("[data-rail][data-drop-into]")).not.toBeNull();

@@ -10,12 +10,34 @@ import {
   deviceZone,
   liveTask,
   localDay,
+  moveTask,
   mutateTasks,
   onDayChange,
   resetTasksStore,
   useTasks,
   type TasksState,
 } from "./tasks-client";
+
+describe("moving a task", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("sends category and insertion anchor and returns the persisted task", async () => {
+    const task = {id: "task-1", category: "Work", order: "a0"};
+    const input = {category: "Work", beforeId: "task-2", today: "2026-11-11"};
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({task})));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await moveTask("task-1", input)).toEqual(task);
+    expect(fetchMock).toHaveBeenCalledWith("/api/tasks/task-1/move", expect.objectContaining({method: "POST", body: JSON.stringify(input), headers: {"content-type": "application/json", "x-brain-client": expect.any(String)}}));
+  });
+
+  it("surfaces a refused placement and transport failure", async () => {
+    const input = {category: null, beforeId: null, today: "2026-11-11"};
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({error: "destination_changed"}), {status: 400})).mockRejectedValueOnce(new Error("offline"));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(moveTask("task-1", input)).rejects.toThrow("destination_changed");
+    await expect(moveTask("task-1", input)).rejects.toThrow("offline");
+  });
+});
 
 describe("deleting a task category", () => {
   afterEach(() => vi.unstubAllGlobals());

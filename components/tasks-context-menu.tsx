@@ -1,9 +1,10 @@
 "use client";
 
 import * as Context from "@radix-ui/react-context-menu";
-import { Fragment, useRef, type ReactNode } from "react";
+import { Fragment, useRef, useState, type ReactNode } from "react";
 import { Icon } from "./ui/icon";
 import { useDeferredMenuAction } from "./ui/deferred-menu-action";
+import { useTasksDragState } from "./tasks-drag";
 
 export interface TasksContextAction {
   key: string;
@@ -16,21 +17,26 @@ export interface TasksContextAction {
 
 /** Tasks uses the page menu's material and deferred handoff to dialogs.
  * The wrapper stays in place: right-clicking it never activates the row. */
-export function TasksContextMenu({ actions, category = false, children, onOpenChange }: {
+export function TasksContextMenu({ actions, category = false, children, onOpenChange, disabled = false }: {
   actions: readonly TasksContextAction[];
   category?: boolean;
+  disabled?: boolean;
   children: ReactNode;
   onOpenChange?: (open: boolean) => void;
 }) {
   const deferred = useDeferredMenuAction();
+  const [open, setOpen] = useState(false);
+  const drag = useTasksDragState();
+  const blocked = disabled || drag.activeId !== null;
   const invoker = useRef<HTMLElement | null>(null);
   const keyboardInvoker = useRef<HTMLElement | null>(null);
   if (actions.length === 0) return children;
-  return <Context.Root onOpenChange={onOpenChange}>
-    <Context.Trigger asChild
+  return <Context.Root open={blocked ? false : open} onOpenChange={(next) => { if (blocked && next) return; setOpen(next); onOpenChange?.(next); }}>
+    <Context.Trigger asChild disabled={blocked}
       onPointerDownCapture={(event) => { invoker.current = event.currentTarget; }}
       onContextMenuCapture={(event) => { invoker.current = keyboardInvoker.current || event.currentTarget; }}
       onKeyDownCapture={(event) => {
+        if (blocked) return;
         if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
         event.preventDefault();
         event.stopPropagation();

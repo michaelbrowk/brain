@@ -1032,3 +1032,166 @@ test("@mobile a task undo's exit, mid-flight, on a phone", async ({ page }) => {
   test.skip(EXIT_SHOTS === "", "artifact capture — run with TOAST_EXIT_SHOTS_DIR=<dir>");
   await shootTaskUndoExit(page, "phone");
 });
+
+test.describe("task drag fixtures", () => {
+  // These coordinate gestures need a short, isolated list. Earlier cases in
+  // this file intentionally leave tasks behind; freshNotes checks one worker.
+  freshNotes();
+
+test("@release holding a task reorders it and moves categories without losing context", async ({ page }) => {
+  test.setTimeout(150_000);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const today = localToday();
+  const source = "Drag planning";
+  const destination = "Empty drag category";
+  for (const name of [source, destination]) {
+    const created = await browserJson(page, "/api/task-categories", { method: "POST", body: { name } });
+    expect(created.ok, JSON.stringify(created.body)).toBeTruthy();
+  }
+  const context = await createNote(page, "Drag reference", "Keep this context unchanged.\n");
+  const tasks: TaskView[] = [];
+  for (const [index, title] of ["Drag first", "Drag future", "Drag second", "Drag last"].entries()) {
+    const created = await browserJson(page, "/api/tasks", { method: "POST", body: {
+      title, category: source, when: index === 1 ? shiftDay(today, 7) : today,
+      body: `Details for ${title}`, relatedPageIds: [context.id],
+    } });
+    expect(created.ok, JSON.stringify(created.body)).toBeTruthy();
+    tasks.push((created.body as { task: TaskView }).task);
+  }
+  const [first, future, second, last] = tasks;
+  const workspace = page.getByTestId("tasks-surface");
+  const row = (id: string) => workspace.locator(`.tasks-compact-item[data-row-key="${id}"]`);
+  const visibleOrder = () => workspace.locator('.tasks-compact-item:not([data-done])').evaluateAll((rows) => rows.map((entry) => entry.getAttribute("data-row-key")));
+  const rail = page.getByRole("navigation", { name: "Task categories", exact: true });
+  const read = async () => {
+    const response = await browserJson(page, `/api/tasks/${last.id}`);
+    expect(response.ok, JSON.stringify(response.body)).toBeTruthy();
+    return response.body as { task: TaskView; body: string; bodyRev: string };
+  };
+  const beginDrag = async () => {
+    const bounds = await row(last.id).locator(".tasks-compact-open").boundingBox();
+    expect(bounds).not.toBeNull();
+    await page.mouse.move(bounds!.x + 60, bounds!.y + bounds!.height / 2);
+    await page.mouse.down();
+    // Await the real hold sensor, not a fixed delay or a test-only DOM flag.
+    await expect(workspace).toHaveAttribute("data-dragging", "");
+  };
+  const saveDrop = async (x: number, y: number, feedback: Locator, edgeY?: number) => {
+    await page.mouse.move(x, y, { steps: 12 });
+    await expect(feedback).toBeVisible();
+    if (edgeY !== undefined) await expect.poll(async () => Math.abs((await feedback.boundingBox())!.y - edgeY)).toBeLessThanOrEqual(2);
+    const [response] = await Promise.all([
+      page.waitForResponse((entry) => entry.url().endsWith(`/api/tasks/${last.id}/move`) && entry.request().method() === "POST"),
+      page.mouse.up(),
+    ]);
+    expect(response.status()).toBe(200);
+    await expect(workspace).not.toHaveAttribute("data-dragging", "");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+  };
+  await page.goto("/tasks");
+  await expect(row(last.id)).toBeVisible({ timeout: 20_000 });
+  await expect.poll(visibleOrder).toEqual([first.id, second.id, last.id]);
+  const original = await read();
+  const target = await row(first.id).boundingBox();
+  expect(target).not.toBeNull();
+  await beginDrag();
+  await saveDrop(target!.x + 90, target!.y + 5, page.locator('.tasks-drag-insertion .tree-insert[data-edge="before"]'), target!.y);
+  await expect.poll(visibleOrder).toEqual([last.id, first.id, second.id]);
+  await page.reload();
+  await expect.poll(visibleOrder).toEqual([last.id, first.id, second.id]);
+  await rail.getByRole("button", { name: source, exact: true }).click();
+  await expect.poll(visibleOrder).toEqual([last.id, first.id, future.id, second.id]);
+
+  // A drop on an empty category needs no visible tasks there, and keeps all
+  // task content. The date is unchanged, so Today still contains this task.
+  const destinationButton = rail.getByRole("button", { name: destination, exact: true });
+  await expect(destinationButton).toBeVisible();
+  const categoryBounds = await destinationButton.boundingBox();
+  expect(categoryBounds).not.toBeNull();
+  await beginDrag();
+  await saveDrop(categoryBounds!.x + 70, categoryBounds!.y + categoryBounds!.height / 2, destinationButton.and(page.locator("[data-drop-into]")));
+  await expect(row(last.id)).toHaveCount(0);
+  const moved = await read();
+  expect(moved.task.category).toBe(destination);
+  expect(moved.task.when).toBe(original.task.when);
+  expect(moved.task.relatedPageIds).toEqual(original.task.relatedPageIds);
+  expect(moved.body).toBe(original.body);
+  await Promise.all([
+    page.waitForResponse((entry) => entry.url().endsWith(`/api/tasks/${last.id}/move`) && entry.request().method() === "POST"),
+    page.locator('[aria-live="polite"] .brain-toast').getByRole("button", { name: "Undo", exact: true }).click(),
+  ]);
+  await expect(row(last.id)).toBeVisible();
+  await expect.poll(visibleOrder).toEqual([last.id, first.id, future.id, second.id]);
+  await page.reload();
+  await rail.getByRole("button", { name: source, exact: true }).click();
+  await expect.poll(visibleOrder).toEqual([last.id, first.id, future.id, second.id]);
+
+  // Keyboard reorder uses the same persisted operation without hijacking the
+  // title button's ordinary Enter/Space behaviour.
+  await Promise.all([
+    page.waitForResponse((entry) => entry.url().endsWith(`/api/tasks/${last.id}/move`) && entry.request().method() === "POST"),
+    row(last.id).locator(".tasks-compact-open").press("Alt+Shift+ArrowDown"),
+  ]);
+  await expect.poll(visibleOrder).toEqual([first.id, last.id, future.id, second.id]);
+  await page.reload();
+  await rail.getByRole("button", { name: source, exact: true }).click();
+  await expect.poll(visibleOrder).toEqual([first.id, last.id, future.id, second.id]);
+  await beginDrag();
+  await page.mouse.move(8, 8, { steps: 12 });
+  await page.keyboard.press("Escape");
+  await page.mouse.up();
+  await expect(workspace).not.toHaveAttribute("data-dragging", "");
+  await expect.poll(visibleOrder).toEqual([first.id, last.id, future.id, second.id]);
+  await row(last.id).locator(".tasks-compact-open").click({ button: "right" });
+  await expect(page.getByRole("menu")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await row(last.id).locator(".tasks-compact-open").click();
+  await expect(page.getByRole("dialog", { name: last.title, exact: true })).toBeVisible();
+  expect(await markdownOf(page, context.id)).toBe(context.markdown);
+});
+
+test("@release @mobile holding a task starts touch reorder instead of opening its menu", async ({ page }) => {
+  test.setTimeout(90_000);
+  await login(page);
+  const ids: string[] = [];
+  for (const title of ["Touch first", "Touch second", "Touch third"]) ids.push(await createTask(page, title));
+  await page.goto("/tasks");
+  const workspace = page.getByTestId("tasks-surface");
+  const order = () => workspace.locator('.tasks-compact-item:not([data-done])').evaluateAll((rows) => rows.map((entry) => entry.getAttribute("data-row-key")));
+  const row = (id: string) => workspace.locator(`.tasks-compact-item[data-row-key="${id}"]`);
+  await expect(row(ids[2])).toBeVisible({ timeout: 20_000 });
+  await expect.poll(order).toEqual(ids);
+  const from = await row(ids[2]).locator(".tasks-compact-open").boundingBox();
+  const to = await row(ids[0]).boundingBox();
+  expect(from).not.toBeNull(); expect(to).not.toBeNull();
+  const touch = await page.context().newCDPSession(page);
+  const x = from!.x + 60;
+  const y = from!.y + from!.height / 2;
+  await touch.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
+  await expect(workspace).toHaveAttribute("data-dragging", "");
+  // Deliberately keep the finger down past Radix's long-press delay. This
+  // is the gesture under test, not a wait for UI readiness.
+  await page.waitForTimeout(750);
+  await expect(page.getByRole("menu")).toHaveCount(0);
+  for (let step = 1; step <= 10; step++) {
+    await touch.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: y + (to!.y + 5 - y) * step / 10 }] });
+  }
+  await expect(page.locator('.tasks-drag-insertion .tree-insert[data-edge="before"]')).toBeVisible();
+  await expect.poll(async () => Math.abs((await page.locator('.tasks-drag-insertion .tree-insert').boundingBox())!.y - to!.y)).toBeLessThanOrEqual(2);
+  const [response] = await Promise.all([
+    page.waitForResponse((entry) => entry.url().endsWith(`/api/tasks/${ids[2]}/move`) && entry.request().method() === "POST"),
+    touch.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] }),
+  ]);
+  expect(response.status()).toBe(200);
+  await expect(workspace).not.toHaveAttribute("data-dragging", "");
+  await expect(page.getByRole("menu")).toHaveCount(0);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect.poll(order).toEqual([ids[2], ids[0], ids[1]]);
+  await page.reload();
+  await expect.poll(order).toEqual([ids[2], ids[0], ids[1]]);
+  await row(ids[2]).locator(".tasks-compact-open").tap();
+  await expect(page.getByRole("dialog", { name: "Touch third", exact: true })).toBeVisible();
+});
+
+});

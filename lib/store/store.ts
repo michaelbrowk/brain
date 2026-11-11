@@ -48,6 +48,8 @@ import { emitStore } from "./events";
 import { taskRecordFields } from "../tasks/model";
 import { taskBodySchema, taskCategorySchema, taskCategoryKey, normalizeTaskCategoryName, type TaskCategory } from "../tasks/details";
 import { readTaskCatalog, writeTaskCatalog } from "./task-categories";
+import { readTaskOrder, writeTaskOrder, type TaskOrder } from "./task-order";
+import { taskMoveSchema, planTaskMove, compareTaskOrder, type TaskMoveInput } from "../tasks/order";
 import {
   attachmentMimeTypeForName,
   canonicalAttachmentMimeType,
@@ -557,6 +559,7 @@ export class Store {
   private notionIndex = new Map<string, string>();
   private abortReceiptIndex = new Map<string, string>();
   private taskIndex = new TaskIndex();
+  private taskOrder: TaskOrder = {};
   private mutationPoison: Error | undefined;
   /** When the last quota-triggered attachment sweep ran. Per process, which is
    *  what a single-writer Store is. */
@@ -7873,6 +7876,7 @@ export class Store {
 
   private async loadTaskIndex(): Promise<void> {
     this.taskIndex = await loadTaskIndex(this.root);
+    this.taskOrder = await readTaskOrder(this.root);
   }
 
   /** The tasks of one page, for the reconcile. */
@@ -7908,7 +7912,7 @@ export class Store {
       .filter((task) => !this.taskHidden(task))
       .flatMap((task) => {
         const view = this.taskIndex.view(task.id);
-        return view ? [view] : [];
+        return view ? [this.attributed(view)] : [];
       });
   }
 
@@ -7952,6 +7956,10 @@ export class Store {
    *  that skipped this dropped the name off the row until something else
    *  invalidated the set. */
   private attributed(view: TaskView): TaskView {
+    const key = taskCategoryKey(view.category ?? "");
+    const group = Object.hasOwn(this.taskOrder, key) ? this.taskOrder[key] : undefined;
+    const order = group && Object.hasOwn(group, view.id) ? group[view.id] : undefined;
+    if (order !== undefined) view = {...view, order};
     if (!view.done || !isLinkedTask(view)) return view;
     const entry = view.page !== undefined ? this.index.get(view.page) : undefined;
     const meta = entry?.meta;
@@ -8227,9 +8235,29 @@ export class Store {
       }
       return true;
     });
-    return visible
-      .sort((a, b) => compareTasks(a, b, today, offsetMinutes))
-      .map((task) => this.attributed(task));
+    const ordered = visible.map((task) => this.attributed(task))
+      .sort((a, b) => compareTasks(a, b, today, offsetMinutes));
+    // Keep API list/date/evening groups intact. Within each group, project
+    // manual category order into that category's existing slots. The Tasks
+    // surface reads the same ranks to build its own category-based views.
+    const positions = new Map<string, number[]>();
+    ordered.forEach((task, index) => {
+      if (task.done) return;
+      const key = JSON.stringify([
+        listOf(task, today, offsetMinutes),
+        groupFor(task, today, offsetMinutes).key,
+        taskCategoryKey(task.category ?? ""),
+      ]);
+      const slots = positions.get(key) ?? [];
+      slots.push(index); positions.set(key, slots);
+    });
+    for (const slots of positions.values()) {
+      const tasks = slots.map(index => ordered[index]);
+      if (!tasks.some(task => task.order !== undefined)) continue;
+      tasks.sort((a, b) => compareTaskOrder(a, b, today));
+      slots.forEach((index, at) => { ordered[index] = tasks[at]; });
+    }
+    return ordered;
   }
 
   /** The Logbook as ROWS: one per completion, each carrying the key a record
@@ -8366,6 +8394,34 @@ export class Store {
     });
   }
 
+  /** Membership stays in the task record. Destination order is prepared first:
+   * if its subsequent category write fails, that rank is dormant and the old
+   * category/order still answer correctly. No second task file is rewritten. */
+  async moveTask(id: string, input: TaskMoveInput, src?: string): Promise<TaskView> {
+    assertTaskId(id);
+    const parsed = taskMoveSchema.safeParse(input);
+    if (!parsed.success) throw new TaskValidationError(parsed.error.issues[0]?.message ?? "invalid task move");
+    return this.mutate(async () => {
+      const record = this.taskIndex.get(id);
+      if (!record) throw new NotFoundError(id);
+      if (this.taskHidden(record)) throw new TaskValidationError("This task is no longer available to move.");
+      let plan: ReturnType<typeof planTaskMove>;
+      try { plan = planTaskMove(this.allTaskViews(), id, parsed.data); }
+      catch (error) { throw new TaskValidationError(error instanceof Error ? error.message : "invalid task move"); }
+      const category = taskCategoryKey(parsed.data.category ?? "");
+      const next = {...this.taskOrder, [category]: plan.order};
+      await writeTaskOrder(this.root, next);
+      this.taskOrder = next;
+      scheduleCommit(this.root);
+      if (taskCategoryKey(record.category ?? "") !== category) {
+        await this.writeTaskUnlocked(applyTaskPatch(record, {category: parsed.data.category}), src);
+      } else {
+        emitStore({type: "task", id, src});
+      }
+      return this.getTask(id)!;
+    });
+  }
+
   async deleteTask(id: string, src?: string): Promise<void> {
     assertTaskId(id);
     await this.mutate(async () => {
@@ -8392,7 +8448,7 @@ export class Store {
       const current = this.taskIndex.get(id);
       if (!current) throw new NotFoundError(id);
       await this.writeTaskUnlocked(parseTask({ ...current, remindedAt: at }));
-      return this.taskIndex.view(id) as TaskView;
+      return this.attributed(this.taskIndex.view(id) as TaskView);
     });
   }
 

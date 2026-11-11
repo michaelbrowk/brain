@@ -31,9 +31,9 @@ describe("the module API gate", () => {
   it("claims every route file under /api/tasks", async () => {
     const root = path.join(import.meta.dirname, "..", "app", "api", "tasks");
     const urls = await routeUrls(root, "/api/tasks");
-    // Two files today. A third is a new task surface and has to be argued
-    // for, not discovered.
-    expect(urls).toEqual(["/api/tasks", "/api/tasks/x"]);
+    // Keep this inventory explicit. The move endpoint atomically persists
+    // category membership and sibling order; it has the same Tasks gate.
+    expect(urls).toEqual(["/api/tasks", "/api/tasks/x", "/api/tasks/x/move"]);
     for (const url of urls) expect(moduleOfApiPath(url), url).toBe("tasks");
   });
 

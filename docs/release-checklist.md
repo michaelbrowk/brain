@@ -8,6 +8,8 @@ When main requires a pull request (including for administrators), prepare the ve
 
 For 0.24, older task files need no migration. Once a task has nonempty related page links, 0.23's strict parser skips that task (the Markdown file remains intact). Prefer a compatible roll-forward fix after those links have been used. Before a manual downgrade, retain a fresh raw backup; never automatically restore the pre-release notes snapshot over later edits. Empty links are omitted from the persisted record.
 
+For 0.24.3, manual task order lives in `_tasks/_order/index.md`; task frontmatter is unchanged. A 0.24.2 reader ignores this sidecar and can still read every task, but does not show the manual order. Retain the sidecar in raw notes backups. Portable export/import does not currently preserve this order.
+
 ## Automated gate
 
 - `pnpm check`

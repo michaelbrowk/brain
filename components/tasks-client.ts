@@ -2,6 +2,7 @@
 
 import { useEffect, useSyncExternalStore } from "react";
 import { apiFetch } from "@/lib/client";
+import type { TaskMoveInput } from "@/lib/tasks/order";
 import type { TaskRepeat, TaskView } from "@/lib/tasks/model";
 import type { TaskCategory } from "@/lib/tasks/details";
 export type { TaskCategory } from "@/lib/tasks/details";
@@ -437,4 +438,13 @@ async function writeTaskCategory(method: "POST" | "PATCH", input: {name: string;
   const response = await apiFetch("/api/task-categories", {method, headers: {"content-type": "application/json"}, body: JSON.stringify(input)});
   if (!response.ok) await refuse(response);
   return ((await response.json()) as {category: TaskCategory}).category;
+}
+
+/** One placement mutation; dates, repeat and task content stay unchanged. */
+export async function moveTask(id: string, input: TaskMoveInput): Promise<TaskView> {
+  const response = await apiFetch(`/api/tasks/${encodeURIComponent(id)}/move`, {
+    method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify(input),
+  });
+  if (!response.ok) await refuse(response);
+  return ((await response.json()) as {task: TaskView}).task;
 }

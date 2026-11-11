@@ -7609,6 +7609,57 @@ html[data-kbd] .tasks-compact-row:has(> .tasks-compact-open:focus-visible)::befo
 @media(min-width:768px) and (max-width:1159px){.tasks-tablet-new.brain-mobile-new{display:grid}.tasks-workspace-canvas{padding-bottom:calc(var(--tabbar-h) + 48px)}}
 @media(max-width:767px){.tasks-workspace-canvas{padding-inline:16px;padding-bottom:calc(48px + var(--tabbar-reserve))}.tasks-compact-meta{gap:4px 10px}}
 
+/* Whole-row task dragging follows the tree's transient line/ring language. */
+.tasks-compact-item { position: relative; }
+.tasks-compact-item[data-dragging] > .tasks-compact-row { opacity: .3; }
+.tasks-workspace[data-dragging] { cursor: grabbing; user-select: none; }
+.tasks-workspace[data-dragging] .tasks-compact-open { cursor: grabbing; }
+.tasks-workspace-group[data-drop-into] {
+  border-radius: var(--r-row);
+  background: var(--fill-glass-hover);
+  box-shadow: inset 0 0 0 1.5px var(--yellow);
+}
+.tasks-drag-overlay {
+  width: calc(100% + 16px);
+  padding-inline: 8px;
+  margin-inline: -8px;
+  border-radius: var(--r-row);
+  background: var(--paper);
+  box-shadow: var(--lift);
+  pointer-events: none;
+  cursor: grabbing;
+}
+.tasks-drag-insertion {
+  visibility: hidden;
+  position: fixed;
+  z-index: calc(var(--z-modal) - 1);
+  pointer-events: none;
+}
+.tasks-drag-insertion .tree-insert::before { display: none; }
+.tasks-drag-marker {
+  visibility: hidden;
+  position: fixed;
+  z-index: var(--z-modal);
+  height: 2px;
+  border-radius: 1px;
+  background: var(--yellow);
+  pointer-events: none;
+}
+.tasks-drag-marker::before {
+  content: "";
+  position: absolute;
+  left: -3px;
+  top: -2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--yellow);
+}
+.tasks-drag-overlay ul { list-style: none; padding: 0; margin: 0; }
+.tasks-drag-overlay .tasks-compact-row::after { display: none; }
+.tasks-drag-overlay .tasks-compact-open { cursor: grabbing; }
+.tasks-drag-overlay .tasks-compact-row::before { opacity: 0; }
+
 /* Draft detail form, using Brain's real dialog, picker and field materials. */
 .tasks-detail{display:flex;flex-direction:column;width:calc(100vw - 32px);max-width:560px;max-height:85dvh}.tasks-detail-body{padding:4px 20px 16px;overscroll-behavior:contain}.tasks-detail-body fieldset{border:0;margin:0;padding:0;min-width:0}.tasks-detail-label{display:block;color:var(--ink-2);font-weight:500;margin-bottom:8px}.tasks-detail-properties{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px 24px;margin:4px 0 24px}.tasks-detail-property.btn{display:flex;align-items:center;gap:7px;max-width:calc(100% + 24px);height:auto;min-height:32px;margin-inline:-12px;color:var(--ink);text-align:left}.tasks-detail-property>span{overflow-wrap:anywhere}.tasks-detail-property svg{flex-shrink:0}.tasks-detail-footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:12px 20px 20px;flex-shrink:0}.tasks-detail-primary-mobile{display:none!important}.tasks-inline-title{display:block;flex:1;min-width:0;width:100%;min-height:31px;max-height:min(160px,22dvh);padding:4px 0;border:0;border-radius:var(--r-control);background:transparent;color:var(--ink);resize:none;overflow-y:auto;outline:none}.tasks-inline-title::placeholder{color:var(--ink-2);font-weight:600}.tasks-detail-title-header>.icon-btn{flex-shrink:0;margin-top:1px}.tasks-detail-title-header>.tasks-detail-primary-mobile{flex-shrink:0}.tasks-textarea.field{display:block;height:auto;padding:0;min-width:0}.tasks-textarea>textarea{display:block;resize:none;width:100%;min-height:98px;padding:10px 12px;color:var(--ink);background:transparent;font:inherit;letter-spacing:inherit;line-height:1.5;outline:none;border:0;border-radius:inherit;overflow:hidden}.tasks-textarea>textarea::placeholder{color:var(--ink-2)}.tasks-detail .tasks-textarea:focus-within{background:var(--fill-field-glass);box-shadow:inset 0 0.5px 0 var(--fill-rim)}html[data-kbd] .tasks-detail .tasks-textarea:has(textarea:focus-visible),html[data-kbd] .tasks-inline-title:focus-visible{box-shadow:0 0 0 1.5px var(--hair-field-strong)}.tasks-detail-hint{color:var(--ink-2);font-weight:500;margin:0 0 16px}.tasks-detail-source{margin-top:20px}.tasks-detail-error{margin:16px 0 0;color:var(--red);font-weight:500}.tasks-detail-error p{margin:0 0 8px}
 .tasks-picker{width:280px;max-width:calc(100vw - 32px)}.tasks-page-picker{width:360px}.tasks-picker-panel{display:flex;flex-direction:column;max-width:100%;max-height:calc(var(--radix-popover-content-available-height,100dvh) - 12px);min-height:0}.tasks-picker-panel>.field,.tasks-picker-heading,.tasks-picker-footer{flex-shrink:0}.tasks-picker-panel>.tasks-picker-list{min-height:0;flex-shrink:1}.tasks-picker-field.field{width:100%}.tasks-picker-list{max-height:min(256px,calc(var(--radix-popover-content-available-height,100dvh) - 128px));margin-top:6px}.tasks-picker .brain-menu-item{width:100%;text-align:left}.tasks-picker-error{margin:8px 4px 2px;color:var(--red);font-weight:500}.tasks-create-category{margin-top:4px}.tasks-picker-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:6px;padding-left:6px;color:var(--ink-2)}.tasks-picker-footer{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 0 0 6px;color:var(--ink-2)}.tasks-picker-empty{margin:0;padding:20px 8px;color:var(--ink-2)}.tasks-page-option.brain-menu-item{height:auto;min-height:44px;padding-block:8px;align-items:center}.tasks-page-copy{display:flex;flex:1;min-width:0;flex-direction:column;gap:3px;overflow-wrap:anywhere}.tasks-page-copy>.text-caption{color:var(--ink-2);font-weight:500;line-height:1.35}.tasks-linked-pages{margin-top:20px}.tasks-linked-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}.tasks-linked-heading>.tasks-detail-label{margin:0}.tasks-add-page.btn{display:flex;align-items:center;gap:6px;margin-right:-12px}.tasks-linked-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}.tasks-linked-list>li{display:flex;align-items:center;gap:8px;min-height:36px}.tasks-linked-list .icon-btn{flex-shrink:0;margin-right:-6px}.tasks-picker .tasks-picker-field:focus-within{background:var(--fill-field-glass);box-shadow:inset 0 0.5px 0 var(--fill-rim)}html[data-kbd] .tasks-picker .tasks-picker-field:has(input:focus-visible){box-shadow:0 0 0 1.5px var(--hair-field-strong)}

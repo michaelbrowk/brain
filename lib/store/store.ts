@@ -8018,6 +8018,34 @@ export class Store {
     });
   }
 
+  /** Delete the label, keeping every task and its notes. The catalog goes
+   *  last: if clearing a record fails, a retry can still find the category. */
+  async deleteTaskCategory(name: string, src?: string): Promise<{cleared: number}> {
+    return this.mutate(async () => {
+      const parsed = taskCategorySchema.safeParse({name});
+      if (!parsed.success || !normalizeTaskCategoryName(parsed.data.name)) {
+        throw new TaskValidationError("invalid category name");
+      }
+      const key = taskCategoryKey(parsed.data.name);
+      const catalog = await readTaskCatalog(this.root);
+      const remaining = catalog.filter(category => taskCategoryKey(category.name) !== key);
+      // Include completed, hidden and legacy records, not a visible list or
+      // its Logbook window: any remaining label would recreate the category.
+      const tasks = this.taskIndex.all().filter(task => task.category !== undefined && taskCategoryKey(task.category) === key);
+      for (const task of tasks) {
+        await this.writeTaskUnlocked(applyTaskPatch(task, {category: null}), src);
+      }
+      if (remaining.length !== catalog.length) {
+        await writeTaskCatalog(this.root, remaining);
+        scheduleCommit(this.root);
+      }
+      if (tasks.length || remaining.length !== catalog.length) {
+        emitStore({type: "task", id: "categories", src});
+      }
+      return {cleared: tasks.length};
+    });
+  }
+
   async importTaskCategories(categories: TaskCategory[], src?: string): Promise<void> {
     return this.mutate(async () => {
       const catalog = await readTaskCatalog(this.root);

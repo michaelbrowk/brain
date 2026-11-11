@@ -428,6 +428,11 @@ export async function createTaskCategory(name: string, icon?: string): Promise<T
 export async function updateTaskCategory(name: string, icon: string | null): Promise<TaskCategory> {
   return writeTaskCategory("PATCH", {name, icon});
 }
+export async function deleteTaskCategory(name: string): Promise<{cleared: number}> {
+  const response = await apiFetch("/api/task-categories", {method: "DELETE", headers: {"content-type": "application/json"}, body: JSON.stringify({name})});
+  if (!response.ok) await refuse(response);
+  return response.json() as Promise<{cleared: number}>;
+}
 async function writeTaskCategory(method: "POST" | "PATCH", input: {name: string; icon?: string | null}): Promise<TaskCategory> {
   const response = await apiFetch("/api/task-categories", {method, headers: {"content-type": "application/json"}, body: JSON.stringify(input)});
   if (!response.ok) await refuse(response);

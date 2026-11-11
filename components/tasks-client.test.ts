@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { isTimeZone } from "@/lib/owner-settings";
 import type { TaskView } from "@/lib/tasks/model";
 import {
+  deleteTaskCategory,
   deviceZone,
   liveTask,
   localDay,
@@ -15,6 +16,27 @@ import {
   useTasks,
   type TasksState,
 } from "./tasks-client";
+
+describe("deleting a task category", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("sends the exact category name in JSON with the shared client identity", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({cleared: 4})));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await deleteTaskCategory("Design / R&D")).toEqual({cleared: 4});
+    expect(fetchMock).toHaveBeenCalledWith("/api/task-categories", expect.objectContaining({method: "DELETE", body: JSON.stringify({name: "Design / R&D"}), headers: {"content-type": "application/json", "x-brain-client": expect.any(String)}}));
+  });
+
+  it("surfaces a refused deletion instead of returning a success count", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({error: "invalid_category"}), {status: 400})));
+    await expect(deleteTaskCategory("")).rejects.toThrow("invalid_category");
+  });
+
+  it("propagates transport failures", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+    await expect(deleteTaskCategory("Work")).rejects.toThrow("offline");
+  });
+});
 
 describe("deviceZone", () => {
   afterEach(() => {

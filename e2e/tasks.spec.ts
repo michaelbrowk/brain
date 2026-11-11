@@ -29,6 +29,7 @@ import path from "node:path";
 import { expect, test, type Browser, type Locator, type Page } from "playwright/test";
 
 import { shiftDay } from "../lib/tasks/calendar";
+import type { TaskView } from "../lib/tasks/model";
 import { parseTaskLines } from "../lib/tasks/task-lines";
 import { freshNotes } from "./fresh-notes";
 
@@ -735,6 +736,165 @@ test("@release task properties and page picker fit desktop, tablet and phone", a
       await expect(dialog).toHaveCount(0);
     }
   }
+});
+
+test("@release task context menus complete, undo and remove categories without losing tasks", async ({ page }) => {
+  test.setTimeout(150_000);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const today = localToday();
+  const category = "Context actions category";
+  const emptyCategory = "Empty context category";
+  const linkedPage = await createNote(page, "Context actions reference", "Keep this linked context.\n");
+  for (const name of [category, emptyCategory]) {
+    const created = await browserJson(page, "/api/task-categories", { method: "POST", body: { name } });
+    expect(created.ok, JSON.stringify(created.body)).toBeTruthy();
+  }
+  const ids: string[] = [];
+  const titles = ["Context action today", "Context action future", "Context action already done"];
+  for (const [index, title] of titles.entries()) {
+    const created = await browserJson(page, "/api/tasks", {
+      method: "POST",
+      body: {
+        title, category, when: index === 1 ? shiftDay(today, 7) : today,
+        deadline: index === 0 ? today : undefined,
+        body: `Details for ${title}.\nKeep the full description.`,
+        relatedPageIds: [linkedPage.id],
+      },
+    });
+    expect(created.ok, JSON.stringify(created.body)).toBeTruthy();
+    ids.push((created.body as { task: TaskView }).task.id);
+  }
+  const alreadyDone = await browserJson(page, `/api/tasks/${ids[2]}`, { method: "PATCH", body: { done: true } });
+  expect(alreadyDone.ok, JSON.stringify(alreadyDone.body)).toBeTruthy();
+  const outsideId = await createTask(page, "Context untouched task");
+  const read = async (id: string) => {
+    const response = await browserJson(page, `/api/tasks/${id}`);
+    expect(response.ok, JSON.stringify(response.body)).toBeTruthy();
+    return response.body as { task: TaskView; body: string; bodyRev: string };
+  };
+  const menu = page.getByRole("menu");
+  const openMenu = async (target: Locator) => {
+    await target.click({ button: "right" });
+    await expect(menu).toBeVisible();
+  };
+  const confirmation = (title: string) => page.getByRole("alertdialog", { name: `Delete “${title}”?`, exact: true });
+  const rail = page.getByRole("navigation", { name: "Task categories", exact: true });
+  const categoryButton = rail.getByRole("button", { name: category, exact: true });
+
+  await page.goto("/tasks");
+  await expect(categoryButton).toBeVisible({ timeout: 20_000 });
+  await page.getByRole("navigation", { name: "Tasks views", exact: true }).getByRole("button", { name: "Today", exact: true }).click();
+  await openMenu(categoryButton);
+  await expect(page.getByRole("heading", { level: 1, name: "Today", exact: true })).toBeVisible();
+  await menu.getByRole("menuitem", { name: "Complete all tasks", exact: true }).click();
+  const batchToast = page.locator('[aria-live="polite"] .brain-toast').filter({ hasText: "2 tasks completed" });
+  await expect(batchToast.getByRole("button", { name: "Undo", exact: true })).toHaveCount(1);
+  expect(await Promise.all(ids.map(async (id) => (await read(id)).task.done))).toEqual([true, true, true]);
+  expect((await read(outsideId)).task.done).toBe(false);
+  await batchToast.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect.poll(async () => Promise.all(ids.map(async (id) => (await read(id)).task.done))).toEqual([false, false, true]);
+
+  const originals = await Promise.all(ids.map(read));
+  await categoryButton.click();
+  await expect(page.getByRole("heading", { level: 1, name: category, exact: true })).toBeVisible();
+  await openMenu(categoryButton);
+  await menu.getByRole("menuitem", { name: "Delete category…", exact: true }).click();
+  await expect(confirmation(category)).toContainText("Tasks will be kept without a category.");
+  await confirmation(category).getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(confirmation(category)).toHaveCount(0);
+  expect(await Promise.all(ids.map(async (id) => (await read(id)).task.category))).toEqual(ids.map(() => category));
+  await openMenu(categoryButton);
+  await menu.getByRole("menuitem", { name: "Delete category…", exact: true }).click();
+  await confirmation(category).getByRole("button", { name: "Delete category", exact: true }).click();
+  await expect(categoryButton).toHaveCount(0);
+  await expect(page.getByRole("heading", { level: 1, name: "All tasks", exact: true })).toBeVisible();
+  const emptyButton = rail.getByRole("button", { name: emptyCategory, exact: true });
+  await openMenu(emptyButton);
+  await expect(menu.getByRole("menuitem", { name: "Complete all tasks", exact: true })).toBeDisabled();
+  await menu.getByRole("menuitem", { name: "Delete category…", exact: true }).click();
+  await confirmation(emptyCategory).getByRole("button", { name: "Delete category", exact: true }).click();
+  await expect(emptyButton).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByTestId("tasks-surface")).toBeVisible({ timeout: 20_000 });
+  await page.getByRole("navigation", { name: "Tasks views", exact: true }).getByRole("button", { name: "All tasks", exact: true }).click();
+  await expect(categoryButton).toHaveCount(0);
+  await expect(emptyButton).toHaveCount(0);
+  const retained = ({ task, body, bodyRev }: Awaited<ReturnType<typeof read>>) => ({
+    id: task.id, title: task.title, done: task.done, when: task.when, deadline: task.deadline,
+    relatedPageIds: task.relatedPageIds, body, bodyRev,
+  });
+  for (const [index, id] of ids.entries()) {
+    const saved = await read(id);
+    expect(saved.task.category).toBeUndefined();
+    expect(retained(saved)).toEqual(retained(originals[index]));
+  }
+  const catalog = await browserJson(page, "/api/task-categories");
+  expect(catalog.ok).toBeTruthy();
+  const names = (catalog.body as { categories: { name: string }[] }).categories.map((entry) => entry.name);
+  expect(names).not.toContain(category);
+  expect(names).not.toContain(emptyCategory);
+  expect(await markdownOf(page, linkedPage.id)).toBe(linkedPage.markdown);
+
+  const row = page.locator(`[data-task-id="${ids[0]}"][data-row-key="${ids[0]}"]`);
+  await openMenu(row.locator(".tasks-compact-meta"));
+  await expect(menu.getByRole("menuitem", { name: "Open source page", exact: true })).toHaveCount(0);
+  await menu.getByRole("menuitem", { name: "Open task", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: titles[0], exact: true });
+  await expect(dialog.getByRole("textbox", { name: "Task notes", exact: true })).toHaveValue(originals[0].body);
+  await dialog.getByRole("button", { name: "Close task", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(row).toBeFocused();
+  await row.getByRole("button", { name: titles[0], exact: true }).focus();
+  await page.keyboard.press("Shift+F10");
+  await expect(menu).toBeVisible();
+  await menu.getByRole("menuitem", { name: "Complete task", exact: true }).click();
+  await expect.poll(async () => (await read(ids[0])).task.done).toBe(true);
+  const completed = page.getByRole("button", { name: /^Completed/ });
+  if (await completed.getAttribute("aria-expanded") === "false") await completed.click();
+  await openMenu(row.locator(".tasks-compact-meta"));
+  await menu.getByRole("menuitem", { name: "Mark incomplete", exact: true }).click();
+  await expect.poll(async () => (await read(ids[0])).task.done).toBe(false);
+  await openMenu(row.locator(".tasks-compact-meta"));
+  await menu.getByRole("menuitem", { name: "Delete task…", exact: true }).click();
+  await confirmation(titles[0]).getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(confirmation(titles[0])).toHaveCount(0);
+  expect((await read(ids[0])).body).toBe(originals[0].body);
+  await openMenu(row.locator(".tasks-compact-meta"));
+  await menu.getByRole("menuitem", { name: "Delete task…", exact: true }).click();
+  await confirmation(titles[0]).getByRole("button", { name: "Delete task", exact: true }).click();
+  await expect(row).toHaveCount(0);
+  expect((await browserJson(page, `/api/tasks/${ids[0]}`)).status).toBe(404);
+  expect((await read(ids[1])).task.id).toBe(ids[1]);
+
+  // Past occurrences share the live series' ID; their menu cannot mutate it.
+  const recurring = await browserJson(page, "/api/tasks", {
+    method: "POST", body: { title: "Context recurring history", when: today, repeat: { freq: "daily" } },
+  });
+  expect(recurring.ok, JSON.stringify(recurring.body)).toBeTruthy();
+  const recurringId = (recurring.body as { task: TaskView }).task.id;
+  for (let occurrence = 0; occurrence < 2; occurrence++) {
+    const live = await read(recurringId);
+    const completed = await browserJson(page, `/api/tasks/${recurringId}?today=${today}`, {
+      method: "PATCH", body: { done: true, expectedWhen: live.task.when },
+    });
+    expect(completed.ok, JSON.stringify(completed.body)).toBeTruthy();
+  }
+  const history = await read(recurringId);
+  expect(history.task.log).toHaveLength(2);
+  await page.reload();
+  await expect(page.getByTestId("tasks-surface")).toBeVisible({ timeout: 20_000 });
+  await page.getByRole("navigation", { name: "Tasks views", exact: true }).getByRole("button", { name: "All tasks", exact: true }).click();
+  if (await completed.getAttribute("aria-expanded") === "false") await completed.click();
+  for (const entry of history.task.log!) {
+    const occurrence = page.locator(`[data-row-key="${recurringId}:${entry.completedAt}"]`);
+    await openMenu(occurrence.locator(".tasks-compact-meta"));
+    await expect(menu.getByRole("menuitem")).toHaveCount(1);
+    await expect(menu.getByRole("menuitem", { name: "Completed occurrence", exact: true })).toBeDisabled();
+    await page.keyboard.press("Escape");
+    await expect(menu).toHaveCount(0);
+  }
+  expect((await read(recurringId)).task).toEqual(history.task);
 });
 
 test("@release outside press dismisses a child picker before the task draft", async ({ page }) => {

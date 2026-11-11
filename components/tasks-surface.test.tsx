@@ -39,6 +39,14 @@ async function mount(items: TaskView[], props: Partial<TasksSurfaceProps> = {}) 
       if (method === "GET") return response({ categories });
       const body = JSON.parse(String(init?.body)) as { name: string; icon?: string };
       const name = body.name.trim().replace(/\s+/g, " ");
+      if (method === "DELETE") {
+        writes.push({ url, method, body });
+        if (patchFailure) return response({ reason: "Couldn’t delete category" }, 503);
+        categories = categories.filter((entry) => entry.name.toLowerCase() !== name.toLowerCase());
+        let cleared = 0;
+        records = records.map((entry) => { if (entry.category?.trim().toLowerCase() !== name.toLowerCase()) return entry; const saved = { ...entry }; delete saved.category; cleared++; return saved; });
+        return response({ cleared });
+      }
       const saved = categories.find((entry) => entry.name.toLowerCase() === name.toLowerCase()) || { name, icon: body.icon };
       if (!categories.includes(saved)) categories.push(saved);
       writes.push({ url, method, body }); return response({ category: saved });
@@ -75,6 +83,10 @@ const title = () => el<HTMLTextAreaElement>('[aria-label="Task title"]');
 const notes = () => el<HTMLTextAreaElement>('[aria-label="Task notes"]');
 const patches = () => writes.filter((write) => write.method === "PATCH");
 const rowTitles = () => [...host.querySelectorAll(".tasks-compact-title")].map((node) => node.textContent);
+async function contextMenu(target: HTMLElement) { await act(async () => target.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 80, clientY: 120 }))); await settle(); }
+const menuItems = () => [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+async function chooseMenu(label: string) { await click(menuItems().find((item) => item.textContent === label)!); await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); }); await settle(); }
+const railCategory = (name: string) => [...host.querySelectorAll<HTMLButtonElement>('[aria-label="Task categories"] button')].find((entry) => entry.querySelector(".tree-row-title")?.textContent === name)!;
 
 beforeEach(() => {
   (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -137,4 +149,137 @@ describe("completion, history and keyboard", () => {
   it("palette task commands still use the common schedule action", async () => { await mount([task("a", { when: TODAY })]); await act(async () => el<HTMLButtonElement>(".tasks-compact-open").focus()); await act(async () => emitTaskCommand("move-someday")); await settle(); expect(patches()[0].body).toEqual({ when: "someday" }); });
   it("responds to external store updates without resetting an open draft", async () => { await mount([task("a", { when: TODAY })]); await open(); await fill(notes(), "Unsaved"); await act(async () => mutateTasks((items) => items.map((entry) => ({ ...entry, title: "External title" })))); expect(notes().value).toBe("Unsaved"); });
   it("keeps the existing empty-state vocabulary helper available to integrations", () => { expect(emptyFor({ kind: "list", list: "inbox" }, { doneToday: 0, upcomingThisWeek: 0 })).toMatchObject({ title: "Inbox is clear" }); });
+});
+
+describe("Tasks context menus", () => {
+  it("right-clicks a category without navigating and returns focus on Escape", async () => {
+    await mount([task("a", { category: "Work", when: TODAY })]);
+    const category = railCategory("Work");
+    await contextMenu(category);
+    expect(el("h1").textContent).toBe("Today");
+    expect(menuItems().map((item) => item.textContent)).toEqual(["Complete all tasks", "Delete category…"]);
+    expect(el('[role="menu"]').classList.contains("w-[220px]")).toBe(true);
+    await key("Escape", menuItems()[0]);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+    expect(document.activeElement).toBe(category);
+    expect(writes).toEqual([]);
+  });
+  it("completes every open task in the category from a Today heading and offers one Undo", async () => {
+    await mount([task("today", { category: "Work", when: TODAY }), task("future", { category: " work ", when: "2026-10-01", page: "page-1" }), task("done", { category: "Work", done: true }), task("other", { category: "Personal", when: TODAY })]);
+    await contextMenu(el(".tasks-group-heading"));
+    await chooseMenu("Complete all tasks");
+    expect(patches().map((write) => write.url)).toEqual(["/api/tasks/today", "/api/tasks/future"]);
+    expect(records.find((entry) => entry.id === "other")?.done).toBe(false);
+    const undo = toasts.filter((toast) => toast.options?.actionLabel === "Undo");
+    expect(undo).toHaveLength(1);
+    expect(new Set(toasts.map((toast) => toast.options?.id)).size).toBe(1);
+    await act(async () => { await undo[0].options?.onAction?.(); }); await settle();
+    expect(records.filter((entry) => ["today", "future"].includes(entry.id)).every((entry) => !entry.done)).toBe(true);
+  });
+  it("keeps No category completion available without a delete action and disables empty categories", async () => {
+    await mount([task("a", { when: TODAY })]);
+    await contextMenu(railCategory("No category"));
+    expect(menuItems().map((item) => item.textContent)).toEqual(["Complete all tasks"]);
+    await chooseMenu("Complete all tasks");
+    expect(patches()[0].url).toBe("/api/tasks/a");
+    await contextMenu(railCategory("Work"));
+    expect(menuItems()[0].getAttribute("data-disabled")).not.toBeNull();
+    expect(menuItems()[1].getAttribute("data-disabled")).toBeNull();
+  });
+  it("opens the current category header with Shift+F10 without opening the navigation dropdown", async () => {
+    await mount([task("a", { category: "Work" })], { list: { category: "Work" } });
+    const trigger = el<HTMLButtonElement>('[aria-label="Tasks view: Work"]');
+    await act(async () => trigger.focus());
+    await key("F10", trigger, { shiftKey: true });
+    expect(menuItems().map((item) => item.textContent)).toEqual(["Complete all tasks", "Delete category…"]);
+    expect(document.querySelector('[role="menuitemradio"]')).toBeNull();
+  });
+  it("opens one context menu from a long press on the current category navigation", async () => {
+    await mount([task("a", { category: "Work" })], { list: { category: "Work" } });
+    const trigger = el<HTMLButtonElement>('[aria-label="Tasks view: Work"]');
+    await act(async () => {
+      const event = new MouseEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 });
+      Object.defineProperty(event, "pointerType", { value: "touch" });
+      trigger.dispatchEvent(event);
+    });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 720)); });
+    expect(menuItems().map((item) => item.textContent)).toEqual(["Complete all tasks", "Delete category…"]);
+    expect(document.querySelectorAll('[role="menu"]')).toHaveLength(1);
+  });
+  it("cancels category deletion, then deletes only its category and returns the active view to All tasks", async () => {
+    await mount([task("a", { category: "Work", when: "2026-10-01", deadline: "2026-10-02", relatedPageIds: ["page-1"], page: "page-2" })], { list: { category: "Work" } });
+    await contextMenu(el(".tasks-workspace-header")); await chooseMenu("Delete category…");
+    expect(el('[role="alertdialog"]').textContent).toContain("Delete “Work”?");
+    expect(el('[role="alertdialog"]').textContent).toContain("Tasks will be kept without a category.");
+    await click(button("Cancel")); expect(writes).toEqual([]);
+    await contextMenu(railCategory("Work")); await chooseMenu("Delete category…"); await click(button("Delete category"));
+    expect(el("h1").textContent).toBe("All tasks");
+    expect(railCategory("Work")).toBeUndefined();
+    expect(records[0]).toMatchObject({ id: "a", when: "2026-10-01", deadline: "2026-10-02", relatedPageIds: ["page-1"], page: "page-2", done: false });
+    expect(records[0].category).toBeUndefined();
+    expect(bodies.get("a")).toBe("Original notes");
+  });
+  it("keeps the category and tasks on a failed category deletion", async () => {
+    await mount([task("a", { category: "Work" })], { list: { category: "Work" } });
+    patchFailure = true;
+    await contextMenu(railCategory("Work")); await chooseMenu("Delete category…"); await click(button("Delete category"));
+    expect(el("h1").textContent).toBe("Work"); expect(records[0].category).toBe("Work");
+    expect(toasts.at(-1)?.options?.urgent).toBe(true);
+  });
+  it("covers checkbox and metadata without completing or selecting the task, then opens its editor", async () => {
+    await mount([task("a", { when: TODAY, deadline: "2026-10-01" })]);
+    await contextMenu(el('[role="checkbox"]'));
+    expect(writes).toEqual([]); expect(host.querySelector(".tasks-compact-item[data-selected]")).toBeNull();
+    await key("Escape", menuItems()[0]); await settle();
+    await contextMenu(el(".tasks-compact-meta"));
+    expect(menuItems().map((item) => item.textContent)).toEqual(["Open task", "Complete task", "Delete task…"]);
+    expect(el('[role="menu"]').classList.contains("w-[184px]")).toBe(true);
+    await chooseMenu("Open task"); expect(title().value).toBe("a");
+    await click(button("Cancel"));
+    expect(document.body.style.pointerEvents).not.toBe("none");
+  });
+  it("blocks Tasks shortcuts under an open menu and supports the ContextMenu key", async () => {
+    await mount([task("a", { when: TODAY })]);
+    const trigger = el<HTMLButtonElement>(".tasks-compact-open"); await act(async () => trigger.focus());
+    await key("ContextMenu", trigger);
+    await key("s", menuItems()[0]); await key("t", menuItems()[0]); await key("n", menuItems()[0]);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+    expect(writes).toEqual([]); expect(el(".tasks-detail")).toBeNull();
+  });
+  it("restores focus to the returned row after completion fails", async () => {
+    await mount([task("a", { when: TODAY })]); patchFailure = true;
+    await contextMenu(el(".tasks-compact-item")); await chooseMenu("Complete task");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+    expect(records[0].done).toBe(false);
+    expect(document.activeElement?.getAttribute("data-row-key")).toBe("a");
+    expect(toasts.at(-1)?.options?.urgent).toBe(true);
+  });
+  it("never offers edits or deletion for any recurring completion projection", async () => {
+    await mount([task("a", { when: "2026-09-14", repeat: { freq: "daily" }, log: [{ scheduled: "2026-09-12", completedAt: "2026-09-12T12:00:00.000Z" }, { scheduled: TODAY, completedAt: NOON.toISOString() }] })], { list: "all" });
+    await click(el(".tasks-completed-toggle"));
+    for (const row of [...host.querySelectorAll<HTMLElement>(".tasks-workspace-completed .tasks-compact-item")]) {
+      await contextMenu(row);
+      expect(menuItems().map((item) => item.textContent)).toEqual(["Completed occurrence"]);
+      expect(menuItems()[0].getAttribute("data-disabled")).not.toBeNull();
+      await key("Escape", el('[role="menu"]')); await settle();
+    }
+    expect(writes).toEqual([]);
+  });
+  it("opens a source page and explains that deleting a linked task keeps its checkbox", async () => {
+    const onOpenPage = vi.fn();
+    await mount([task("a", { when: TODAY, page: "page-1" })], { onOpenPage });
+    await contextMenu(el(".tasks-compact-meta")); await chooseMenu("Open source page");
+    expect(onOpenPage).toHaveBeenCalledWith("page-1");
+    await contextMenu(el(".tasks-compact-item")); await chooseMenu("Delete task…");
+    expect(el('[role="alertdialog"]').textContent).toContain("Its source checkbox will be kept.");
+    await click(button("Cancel")); expect(writes).toEqual([]);
+    await contextMenu(el(".tasks-compact-item")); await chooseMenu("Delete task…"); await click(button("Delete task"));
+    expect(writes).toEqual([{ url: "/api/tasks/a", method: "DELETE", body: {} }]);
+    expect(rowTitles()).toEqual([]);
+  });
+  it("marks an ordinary completed task incomplete through its menu", async () => {
+    await mount([task("a", { done: true, doneAt: NOON.toISOString() })], { list: "all" }); await click(el(".tasks-completed-toggle"));
+    await contextMenu(el(".tasks-compact-item")); await chooseMenu("Mark incomplete");
+    expect(patches()[0].body).toEqual({ done: false }); expect(records[0].done).toBe(false);
+  });
 });

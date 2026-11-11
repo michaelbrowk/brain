@@ -30,7 +30,7 @@ concurrency:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: ${{ github.event_name == 'push' && 45 || 25 }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -42,12 +42,12 @@ jobs:
           node-version: 22.23.1
           cache: pnpm
       - name: Install runtime search dependency
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes ripgrep
+        run: bash scripts/bootstrap-runtime-search.sh
       - name: Install release verification dependencies
         if: github.event_name == 'push'
-        run: sudo apt-get install --yes acl shellcheck nginx
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes acl shellcheck nginx
       - run: pnpm install --frozen-lockfile
       - name: Audit production dependencies
         # Next 16.2 was installed here carrying two critical advisories and

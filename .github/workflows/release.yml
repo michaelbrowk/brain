@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -39,11 +39,11 @@ jobs:
             echo "prerelease=$(node scripts/release-version.mjs prerelease "$version")"
           } >> "$GITHUB_OUTPUT"
       - name: Install runtime search dependency
+        run: bash scripts/bootstrap-runtime-search.sh
+      - name: Install release verification dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes ripgrep
-      - name: Install release verification dependencies
-        run: sudo apt-get install --yes acl shellcheck nginx
+          sudo apt-get install --yes acl shellcheck nginx
       - run: pnpm install --frozen-lockfile
       - name: Verify operational contracts
         run: bash scripts/verify-ops.sh

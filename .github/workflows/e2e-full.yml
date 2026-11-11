@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   full-e2e:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The exhaustive suite stays available for deliberate manual QA and one
     # weekly regression pass. Main releases use the compact @release gate in
     # the separate artifact-producing CI workflow.
@@ -33,9 +33,7 @@ jobs:
           node-version: 22.23.1
           cache: pnpm
       - name: Install runtime search dependency
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes ripgrep
+        run: bash scripts/bootstrap-runtime-search.sh
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
       # Each runner owns its notes/state root. Keep Playwright's single worker:

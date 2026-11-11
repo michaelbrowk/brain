@@ -20,7 +20,7 @@
 // the reader's own day arrives as `today` from `components/tasks-client`,
 // which is also where the records are and where the optimistic step lands.
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 
 import type { TaskRepeat, TaskView } from "@/lib/tasks/model";
 
@@ -68,6 +68,8 @@ export interface TaskActions {
    *  task is a write to somebody's note. Without it the route's own `reason`
    *  stands. */
   completeTask: (task: TaskView, refusal?: string) => Promise<void>;
+  /** Complete one captured set, including one occurrence of each repeat. */
+  completeTasks: (tasks: readonly TaskView[]) => Promise<void>;
   /** `refusal` is the one sentence this untick is reported in when the route
    *  says no. Without it the route's own `reason` stands. */
   reopenTask: (task: TaskView, refusal?: string) => Promise<void>;
@@ -96,6 +98,7 @@ export function useTaskActions({
 }): TaskActions {
   const [held, setHeld] = useState<ReadonlyMap<string, TaskView>>(new Map());
   const [inserted, setInserted] = useState<ReadonlySet<string>>(new Set());
+  const batchPending = useRef(false);
 
   const releaseFold = useCallback((id: string) => {
     setHeld((current) => {
@@ -276,6 +279,62 @@ export function useTaskActions({
     [markInserted, onToast, refuse, reopenTask, today],
   );
 
+  const completeTasks = useCallback(async (tasks: readonly TaskView[]) => {
+    if (batchPending.current) return;
+    const snapshot = [...new Map(tasks.filter((task) => !task.done).map((task) => [task.id, task])).values()];
+    if (!snapshot.length) return;
+    batchPending.current = true;
+    const saved: TaskView[] = [];
+    let failed = 0;
+    const toastId = "task-category-complete";
+    onToast?.("Completing tasks…", { id: toastId, durationMs: null });
+    try {
+      // The set is captured once. Re-reading until a category is empty would
+      // repeatedly advance its recurring tasks into the future.
+      for (const task of snapshot) {
+        if (liveTask(task.id)?.done) continue;
+        try {
+          const result = await patchTask(task.id, {
+            done: true,
+            ...(task.repeat ? { expectedWhen: task.when ?? null } : {}),
+          }, task.repeat ? today : undefined);
+          saved.push(result);
+          mutateTasks((entries) => entries.map((entry) => entry.id === result.id ? result : entry));
+          if (task.repeat) markInserted(result.id);
+        } catch { failed += 1; }
+      }
+    } finally {
+      batchPending.current = false;
+      if (failed) reloadTasks();
+    }
+    let undone = false;
+    const undo = async () => {
+      if (undone) return;
+      undone = true;
+      let restored = 0;
+      let refused = 0;
+      for (const completed of saved) {
+        try {
+          // A later occurrence must not be undone by this earlier batch.
+          const result = await patchTask(completed.id, {
+            done: false,
+            ...(completed.repeat ? { expectedWhen: completed.when ?? null } : {}),
+          });
+          mutateTasks((entries) => entries.map((entry) => entry.id === result.id ? result : entry));
+          markInserted(result.id);
+          restored += 1;
+        } catch { refused += 1; }
+      }
+      if (refused) reloadTasks();
+      onToast?.(`${restored} ${restored === 1 ? "task" : "tasks"} restored${refused ? ` · ${refused} couldn’t be restored` : ""}`, { id: toastId, urgent: refused > 0 });
+    };
+    onToast?.(`${saved.length} ${saved.length === 1 ? "task" : "tasks"} completed${failed ? ` · ${failed} couldn’t be completed` : ""}`, {
+      id: toastId,
+      urgent: failed > 0,
+      ...(saved.length ? { actionLabel: "Undo", durationMs: SMART_UNDO_MS, onAction: () => { void undo(); } } : {}),
+    });
+  }, [markInserted, onToast, today]);
+
   /** ONE ANSWER, TWO CONSEQUENCES.
    *
    *  Whether this write draws the record somewhere else decides the hold and
@@ -384,6 +443,7 @@ export function useTaskActions({
     markInserted,
     releaseFold,
     completeTask,
+    completeTasks,
     reopenTask,
     rescheduleTask,
     patchField,

@@ -1,6 +1,7 @@
 "use client";
 
 import * as Dropdown from "@radix-ui/react-dropdown-menu";
+import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { DUR } from "@/lib/motion";
 import type { ListName } from "@/lib/tasks/lists";
@@ -12,6 +13,7 @@ import { Icon } from "./ui/icon";
 import { useMenuKeyRing } from "./ui/menu-key-ring";
 import { ScrollEdge } from "./ui/scroll-edge";
 import { ToolbarPill } from "./ui/toolbar-pill";
+import { TasksContextMenu, type TasksContextAction } from "./tasks-context-menu";
 
 /**
  * ONE CONTROL OWNS THE COLUMN'S ADDRESS, the way `MailNav` owns Mail's.
@@ -281,15 +283,17 @@ interface TaskNavigationProps {
   view: TasksView;
   categories: readonly TaskNavigationCategory[];
   onSelect: (next: TasksListState | null) => void;
+  categoryActions?: (name: string) => readonly TasksContextAction[];
 }
 function navigationGlyph(icon?: string) { return <span className="tree-row-glyph" aria-hidden>{icon || <Icon name="document-text" size={16} />}</span>; }
 
-export function TasksNavigation({ view, categories, onSelect }: TaskNavigationProps) {
+export function TasksNavigation({ view, categories, onSelect, categoryActions }: TaskNavigationProps) {
+  const [open, setOpen] = useState(false);
   const keyRing = useMenuKeyRing();
   const value = view.kind === "category" ? `category:${view.category}` : view.list;
   const category = view.kind === "category" ? categories.find((entry) => entry.name === view.category) : undefined;
   const label = viewLabel(view);
-  return <Dropdown.Root><ToolbarPill className="min-w-0 max-w-full"><Dropdown.Trigger asChild><Button type="button" variant="quiet" className="brain-touch-hit brain-mail-nav" aria-label={`Tasks view: ${label}`} title={label}>{view.kind === "category" && navigationGlyph(category?.icon)}<span className="min-w-0 truncate">{label}</span><Icon name="alt-arrow-down" size={16} className="shrink-0 text-ink-3" /></Button></Dropdown.Trigger></ToolbarPill>
+  return <Dropdown.Root open={open} onOpenChange={setOpen}><ToolbarPill className="min-w-0 max-w-full"><TasksContextMenu category onOpenChange={(next) => { if (next) setOpen(false); }} actions={view.kind === "category" ? categoryActions?.(view.category) || [] : []}><Dropdown.Trigger asChild><Button type="button" variant="quiet" className="brain-touch-hit brain-mail-nav" aria-label={`Tasks view: ${label}`} title={label}>{view.kind === "category" && navigationGlyph(category?.icon)}<span className="min-w-0 truncate">{label}</span><Icon name="alt-arrow-down" size={16} className="shrink-0 text-ink-3" /></Button></Dropdown.Trigger></TasksContextMenu></ToolbarPill>
     <Dropdown.Portal><Dropdown.Content side="bottom" align="start" sideOffset={6} collisionPadding={8} className="brain-menu z-[var(--z-modal)] w-[264px]" {...keyRing}><ScrollEdge variant="fade" className="max-h-[calc(var(--radix-dropdown-menu-content-available-height,100vh)-12px)] scroll-pt-3 scroll-pb-5 overscroll-contain" scrollerProps={{ role: "none" }}><Dropdown.RadioGroup value={value} onValueChange={(next) => onSelect(next.startsWith("category:") ? { category: next.slice(9) } : next as TasksListState)}>
       <Dropdown.Label className="brain-menu-label">Lists</Dropdown.Label>{TASKS_DESTINATIONS.map((entry) => <Dropdown.RadioItem key={entry.list} value={entry.list} className="brain-menu-item focus-inset"><Icon name={entry.icon} size={16} variant={value === entry.list ? "bold" : "linear"} className="brain-menu-icon" /><span className="min-w-0 flex-1 truncate">{entry.label}</span>{value === entry.list && <Icon name="check" size={14} />}</Dropdown.RadioItem>)}
       {categories.length > 0 && <><Dropdown.Separator className="brain-menu-sep" /><Dropdown.Label className="brain-menu-label">Categories</Dropdown.Label>{categories.map((entry) => <Dropdown.RadioItem key={entry.name} value={`category:${entry.name}`} className="brain-menu-item focus-inset">{navigationGlyph(entry.icon)}<span className="min-w-0 flex-1 truncate">{entry.name || "No category"}</span>{value === `category:${entry.name}` && <Icon name="check" size={14} />}</Dropdown.RadioItem>)}</>}
@@ -297,10 +301,10 @@ export function TasksNavigation({ view, categories, onSelect }: TaskNavigationPr
   </Dropdown.Root>;
 }
 
-export function TasksRail({ view, categories, onSelect, onNew }: TaskNavigationProps & { onNew: () => void }) {
+export function TasksRail({ view, categories, onSelect, onNew, categoryActions }: TaskNavigationProps & { onNew: () => void }) {
   const value = view.kind === "category" ? `category:${view.category}` : view.list;
   return <aside className="tasks-rail" aria-label="Tasks navigation"><div className="tasks-rail-spacer" aria-hidden /><nav className="tasks-rail-views" aria-label="Tasks views">{TASKS_DESTINATIONS.map((entry) => <button type="button" key={entry.list} className="tree-row focus-inset" data-selected={value === entry.list ? "" : undefined} aria-current={value === entry.list ? "page" : undefined} onClick={() => onSelect(entry.list)}>{value === entry.list && <span className="tree-row-capsule" aria-hidden />}<span className="tree-row-glyph" aria-hidden><Icon name={entry.icon} size={16} variant={value === entry.list ? "bold" : "linear"} /></span><span className="tree-row-title">{entry.label}</span></button>)}</nav>
-    {categories.length > 0 && <><div className="tasks-rail-label text-label">Categories</div><nav aria-label="Task categories">{categories.map((entry) => <button type="button" key={entry.name} className="tree-row focus-inset" data-selected={value === `category:${entry.name}` ? "" : undefined} aria-current={value === `category:${entry.name}` ? "page" : undefined} onClick={() => onSelect({ category: entry.name })}>{value === `category:${entry.name}` && <span className="tree-row-capsule" aria-hidden />}{navigationGlyph(entry.icon)}<span className="tree-row-title">{entry.name || "No category"}</span></button>)}</nav></>}
+    {categories.length > 0 && <><div className="tasks-rail-label text-label">Categories</div><nav aria-label="Task categories">{categories.map((entry) => <TasksContextMenu key={entry.name} category actions={categoryActions?.(entry.name) || []}><button type="button" className="tree-row focus-inset" data-selected={value === `category:${entry.name}` ? "" : undefined} aria-current={value === `category:${entry.name}` ? "page" : undefined} onClick={() => onSelect({ category: entry.name })}>{value === `category:${entry.name}` && <span className="tree-row-capsule" aria-hidden />}{navigationGlyph(entry.icon)}<span className="tree-row-title">{entry.name || "No category"}</span></button></TasksContextMenu>)}</nav></>}
     <Button type="button" variant="quiet" className="tasks-rail-add" onClick={onNew}><Icon name="add" size={16} />Add task</Button>
   </aside>;
 }

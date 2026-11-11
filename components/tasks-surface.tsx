@@ -8,10 +8,11 @@ import { taskCategoryKey } from "@/lib/tasks/details";
 import type { TasksListState } from "./shell/helpers";
 import { surfaceTakesKeys } from "./shell/surface-keys";
 import { useTaskActions } from "./tasks-actions";
-import { createTask, createTaskCategory, deleteTask, listTaskCategories, mutateTasks, patchTask, reloadTasks, updateTaskCategory, useTasks, type TaskCategory, type TaskPatch } from "./tasks-client";
+import { createTask, createTaskCategory, deleteTask, deleteTaskCategory, listTaskCategories, mutateTasks, patchTask, reloadTasks, updateTaskCategory, useTasks, type TaskCategory, type TaskPatch } from "./tasks-client";
 import { onTaskCommand } from "./tasks-commands";
 import { TasksNavigation, TasksRail, viewLabel } from "./tasks-list-menu";
 import { TasksCompactRow } from "./tasks-compact-row";
+import { TasksContextMenu, type TasksContextAction } from "./tasks-context-menu";
 import { TasksTaskDialog, type TaskDialogDraft } from "./tasks-task-dialog";
 import type { TaskPageOption } from "./tasks-linked-pages";
 import { type TaskCounts, type TasksView, type TaskRow } from "./tasks-lists";
@@ -21,6 +22,7 @@ import { EmojiPicker } from "./emoji-picker";
 import { Button, IconButton } from "./ui/button";
 import { Icon } from "./ui/icon";
 import { Empty } from "./ui/empty";
+import { ConfirmDialog } from "./ui/confirm-dialog";
 import type { ToastOptions } from "./ui/primitives";
 import { LAYER_IN_DOCUMENT } from "./use-layer-signal";
 
@@ -39,6 +41,7 @@ export interface TasksSurfaceProps {
   onDialogOpenChange?: (open: boolean) => void;
 }
 interface EditorState { key: number; task?: TaskView; category?: string; when: WhenValue }
+type DeleteConfirmation = { kind: "category"; name: string } | { kind: "task"; task: TaskView };
 const noPages: readonly TaskPageOption[] = [];
 
 export function TasksSurface({ list = null, onSelectList, onToast, refreshToken = 0, captureRequest = 0, onCaptureHandled, pageTitleOf, pages = noPages, onOpenPage, onDialogOpenChange }: TasksSurfaceProps) {
@@ -52,10 +55,15 @@ export function TasksSurface({ list = null, onSelectList, onToast, refreshToken 
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({ completed: true });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
+  const [confirmation, setConfirmation] = useState<DeleteConfirmation | null>(null);
+  const [categoryPending, setCategoryPending] = useState(false);
   const surface = useRef<HTMLElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   const returnFocus = useRef<HTMLElement | null>(null);
+  const confirmationFocus = useRef<HTMLElement | null>(null);
+  const categoryPendingRef = useRef(false);
+  const deletePendingRef = useRef(false);
   const serial = useRef(0);
   const handledCapture = useRef(0);
   const pendingNamedTask = useRef<string | null>(null);
@@ -86,7 +94,7 @@ export function TasksSurface({ list = null, onSelectList, onToast, refreshToken 
   const drawn: TaskRow[] = useMemo(() => [...active.map((task) => ({ key: task.id, task, untickable: true })), ...(!collapsed.completed ? completed : [])], [active, completed, collapsed.completed]);
 
   useEffect(() => { let mounted = true; void listTaskCategories().then((entries) => { if (mounted) setCatalog(entries); }).catch(() => { /* Task-derived categories stay available if the catalog cannot load. */ }); return () => { mounted = false; }; }, [refreshToken]);
-  useEffect(() => { onDialogOpenChange?.(editor !== null); return () => onDialogOpenChange?.(false); }, [editor, onDialogOpenChange]);
+  useEffect(() => { onDialogOpenChange?.(editor !== null || confirmation !== null); return () => onDialogOpenChange?.(false); }, [editor, confirmation, onDialogOpenChange]);
   useEffect(() => { scroller.current?.scrollTo?.({ top: 0 }); }, [list]);
   const openTask = useCallback((task?: TaskView, invoker?: HTMLElement) => {
     returnFocus.current = invoker || (document.activeElement instanceof HTMLElement ? document.activeElement : null);
@@ -109,7 +117,7 @@ export function TasksSurface({ list = null, onSelectList, onToast, refreshToken 
   useEffect(() => {
     const capture = (event: KeyboardEvent) => { if (document.querySelector(LAYER_IN_DOCUMENT)) layerKeys.current.add(event); };
     const key = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || layerKeys.current.has(event) || editor || !surfaceTakesKeys(surface.current)) return;
+      if (event.defaultPrevented || layerKeys.current.has(event) || editor || confirmation || !surfaceTakesKeys(surface.current)) return;
       if (event.target instanceof Element && event.target.closest("input,textarea,[contenteditable]")) return;
       const meta = event.metaKey || event.ctrlKey;
       const rows = drawn.filter((entry) => entry.untickable);
@@ -122,8 +130,55 @@ export function TasksSurface({ list = null, onSelectList, onToast, refreshToken 
     };
     window.addEventListener("keydown", capture, true); window.addEventListener("keydown", key);
     return () => { window.removeEventListener("keydown", capture, true); window.removeEventListener("keydown", key); };
-  }, [editor, drawn, selectedId, today, actions, moveTask, openTask]);
-  function restoreFocus() { if (returnFocus.current?.isConnected) returnFocus.current.focus(); else { const mobile = surface.current?.querySelector<HTMLButtonElement>(".tasks-narrow-navigation button"); if (mobile && getComputedStyle(mobile.parentElement!).display !== "none") mobile.focus(); else heading.current?.focus(); } }
+  }, [editor, confirmation, drawn, selectedId, today, actions, moveTask, openTask]);
+  function fallbackFocus() { const mobile = surface.current?.querySelector<HTMLButtonElement>(".tasks-narrow-navigation button"); return mobile && getComputedStyle(mobile.closest(".tasks-narrow-navigation")!).display !== "none" ? mobile : heading.current; }
+  function restoreFocus() { (returnFocus.current?.isConnected ? returnFocus.current : fallbackFocus())?.focus(); }
+  function restoreAfterRemoval(invoker: HTMLElement | null) { requestAnimationFrame(() => { if (!invoker?.isConnected && document.activeElement === document.body) fallbackFocus()?.focus({ preventScroll: true }); }); }
+  function restoreTaskContextFocus(key: string) { requestAnimationFrame(() => { if (document.activeElement !== document.body) return; const row = [...surface.current?.querySelectorAll<HTMLElement>("[data-row-key]") || []].find((entry) => entry.dataset.rowKey === key); (row || fallbackFocus())?.focus({ preventScroll: true }); }); }
+  async function completeCategory(name: string, invoker: HTMLElement | null) {
+    if (categoryPendingRef.current) return;
+    const snapshot = state.tasks.filter((task) => !task.done && taskCategoryKey(task.category || "") === taskCategoryKey(name));
+    if (!snapshot.length) return;
+    categoryPendingRef.current = true; setCategoryPending(true);
+    try { await actions.completeTasks(snapshot); }
+    catch { /* The shared batch action reports a single result, including partial failure. */ }
+    finally { categoryPendingRef.current = false; setCategoryPending(false); restoreAfterRemoval(invoker); }
+  }
+  function requestDeleteTask(task: TaskView, invoker: HTMLElement | null) { confirmationFocus.current = invoker; setConfirmation({ kind: "task", task }); }
+  function categoryActions(name: string): TasksContextAction[] {
+    const hasOpen = state.tasks.some((task) => !task.done && taskCategoryKey(task.category || "") === taskCategoryKey(name));
+    return [
+      { key: "complete", icon: "check-read-linear", label: "Complete all tasks", disabled: categoryPending || !hasOpen, onSelect: (invoker) => void completeCategory(name, invoker) },
+      ...(name ? [{ key: "delete", icon: "trash-bin-trash-linear", label: "Delete category…", divider: true, disabled: categoryPending, onSelect: (invoker: HTMLElement | null) => { confirmationFocus.current = invoker; setConfirmation({ kind: "category", name }); } }] : []),
+    ];
+  }
+  async function confirmDelete() {
+    const target = confirmation;
+    if (!target || deletePendingRef.current || target.kind === "category" && categoryPendingRef.current) return;
+    const invoker = confirmationFocus.current;
+    deletePendingRef.current = true;
+    if (target.kind === "category") { categoryPendingRef.current = true; setCategoryPending(true); }
+    try {
+      if (target.kind === "category") {
+        await deleteTaskCategory(target.name);
+        const key = taskCategoryKey(target.name);
+        setCatalog((entries) => entries.filter((entry) => taskCategoryKey(entry.name) !== key));
+        mutateTasks((entries) => entries.map((entry) => { if (taskCategoryKey(entry.category || "") !== key) return entry; const cleared = { ...entry }; delete cleared.category; return cleared; }));
+        if (view.kind === "category" && taskCategoryKey(view.category) === key) onSelectList?.("all");
+        reloadTasks();
+        onToast?.("Category deleted");
+      } else {
+        await deleteTask(target.task.id);
+        mutateTasks((entries) => entries.filter((entry) => entry.id !== target.task.id));
+        onToast?.("Task deleted");
+      }
+      restoreAfterRemoval(invoker);
+    } catch (error) {
+      if (target.kind === "category") { reloadTasks(); void listTaskCategories().then(setCatalog).catch(() => {}); }
+      onToast?.(error instanceof Error ? error.message : target.kind === "category" ? "Couldn’t delete this category. Try again." : "Couldn’t delete this task. Try again.", { urgent: true });
+    }
+    finally { deletePendingRef.current = false; if (target.kind === "category") { categoryPendingRef.current = false; setCategoryPending(false); } }
+  }
   async function createCategory(name: string) { const saved = await createTaskCategory(name); setCatalog((entries) => [...entries.filter((entry) => taskCategoryKey(entry.name) !== taskCategoryKey(saved.name)), saved]); return saved; }
   async function setIcon(name: string, icon: string | null) { try { const saved = await updateTaskCategory(name, icon); setCatalog((entries) => [...entries.filter((entry) => taskCategoryKey(entry.name) !== taskCategoryKey(saved.name)), saved]); } catch (error) { onToast?.(error instanceof Error ? error.message : "Couldn’t update this icon", { urgent: true }); } }
   function emoji(name: string, large = false) { const icon = categoryFor(name)?.icon; return <EmojiPicker hasIcon={!!icon} onPick={(next) => void setIcon(name, next)} onRemove={() => void setIcon(name, null)}><IconButton type="button" size={large ? 36 : 28} className={large ? "tasks-category-emoji tasks-category-emoji-large" : "tasks-category-emoji"} aria-label={`${icon ? "Change" : "Add"} category icon: ${name}`}><span aria-hidden>{icon || <Icon name="document-text" size={large ? 24 : 16} />}</span></IconButton></EmojiPicker>; }
@@ -149,20 +204,21 @@ export function TasksSurface({ list = null, onSelectList, onToast, refreshToken 
     onToast?.(task ? "Changes saved" : "Task created");
   }
   async function remove() { if (!editor?.task) return; const id = editor.task.id; await deleteTask(id); mutateTasks((entries) => entries.filter((entry) => entry.id !== id)); onToast?.("Task deleted"); }
-  function row(entry: TaskRow, finished = false) { return <TasksCompactRow key={entry.key} task={entry.task} rowKey={entry.key} historic={!entry.untickable} selected={selectedId === entry.key} today={today} offsetMinutes={offsetMinutes} reduce={reduce} pageTitle={entry.task.page ? pageTitleOf?.(entry.task.page) || pages.find((page) => page.id === entry.task.page)?.title : undefined} categoryIcon={categoryFor(entry.task.category)?.icon} showCategory={finished && view.kind !== "category"} showPlan={view.kind === "category" || view.list !== "today"} onOpen={openTask} onSelect={setSelectedId} onComplete={actions.completeTask} onReopen={actions.reopenTask} />; }
+  function row(entry: TaskRow, finished = false) { return <TasksCompactRow key={entry.key} task={entry.task} rowKey={entry.key} historic={!entry.untickable} selected={selectedId === entry.key} today={today} offsetMinutes={offsetMinutes} reduce={reduce} pageTitle={entry.task.page ? pageTitleOf?.(entry.task.page) || pages.find((page) => page.id === entry.task.page)?.title : undefined} categoryIcon={categoryFor(entry.task.category)?.icon} showCategory={finished && view.kind !== "category"} showPlan={view.kind === "category" || view.list !== "today"} onOpen={openTask} onSelect={setSelectedId} onComplete={actions.completeTask} onReopen={actions.reopenTask} onOpenPage={onOpenPage} onDelete={requestDeleteTask} onContextActionSettled={restoreTaskContextFocus} />; }
   const label = view.kind === "category" ? categoryFor(view.category)?.name || view.category || "No category" : viewLabel(view);
   return <section ref={surface} aria-label="Tasks" data-testid="tasks-surface" className="brain-tasks tasks-workspace">
-    <TasksRail view={view} categories={navigationCategories} onSelect={(next) => onSelectList?.(next)} onNew={() => openTask()} />
-    <div className="tasks-narrow-navigation"><TasksNavigation view={view} categories={navigationCategories} onSelect={(next) => onSelectList?.(next)} /></div>
+    <TasksRail view={view} categories={navigationCategories} onSelect={(next) => onSelectList?.(next)} onNew={() => openTask()} categoryActions={categoryActions} />
+    <div className="tasks-narrow-navigation"><TasksNavigation view={view} categories={navigationCategories} onSelect={(next) => onSelectList?.(next)} categoryActions={categoryActions} /></div>
     <div className="tasks-workspace-scroll" ref={scroller}><div className="tasks-workspace-canvas">
-      <header className="tasks-workspace-header">{view.kind === "category" && view.category && emoji(view.category, true)}<h1 ref={heading} tabIndex={-1} className="text-title">{label}</h1></header>
+      <TasksContextMenu category actions={view.kind === "category" ? categoryActions(view.category) : []}><header tabIndex={-1} className="tasks-workspace-header">{view.kind === "category" && view.category && emoji(view.category, true)}<h1 ref={heading} tabIndex={-1} className="text-title">{label}</h1></header></TasksContextMenu>
       {state.error && <div className="tasks-workspace-message"><Empty icon="checklist-linear" title="Tasks could not load" hint={state.error} /><Button variant="quiet" onClick={() => reloadTasks()}>Try again</Button></div>}
       {!state.loading && !state.error && groups.length === 0 && <div className="tasks-workspace-empty"><Empty icon="checklist-linear" title="Nothing here" /></div>}
-      {groups.map((group) => <section key={group.key} className="tasks-workspace-group">{view.kind !== "category" && <div className="tasks-group-heading">{group.key && emoji(group.name)}<button type="button" aria-expanded={!collapsed[group.key]} onClick={() => setCollapsed((current) => ({ ...current, [group.key]: !current[group.key] }))}><h2 className="text-subheading">{group.name}</h2><Icon name={collapsed[group.key] ? "alt-arrow-right" : "alt-arrow-down"} size={14} /></button></div>}{!collapsed[group.key] && <ul>{group.tasks.map((task) => row({ key: task.id, task, untickable: true }))}</ul>}</section>)}
+      {groups.map((group) => <section key={group.key} className="tasks-workspace-group">{view.kind !== "category" && <TasksContextMenu category actions={categoryActions(group.key ? group.name : "")}><div tabIndex={-1} className="tasks-group-heading">{group.key && emoji(group.name)}<button type="button" aria-expanded={!collapsed[group.key]} onClick={() => setCollapsed((current) => ({ ...current, [group.key]: !current[group.key] }))}><h2 className="text-subheading">{group.name}</h2><Icon name={collapsed[group.key] ? "alt-arrow-right" : "alt-arrow-down"} size={14} /></button></div></TasksContextMenu>}{!collapsed[group.key] && <ul>{group.tasks.map((task) => row({ key: task.id, task, untickable: true }))}</ul>}</section>)}
       {completed.length > 0 && <section className="tasks-workspace-completed"><button type="button" className="tasks-completed-toggle text-control" aria-expanded={!collapsed.completed} onClick={() => setCollapsed((current) => ({ ...current, completed: !current.completed }))}><Icon name={collapsed.completed ? "alt-arrow-right" : "alt-arrow-down"} size={14} />Completed<span className="text-caption">{completed.length}</span></button>{!collapsed.completed && <ul>{completed.map((entry) => row(entry, true))}</ul>}</section>}
     </div></div>
-    <button type="button" className="brain-mobile-new tasks-tablet-new fixed brain-touch-min focus-inset" data-hidden={editor ? "" : undefined} inert={editor ? true : undefined} aria-label="Add task" onClick={() => openTask()}><span className="brain-mobile-new-circle"><Icon name="add" size={17} /></span></button>
+    <button type="button" className="brain-mobile-new tasks-tablet-new fixed brain-touch-min focus-inset" data-hidden={editor || confirmation ? "" : undefined} inert={editor || confirmation ? true : undefined} aria-label="Add task" onClick={() => openTask()}><span className="brain-mobile-new-circle"><Icon name="add" size={17} /></span></button>
     {editor && <TasksTaskDialog key={editor.key} task={editor.task} category={editor.category} when={editor.when} today={today} categories={categories} pages={pages} onCreateCategory={createCategory} onSave={save} onDelete={editor.task ? remove : undefined} onClose={() => setEditor(null)} onOpenPage={onOpenPage} onReturnFocus={restoreFocus} />}
+    <ConfirmDialog open={confirmation !== null} onOpenChange={(open) => { if (!open) setConfirmation(null); }} title={confirmation?.kind === "category" ? `Delete “${confirmation.name}”?` : `Delete “${confirmation?.task.title || "this task"}”?`} description={confirmation?.kind === "category" ? "Tasks will be kept without a category." : confirmation && isLinkedTask(confirmation.task) ? "The task will be removed from Tasks. Its source checkbox will be kept." : undefined} confirmLabel={confirmation?.kind === "category" ? "Delete category" : "Delete task"} onConfirm={() => void confirmDelete()} returnFocus={() => confirmationFocus.current?.isConnected ? confirmationFocus.current : fallbackFocus()} />
   </section>;
 }
 export function emptyFor(

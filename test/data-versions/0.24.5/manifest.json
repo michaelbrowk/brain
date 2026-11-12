@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "version": "0.24.5",
+  "capturedCommit": "7d19b4cb9846f3e8c07b06a55ae3c254314f7e02",
+  "clientId": "brain_client_nDlW-sMQdnGRyRSHDTrsZobLtKmXbywJ",
+  "stores": {
+    "account-store": {
+      "schemaVersion": 2,
+      "path": "mail-state/local.sqlite3"
+    },
+    "message-cache": {
+      "schemaVersion": 1,
+      "path": "mail-state/cache/account-a11111111111111111111111111111111/messages.sqlite3"
+    },
+    "content-cache": {
+      "schemaVersion": 1,
+      "path": "mail-state/cache/account-a11111111111111111111111111111111/messages.sqlite3"
+    },
+    "outbound-store": {
+      "schemaVersion": 2,
+      "path": "mail-state/cache/account-a11111111111111111111111111111111/outbox.sqlite3"
+    },
+    "token-envelope": {
+      "schemaVersion": 1,
+      "path": "gmail-token-envelope.json"
+    },
+    "oauth-state": {
+      "schemaVersion": 2,
+      "path": "oauth-state"
+    }
+  }
+}

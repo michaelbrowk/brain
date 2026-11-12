@@ -92,7 +92,7 @@ export function TasksSurface({ list = null, onSelectList, onToast, refreshToken 
   const groups = useMemo(() => {
     const result = new Map<string, { name: string; tasks: TaskView[] }>();
     for (const task of visible) { const key = taskCategoryKey(task.category || ""); const group = result.get(key); if (group) group.tasks.push(task); else result.set(key, { name: categoryFor(task.category)?.name || task.category || "No category", tasks: [task] }); }
-    return [...result.entries()].map(([key, group]) => ({ key, ...group, tasks: group.tasks.sort((a, b) => Number(a.done) - Number(b.done) || compareTaskOrder(a, b, today)) }));
+    return [...result.entries()].map(([key, group]) => ({ key, ...group, tasks: group.tasks.sort((a, b) => compareTaskOrder(a, b, today)) }));
   }, [visible, categoryFor, today]);
   const inlineKeys = useMemo(() => new Set(visible.map((task) => task.id)), [visible]);
   const completed = useMemo(() => logbookRows(state.tasks, today, offsetMinutes).filter((row) => {
@@ -121,25 +121,20 @@ export function TasksSurface({ list = null, onSelectList, onToast, refreshToken 
     try { planned = planTaskMove(before, id, input); }
     catch (error) { onToast?.(error instanceof Error ? error.message : "Couldn’t move this task", { urgent: true }); return; }
     if (!taskPositionChanged(before, planned.tasks, id, today)) return;
-    const siblings = before.filter((task) => !task.done && taskCategoryKey(task.category || "") === taskCategoryKey(source.category || "")).sort((a, b) => compareTaskOrder(a, b, today));
+    const siblings = before.filter((task) => taskCategoryKey(task.category || "") === taskCategoryKey(source.category || "")).sort((a, b) => compareTaskOrder(a, b, today));
     const inverse: TaskMoveInput = { category: source.category || null, beforeId: siblings[siblings.findIndex((task) => task.id === id) + 1]?.id || null, today };
     movePendingRef.current = true; setMovePending(true); setSelectedId(id); setMoveAnnouncement("");
     try {
       mutateTasks((entries) => planTaskMove(entries, id, input).tasks);
       const saved = await persistTaskMove(id, input);
-      // The move owns only category and position: an edit/completion arriving
-      // during the request must not be replaced by this response's snapshot.
-      mutateTasks((entries) => entries.map((entry) => {
-        if (entry.id !== id || entry.order !== planned.task.order || taskCategoryKey(entry.category || "") !== taskCategoryKey(planned.task.category || "")) return entry;
-        const next = { ...entry, order: saved.order };
-        if (saved.category) next.category = saved.category; else delete next.category;
-        return next;
-      }));
+      // Server ranks can include older completions outside this client's list.
+      // Keep the complete optimistic order until the reload replaces all ranks
+      // together; merging only the moved task's rank can briefly reorder it.
       reloadTasks();
       setMoveAnnouncement(`${source.title} moved${input.category ? ` to ${input.category}` : " to No category"}.`);
       onToast?.(undo ? "Move undone" : "Task moved", undo ? undefined : { actionLabel: "Undo", onAction: () => {
         const current = tasksRef.current.find((entry) => entry.id === id);
-        if (!current || current.done || current.order !== saved.order || taskCategoryKey(current.category || "") !== taskCategoryKey(saved.category || "")) {
+        if (!current || current.done || (current.order !== saved.order && current.order !== planned.task.order) || taskCategoryKey(current.category || "") !== taskCategoryKey(saved.category || "") || taskPositionChanged(planned.tasks, tasksRef.current, id, today)) {
           onToast?.("This task changed. Its move can no longer be undone.", { urgent: true });
           return;
         }
@@ -277,7 +272,7 @@ export function TasksSurface({ list = null, onSelectList, onToast, refreshToken 
     onToast?.(task ? "Changes saved" : "Task created");
   }
   async function remove() { if (!editor?.task) return; const id = editor.task.id; await deleteTask(id); mutateTasks((entries) => entries.filter((entry) => entry.id !== id)); onToast?.("Task deleted"); }
-  function row(entry: TaskRow, finished = false, preview = false) { return <TasksCompactRow preview={preview} key={entry.key} task={entry.task} rowKey={entry.key} historic={!entry.untickable} selected={selectedId === entry.key} today={today} offsetMinutes={offsetMinutes} reduce={reduce} pageTitle={entry.task.page ? pageTitleOf?.(entry.task.page) || pages.find((page) => page.id === entry.task.page)?.title : undefined} categoryIcon={categoryFor(entry.task.category)?.icon} showCategory={finished && view.kind !== "category"} showPlan={view.kind === "category" || view.list !== "today"} onOpen={openTask} onSelect={setSelectedId} onComplete={actions.completeTask} onReopen={actions.reopenTask} onOpenPage={onOpenPage} onDelete={requestDeleteTask} onContextActionSettled={restoreTaskContextFocus} />; }
+  function row(entry: TaskRow, finished = false, preview = false) { return <TasksCompactRow preview={preview} key={entry.key} task={entry.task} rowKey={entry.key} historic={!entry.untickable} selected={selectedId === entry.key} today={today} reduce={reduce} pageTitle={entry.task.page ? pageTitleOf?.(entry.task.page) || pages.find((page) => page.id === entry.task.page)?.title : undefined} categoryIcon={categoryFor(entry.task.category)?.icon} showCategory={finished && view.kind !== "category"} showPlan={view.kind === "category" || view.list !== "today"} onOpen={openTask} onSelect={setSelectedId} onComplete={actions.completeTask} onReopen={actions.reopenTask} onOpenPage={onOpenPage} onDelete={requestDeleteTask} onContextActionSettled={restoreTaskContextFocus} />; }
   const label = view.kind === "category" ? categoryFor(view.category)?.name || view.category || "No category" : viewLabel(view);
   return <TasksDragProvider tasks={groups.flatMap((group) => group.tasks).filter((task) => !task.done)} disabled={movePending || categoryPending || !!editor || !!confirmation || state.loading || !!state.error} onActiveChange={setDragging} onExpandCategory={expandDragCategory} onMove={(id, intent) => { void placeTask(id, { category: intent.category, beforeId: intent.beforeId, today }); }} renderOverlay={(task) => <ul>{row({ key: task.id, task, untickable: true }, false, true)}</ul>}><section ref={surface} aria-label="Tasks" data-testid="tasks-surface" data-dragging={dragging ? "" : undefined} className="brain-tasks tasks-workspace">
     <span className="sr-only" role="status" aria-live="polite">{moveAnnouncement}</span>

@@ -18,6 +18,25 @@ describe("task placement projection", () => {
     const moved=planTaskMove(tasks,"c",{category:"Work",beforeId:"b",today});
     expect(sorted([...moved.tasks,task("d",{when:"2026-01-01"})])).toEqual(["c","b","a","d"]);
   });
+  it("retains completed siblings and their metadata when rebalancing a category", () => {
+    const completed=task("b",{order:"a1",done:true,doneAt:"2026-11-11T08:00:00.000Z",when:today,relatedPageIds:["page"]});
+    const tasks=[task("a",{order:"a0"}),completed,task("c",{order:"a2"}),task("d",{order:"a3"})];
+    const before=planTaskMove(tasks,"d",{category:"Work",beforeId:"a",today});
+    expect(sorted(before.tasks)).toEqual(["d","a","b","c"]);
+    expect(before.order).toHaveProperty("b");
+    expect(before.tasks.find(task=>task.id==="b")).toEqual({...completed,order:before.order.b});
+    const appended=planTaskMove(before.tasks,"d",{category:"Work",beforeId:null,today});
+    expect(sorted(appended.tasks)).toEqual(["a","b","c","d"]);
+    expect(appended.order).toHaveProperty("b");
+  });
+  it.each(["Work","Other"])("restores placement before a completed sibling after a move to %s", category => {
+    const tasks=[task("a",{order:"a0"}),task("b",{order:"a1",done:true,doneAt:"2026-11-11T08:00:00.000Z"}),task("c",{order:"a2"}),task("d",{category:"Other",order:"a0"})];
+    const moved=planTaskMove(tasks,"a",{category,beforeId:null,today});
+    const restored=planTaskMove(moved.tasks,"a",{category:"Work",beforeId:"b",today});
+    expect(sorted(restored.tasks.filter(task=>task.category==="Work"))).toEqual(["a","b","c"]);
+    expect(restored.tasks.find(task=>task.id==="b")).toEqual(tasks[1]);
+    expect(sorted(restored.tasks.filter(task=>task.category==="Other"))).toEqual(["d"]);
+  });
   it("preserves unrelated fields, clears a category, and leaves other categories untouched", () => {
     const source=task("a",{repeat:{freq:"daily"},when:today,deadline:today,relatedPageIds:["page"],log:[]});
     const other=task("b",{category:"Elsewhere"});
@@ -29,8 +48,8 @@ describe("task placement projection", () => {
     const other=task("constructor",{category:"Other"});
     expect(planTaskMove([task("a"),other],"a",{category:"Work",beforeId:null,today}).tasks[1]).toBe(other);
   });
-  it.each(["missing","done","self","other-category"])("refuses %s anchors and unavailable sources", kind => {
-    const tasks=[task("a"),task("b",{done:kind==="done",category:kind==="other-category"?"Else":"Work"})];
+  it.each(["missing","self","other-category"])("refuses %s anchors and unavailable sources", kind => {
+    const tasks=[task("a"),task("b",{category:kind==="other-category"?"Else":"Work"})];
     expect(()=>planTaskMove(tasks,"a",{category:"Work",beforeId:kind==="self"?"a":kind==="missing"?"gone":"b",today})).toThrow();
     expect(()=>planTaskMove(tasks,"missing",{category:null,beforeId:null,today})).toThrow();
     expect(()=>planTaskMove([task("a",{done:true})],"a",{category:null,beforeId:null,today})).toThrow();

@@ -22,14 +22,15 @@ export function compareTaskOrder(a: TaskView, b: TaskView, today: string): numbe
 }
 
 /** Uses the full visible set, never a filtered list of the current screen.
- * Rebalancing one category keeps hidden-by-filter siblings in their order and
- * bounds key growth. The same projection drives optimistic UI and storage. */
+ * Rebalancing one category keeps completed and hidden-by-filter siblings in
+ * their order and bounds key growth. The same projection drives optimistic UI
+ * and storage. Completed siblings may anchor Undo without becoming movable. */
 export function planTaskMove(tasks: readonly TaskView[], id: string, input: TaskMoveInput): {task: TaskView; tasks: TaskView[]; order: Record<string, string>} {
   const source = tasks.find(task => task.id === id);
   if (!source || source.done) throw new Error("This task is no longer available to move. Reload and try again.");
   if (input.beforeId === id) throw new Error("A task cannot be placed before itself.");
   const category = taskCategoryKey(input.category ?? "");
-  const siblings = tasks.filter(task => task.id !== id && !task.done && taskCategoryKey(task.category ?? "") === category).sort((a, b) => compareTaskOrder(a, b, input.today));
+  const siblings = tasks.filter(task => task.id !== id && taskCategoryKey(task.category ?? "") === category).sort((a, b) => compareTaskOrder(a, b, input.today));
   const at = input.beforeId === null ? siblings.length : siblings.findIndex(task => task.id === input.beforeId);
   if (at < 0) throw new Error("The destination changed. Reload and try again.");
   const moved = {...source};

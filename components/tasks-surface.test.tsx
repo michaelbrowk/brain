@@ -141,6 +141,61 @@ describe("categories and linked-page drafts", () => {
 
 describe("completion, history and keyboard", () => {
   it("completes through the checkbox without opening a dialog and retains Undo", async () => { await mount([task("a", { when: TODAY })]); await click(el('.tasks-compact-row [role="checkbox"]')); expect(patches()[0].body).toEqual({ done: true }); expect(el(".tasks-detail")).toBeNull(); expect(toasts.at(-1)?.options?.actionLabel).toBe("Undo"); await act(async () => { await toasts.at(-1)?.options?.onAction?.(); }); await settle(); expect(patches().at(-1)?.body).toEqual({ done: false }); });
+  it.each([
+    ["Today", "today", TODAY], ["Inbox", "inbox", undefined],
+    ["Upcoming", "upcoming", "2026-09-14"], ["Someday", "someday", "someday"],
+    ["All tasks", "all", TODAY], ["category", { category: "Work" }, TODAY],
+  ] as const)("keeps a completed task inline in %s through a same-day reload", async (_label, list, when) => {
+    await mount([task("a", { category: " work ", when, order: "a0" }), task("b", { category: "Work", when, order: "a1" })], { list });
+    await click(el('[data-row-key="a"] [role="checkbox"]'));
+    expect(rowTitles()).toEqual(["b", "a"]);
+    expect(el('[data-row-key="a"]').hasAttribute("data-done")).toBe(true);
+    expect(el('[data-row-key="a"] [role="checkbox"]').getAttribute("aria-checked")).toBe("true");
+    expect(el(".tasks-completed-toggle")).toBeNull();
+    const saved = [...records];
+    await act(async () => root.render(null)); resetTasksStore();
+    await mount(saved, { list });
+    expect(rowTitles()).toEqual(["b", "a"]);
+    expect(el('[data-row-key="a"]').hasAttribute("data-done")).toBe(true);
+    await click(el('[data-row-key="a"] [role="checkbox"]'));
+    expect(patches().at(-1)?.body).toEqual({ done: false });
+    expect(rowTitles()).toEqual(["a", "b"]);
+    expect(el('[data-row-key="a"]').hasAttribute("data-done")).toBe(false);
+  });
+  it("shows older completions only in Completed and never duplicates an inline completion", async () => {
+    await mount([task("open", { when: TODAY }), task("today", { when: TODAY, done: true, doneAt: NOON.toISOString() }), task("yesterday", { when: TODAY, done: true, doneAt: "2026-09-12T12:00:00.000Z" })], { list: "all" });
+    expect(rowTitles()).toEqual(["open", "today"]);
+    await click(el(".tasks-completed-toggle"));
+    expect(rowTitles()).toEqual(["open", "today", "yesterday"]);
+    expect(host.querySelectorAll('[data-row-key="today"]')).toHaveLength(1);
+    expect([...host.querySelectorAll(".tasks-workspace-completed .tasks-compact-title")].map((node) => node.textContent)).toEqual(["yesterday"]);
+  });
+  it("moves the completion to history at Dubai midnight rather than UTC midnight", async () => {
+    const inDubai = (date: Date) => new Date(date.getTime() + 240 * 60_000);
+    const clock = [
+      vi.spyOn(Date.prototype, "getTimezoneOffset").mockReturnValue(-240),
+      vi.spyOn(Date.prototype, "getFullYear").mockImplementation(function (this: Date) { return inDubai(this).getUTCFullYear(); }),
+      vi.spyOn(Date.prototype, "getMonth").mockImplementation(function (this: Date) { return inDubai(this).getUTCMonth(); }),
+      vi.spyOn(Date.prototype, "getDate").mockImplementation(function (this: Date) { return inDubai(this).getUTCDate(); }),
+    ];
+    try {
+      vi.setSystemTime(new Date("2026-09-12T22:30:00.000Z"));
+      expect(localDay()).toEqual({ today: "2026-09-13", offsetMinutes: 240 });
+      await mount([task("done", { category: " work ", when: "2026-09-13", done: true, doneAt: "2026-09-12T22:15:00.000Z" })], { list: { category: "Work" } });
+      expect(rowTitles()).toEqual(["done"]);
+      vi.setSystemTime(new Date("2026-09-13T19:59:59.000Z"));
+      await act(async () => window.dispatchEvent(new Event("focus"))); await settle();
+      expect(rowTitles()).toEqual(["done"]);
+      vi.setSystemTime(new Date("2026-09-13T20:00:01.000Z"));
+      await act(async () => window.dispatchEvent(new Event("focus"))); await settle();
+      expect(localDay()).toEqual({ today: "2026-09-14", offsetMinutes: 240 });
+      expect(rowTitles()).toEqual([]);
+      await click(el(".tasks-completed-toggle"));
+      expect(rowTitles()).toEqual(["done"]);
+      expect(host.querySelectorAll('.tasks-workspace-completed [data-row-key="done"]')).toHaveLength(1);
+      expect(records[0].doneAt).toBe("2026-09-12T22:15:00.000Z");
+    } finally { clock.forEach((mock) => mock.mockRestore()); }
+  });
   it("opens Completed on demand and makes only the latest recurring completion untickable", async () => { await mount([task("a", { when: "2026-09-14", repeat: { freq: "daily" }, log: [{ scheduled: "2026-09-12", completedAt: "2026-09-12T12:00:00.000Z" }, { scheduled: TODAY, completedAt: NOON.toISOString() }] })], { list: "all" }); expect(rowTitles()).toHaveLength(1); await click(el(".tasks-completed-toggle")); expect(rowTitles()).toHaveLength(3); const history = document.querySelectorAll('.tasks-workspace-completed [role="checkbox"]'); expect(history[0].getAttribute("aria-disabled")).not.toBe("true"); expect(history[1].getAttribute("aria-disabled")).toBe("true"); });
   it.each([["t", TODAY], ["s", "someday"]])("keeps the %s schedule shortcut", async (keyName, when) => { await mount([task("a", { when: "2026-10-01" })], { list: "all" }); await act(async () => el<HTMLButtonElement>(".tasks-compact-open").focus()); await key(keyName); expect(patches()[0].body).toEqual({ when }); });
   it("preserves Tomorrow and completion chords separately", async () => { await mount([task("a", { when: TODAY })]); await act(async () => el<HTMLButtonElement>(".tasks-compact-open").focus()); await key("]", window, { metaKey: true }); expect(patches()[0].body).toEqual({ when: "2026-09-14" }); });
@@ -278,7 +333,7 @@ describe("Tasks context menus", () => {
     expect(rowTitles()).toEqual([]);
   });
   it("marks an ordinary completed task incomplete through its menu", async () => {
-    await mount([task("a", { done: true, doneAt: NOON.toISOString() })], { list: "all" }); await click(el(".tasks-completed-toggle"));
+    await mount([task("a", { done: true, doneAt: NOON.toISOString() })], { list: "all" });
     await contextMenu(el(".tasks-compact-item")); await chooseMenu("Mark incomplete");
     expect(patches()[0].body).toEqual({ done: false }); expect(records[0].done).toBe(false);
   });

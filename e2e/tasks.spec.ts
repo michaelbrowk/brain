@@ -867,7 +867,8 @@ test("@release task context menus complete, undo and remove categories without l
   await menu.getByRole("menuitem", { name: "Complete task", exact: true }).click();
   await expect.poll(async () => (await read(ids[0])).task.done).toBe(true);
   const completed = page.getByRole("button", { name: /^Completed/ });
-  if (await completed.getAttribute("aria-expanded") === "false") await completed.click();
+  await expect(row).toHaveAttribute("data-done", "");
+  await expect(row.locator(".tasks-compact-title")).toHaveCSS("text-decoration-line", "line-through");
   await openMenu(row.locator(".tasks-compact-meta"));
   await menu.getByRole("menuitem", { name: "Mark incomplete", exact: true }).click();
   await expect.poll(async () => (await read(ids[0])).task.done).toBe(false);
@@ -1196,4 +1197,71 @@ test("@release @mobile holding a task starts touch reorder instead of opening it
   await expect(page.getByRole("dialog", { name: "Touch third", exact: true })).toBeVisible();
 });
 
+});
+
+test.describe("completion day fixtures", () => {
+  freshNotes();
+  test.use({ timezoneId: "Asia/Dubai" });
+
+  test("@release completed tasks stay inline until the next local day", async ({ page }) => {
+    test.setTimeout(120_000);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    // Completion timestamps still come from the real server clock. Advance
+    // only the reader's clock after checking the saved same-day state.
+    await page.clock.install({ time: new Date() });
+    await login(page);
+    const today = await page.evaluate(() => {
+      const now = new Date();
+      return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    });
+    const category = "Day wrap";
+    const ids: string[] = [];
+    for (const title of ["Finished today", "Still to do"]) {
+      const created = await browserJson(page, "/api/tasks", { method: "POST", body: { title, category, when: today } });
+      expect(created.ok, JSON.stringify(created.body)).toBeTruthy();
+      ids.push((created.body as { task: TaskView }).task.id);
+    }
+    const note = await createNote(page, "Completion source", "- [ ] Linked title\n");
+    const linkedId = await linkTask(page, note, 0, today);
+    const linkedDialog = await openTaskDialog(page, linkedId, "Linked title");
+    await expect(linkedDialog.getByRole("textbox", { name: "Task title", exact: true })).toHaveAttribute("readonly", "");
+    await expect(linkedDialog.getByText("The title comes from its source note.", { exact: true })).toHaveCount(0);
+    await linkedDialog.getByRole("button", { name: "Close task", exact: true }).click();
+
+    await completeFromTasks(page, "Finished today", ids[0]);
+    const workspace = page.getByTestId("tasks-surface");
+    const inline = workspace.locator(`.tasks-workspace-group [data-row-key="${ids[0]}"]`);
+    await expect(inline).toHaveAttribute("data-done", "");
+    await expect(inline.locator(".tasks-compact-title")).toHaveCSS("text-decoration-line", "line-through");
+    await expect(inline.getByRole("checkbox", { name: "Restore Finished today", exact: true })).toBeChecked();
+    await expect(workspace.locator(`.tasks-workspace-completed [data-row-key="${ids[0]}"]`)).toHaveCount(0);
+    await page.reload();
+    await expect(inline).toHaveAttribute("data-done", "");
+    await page.getByRole("navigation", { name: "Task categories", exact: true }).getByRole("button", { name: category, exact: true }).click();
+    await expect(workspace.locator(".tasks-workspace-group .tasks-compact-title")).toHaveText(["Still to do", "Finished today"]);
+    await page.getByRole("navigation", { name: "Tasks views", exact: true }).getByRole("button", { name: "All tasks", exact: true }).click();
+    await expect(inline).toBeVisible();
+
+    // The existing midnight subscription must archive it while Tasks remains
+    // open. No reload or test-only application event causes the transition.
+    const untilNextDay = await page.evaluate(() => {
+      const now = new Date();
+      return new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 2).getTime() - now.getTime();
+    });
+    await page.clock.fastForward(untilNextDay);
+    await expect(inline).toHaveCount(0);
+    const historyToggle = workspace.getByRole("button", { name: /^Completed/ });
+    await expect(historyToggle).toBeVisible();
+    await historyToggle.click();
+    await expect(workspace.locator(`.tasks-workspace-completed [data-row-key="${ids[0]}"]`)).toHaveAttribute("data-done", "");
+    const saved = await browserJson(page, `/api/tasks/${ids[0]}`);
+    expect(saved.ok).toBeTruthy();
+    expect((saved.body as { task: TaskView }).task.done).toBe(true);
+    await page.reload();
+    await expect(workspace).toBeVisible();
+    await page.getByRole("navigation", { name: "Tasks views", exact: true }).getByRole("button", { name: "All tasks", exact: true }).click();
+    await expect(inline).toHaveCount(0);
+    await historyToggle.click();
+    await expect(workspace.locator(`.tasks-workspace-completed [data-row-key="${ids[0]}"]`)).toBeVisible();
+  });
 });

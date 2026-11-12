@@ -101,4 +101,17 @@ describe("persisted Tasks reordering", () => {
     await mount([task("a"), task("b")]); await reorder("a", "ArrowUp"); await reorder("b", "ArrowDown"); expect(writes).toHaveLength(0); expect(toasts).toHaveLength(0);
     expect([...host.querySelectorAll('[aria-label="Task categories"] button')].some((node) => node.textContent === "No category")).toBe(true);
   });
+  it("reorders only open siblings while today's completion stays at the category foot", async () => {
+    await mount([task("a", { order: "a0" }), task("done", { order: "a1", done: true, doneAt: now.toISOString() }), task("b", { order: "a2" })]);
+    expect(titles()).toEqual(["a", "b", "done"]);
+    await reorder("done", "ArrowUp"); await reorder("b", "ArrowDown");
+    expect(writes).toHaveLength(0); expect(toasts).toHaveLength(0);
+    await reorder("a", "ArrowDown");
+    expect(writes).toEqual([{ id: "a", input: { category: "Work", beforeId: null, today } }]);
+    expect(titles()).toEqual(["b", "a", "done"]);
+    expect(records.find((entry) => entry.id === "done")).toMatchObject({ order: "a1", done: true, doneAt: now.toISOString() });
+    await reorder("a", "ArrowUp");
+    expect(writes[1]).toEqual({ id: "a", input: { category: "Work", beforeId: "b", today } });
+    expect(titles()).toEqual(["a", "b", "done"]);
+  });
 });

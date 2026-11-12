@@ -54,7 +54,7 @@ export function TasksCompactRow({ task, rowKey, historic, selected, today, reduc
         {hasMeta && <span className="tasks-compact-meta text-caption">
           {showCategory && task.category && <span><TaskCategoryGlyph icon={categoryIcon} />{task.category}</span>}
           {task.deadline && <span data-overdue={overdueDeadline ? "" : undefined}><Icon name="calendar-date" size={12} />{deadlineInPast ? "Deadline overdue" : "Deadline"} · {dayLabel(task.deadline)}</span>}
-          {hasPlan && <span data-overdue={overduePlan ? "" : undefined}>{plannedInPast ? "Planned date overdue" : "Planned"} · {whenLabel(task.when, today)}{task.evening ? " · This Evening" : ""}{task.time ? ` · ${task.time}` : ""}</span>}
+          {hasPlan && <span data-overdue={overduePlan ? "" : undefined}>{!plannedInPast && "Planned · "}{whenLabel(task.when, today)}{task.evening ? " · This Evening" : ""}{task.time ? ` · ${task.time}` : ""}</span>}
           {task.page && <span><Icon name="document-text" size={12} />{task.detachedAt ? "Source line removed" : "Note"}</span>}
           {task.repeat && <span><Icon name="restart" size={12} />Repeats</span>}
         </span>}

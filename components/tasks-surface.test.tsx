@@ -201,6 +201,25 @@ describe("completion, history and keyboard", () => {
     expect(metadata().textContent).toBe(content);
     expect(metadata().querySelectorAll("[data-overdue]")).toHaveLength(0);
   });
+  it.each([TODAY, "2026-09-12"])("hides the scheduled clock after completion and reload, restoring it on reopen (%s)", async (when) => {
+    await mount([task("a", { when, time: "13:00", order: "a0" }), task("b", { when, order: "a1" })]);
+    const metadata = () => el('[data-row-key="a"] .tasks-compact-meta');
+    const before = metadata().textContent!;
+    expect(before).toContain(" · 13:00");
+    await click(el('[data-row-key="a"] [role="checkbox"]'));
+    expect(rowTitles()).toEqual(["a", "b"]);
+    expect(metadata().textContent).toBe(before.replace(" · 13:00", ""));
+    expect(records[0]).toMatchObject({ done: true, time: "13:00", doneAt: NOON.toISOString() });
+    const saved = [...records];
+    await act(async () => root.render(null)); resetTasksStore();
+    await mount(saved);
+    expect(rowTitles()).toEqual(["a", "b"]);
+    expect(metadata().textContent).toBe(before.replace(" · 13:00", ""));
+    await click(el('[data-row-key="a"] [role="checkbox"]'));
+    expect(rowTitles()).toEqual(["a", "b"]);
+    expect(metadata().textContent).toBe(before);
+    expect(records[0]).toMatchObject({ done: false, time: "13:00" });
+  });
   it("shows older completions only in Completed and never duplicates an inline completion", async () => {
     await mount([task("open", { when: TODAY }), task("today", { when: TODAY, done: true, doneAt: NOON.toISOString() }), task("yesterday", { when: TODAY, done: true, doneAt: "2026-09-12T12:00:00.000Z" })], { list: "all" });
     expect(rowTitles()).toEqual(["open", "today"]);

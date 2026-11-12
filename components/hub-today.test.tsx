@@ -289,6 +289,8 @@ describe("the Today block on Home", () => {
     expect(toasts.at(-1)?.title).toBe("Completed");
     expect(toasts.at(-1)?.options?.actionLabel).toBe("Undo");
     expect(header()).toBe("Today · 1");
+    expect(host.querySelectorAll('.brain-task-row[data-done]')).toHaveLength(1);
+    expect(host.querySelectorAll('[data-done] .brain-task-caption')).toHaveLength(0);
   });
 
   it("reverts and says the route's reason when the completion is refused", async () => {

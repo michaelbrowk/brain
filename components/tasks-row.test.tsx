@@ -34,7 +34,6 @@ const { TasksRow, foldRow, WRITE_AT_MS: WRITE_AT } = await import("./tasks-row")
 const { CHIP_ROW_AIR, CHIP_ROW_RING, DUR } = await import("@/lib/motion");
 const { renderTaskCheck, renderTaskCheckbox } = await import("./tasks-checkbox");
 const { SOLAR } = await import("./ui/solar-icons.generated");
-const { doneTimeOf } = await import("./tasks-lists");
 
 /** Every WAAPI animation the row starts, in order. */
 interface Recorded {
@@ -314,13 +313,11 @@ describe("what the row draws", () => {
     );
   });
 
-  it("keeps the time on a completion nobody else answered", async () => {
+  it("does not add a completion clock to a linked task", async () => {
     await renderRows([
       task("a", { page: "page-1", done: true, doneAt: "2026-09-13T09:00:00.000Z" }),
     ]);
-    expect(document.querySelector(".brain-task-caption")?.textContent).not.toContain(
-      "via link",
-    );
+    expect(document.querySelector(".brain-task-caption")).toBeNull();
   });
 
   it("takes the affordance off a history row rather than giving it behaviour", async () => {
@@ -1980,24 +1977,20 @@ describe("the tail's clock and moon", () => {
     expect(tail().querySelector("[data-fired]")).toBeNull();
   });
 
-  it("shows one clock on a done row, the one it was finished at", async () => {
-    // Two clocks side by side made the reader work out which was which. The
-    // hour it was due at is what the strike is drawn over.
+  it.each([false, true])("hides both clocks without replacing them with another caption (historic: %s)", async (historic) => {
     await renderRows([
       task("a", {
         when: TODAY,
         time: "13:00",
         done: true,
         doneAt: `${TODAY}T12:25:00.000Z`,
+        deadline: "2026-09-12",
+        category: "Work",
       }),
-    ]);
+    ], { historic, showCategory: true });
     expect(tail().querySelector("[data-time]")).toBeNull();
-    // ONE CLOCK SHAPE IN THE COLUMN. A pending row prints the `HH:MM` the
-    // file holds, so a done row prints `HH:MM` too. It used to go through
-    // `Intl` and print `12:25 PM` on an en-US machine, four rows under an
-    // `18:00`.
-    expect(tail().textContent).toBe("12:25");
-    expect(tail().textContent).toBe(doneTimeOf(`${TODAY}T12:25:00.000Z`, 0));
+    expect(tail().querySelector(".brain-task-caption")).toBeNull();
+    expect(tail().textContent).toBe("");
   });
 
   it("says nothing at all on a done row with no instant to report", async () => {

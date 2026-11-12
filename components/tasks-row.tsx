@@ -32,7 +32,6 @@ import {
 import {
   deadlineCaption,
   dayLabel,
-  doneTimeOf,
   eveningMoon,
   movedLabel,
   movesRow,
@@ -679,12 +678,9 @@ export function TasksRow({
                     lead the tail: they are where in the DAY this row sits, and
                     the glyphs behind them are what KIND of row it is.
 
-                    ONE CLOCK PER ROW. A finished row reports the time it was
-                    finished at, further down this chain, and the hour it was
-                    due at is what the strike is drawn over: two clocks side by
-                    side made the reader work out which was which. A done row
-                    with no instant to report then says nothing, which is
-                    right, because there is nothing to report. */}
+                    Completed rows show neither the reminder clock nor the
+                    completion clock. The stored times remain available for
+                    reminders and history. */}
                 {time && !task.done && (
                   <span
                     className="brain-task-caption"
@@ -728,18 +724,12 @@ export function TasksRow({
                     line removed from {pageTitle ?? "a note"}
                   </span>
                 ) : task.done && task.updatedByName ? (
-                  /* Spec row 145. The note owns a linked task's completion,
-                     so when a link visitor ticked the box the Logbook says
-                     who, in place of the time: the name answers the question
-                     the time was standing in for. */
+                  /* The note owns a linked task's completion, so a visitor's
+                     attribution stays visible even without a clock. */
                   <span className="brain-task-caption">
                     done by {task.updatedByName} via link
                   </span>
-                ) : task.done && task.doneAt ? (
-                  <span className="brain-task-caption">
-                    {doneTimeOf(task.doneAt, offsetMinutes)}
-                  </span>
-                ) : deadline ? (
+                ) : task.done ? null : deadline ? (
                   <span
                     className="brain-task-caption"
                     data-overdue={deadline.overdue ? "" : undefined}

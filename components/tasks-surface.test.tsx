@@ -188,6 +188,7 @@ describe("completion, history and keyboard", () => {
     const count = metadata().children.length;
     const content = metadata().textContent;
     expect(count).toBeGreaterThan(0);
+    if (dates.when === "2026-09-12") expect(metadata().lastElementChild?.textContent).toBe("12 Sep");
     expect(metadata().querySelectorAll("[data-overdue]")).toHaveLength(count);
     await click(el('[data-row-key="a"] [role="checkbox"]'));
     expect(metadata().children).toHaveLength(count);

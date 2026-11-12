@@ -43,7 +43,7 @@ export function taskPositionChanged(before: readonly TaskView[], after: readonly
   if (!previous || !next) return false;
   const category = taskCategoryKey(previous.category || "");
   if (category !== taskCategoryKey(next.category || "")) return true;
-  const ids = (tasks: readonly TaskView[]) => tasks.filter((task) => !task.done && taskCategoryKey(task.category || "") === category).sort((a, b) => compareTaskOrder(a, b, today)).map((task) => task.id).join("|");
+  const ids = (tasks: readonly TaskView[]) => tasks.filter((task) => taskCategoryKey(task.category || "") === category).sort((a, b) => compareTaskOrder(a, b, today)).map((task) => task.id).join("|");
   return ids(before) !== ids(after);
 }
 

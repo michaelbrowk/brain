@@ -17,7 +17,7 @@ function Rail() {
 }
 function Harness({ items = tasks, historic = false }: { items?: TaskView[]; historic?: boolean }) {
   const [dragging, setDragging] = useState(false);
-  const row = (entry: TaskView, key = entry.id) => <TasksCompactRow key={key} task={entry} rowKey={key} historic={historic} today="2026-11-11" offsetMinutes={0} selected={false} reduce onOpen={open} onSelect={select} onComplete={complete} onReopen={complete} />;
+  const row = (entry: TaskView, key = entry.id) => <TasksCompactRow key={key} task={entry} rowKey={key} historic={historic} today="2026-11-11" selected={false} reduce onOpen={open} onSelect={select} onComplete={complete} onReopen={complete} />;
   return <TasksDragProvider tasks={items.filter((entry) => !entry.done)} disabled={false} onMove={move} onActiveChange={setDragging} onExpandCategory={expand} renderOverlay={(entry) => <span>{entry.title}</span>}><div data-surface data-dragging={dragging ? "" : undefined}><Rail /><TasksCategoryDrop category="Work"><ul>{items.map((entry) => row(entry, historic ? `${entry.id}@history` : entry.id))}</ul></TasksCategoryDrop></div></TasksDragProvider>;
 }
 const rowButton = (id = "a") => host.querySelector<HTMLButtonElement>(`[data-task-id="${id}"] .tasks-compact-open`)!;

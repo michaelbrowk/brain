@@ -3,14 +3,14 @@
 import { useRef, useState } from "react";
 import type { TaskView } from "@/lib/tasks/model";
 import { TaskCheckbox } from "./tasks-checkbox";
-import { dayLabel, doneTimeOf, whenLabel } from "./tasks-lists";
+import { dayLabel, whenLabel } from "./tasks-lists";
 import { Icon } from "./ui/icon";
 import { TaskCategoryGlyph } from "./tasks-category-picker";
 import { TasksContextMenu, type TasksContextAction } from "./tasks-context-menu";
 import { useTaskDragRow } from "./tasks-drag";
 
-export function TasksCompactRow({ task, rowKey, historic, selected, today, offsetMinutes, reduce, pageTitle, categoryIcon, showCategory, showPlan, onOpen, onSelect, onComplete, onReopen, onOpenPage, onDelete, onContextActionSettled, preview = false }: {
-  task: TaskView; rowKey: string; historic?: boolean; selected: boolean; today: string; offsetMinutes: number; reduce: boolean;
+export function TasksCompactRow({ task, rowKey, historic, selected, today, reduce, pageTitle, categoryIcon, showCategory, showPlan, onOpen, onSelect, onComplete, onReopen, onOpenPage, onDelete, onContextActionSettled, preview = false }: {
+  task: TaskView; rowKey: string; historic?: boolean; selected: boolean; today: string; reduce: boolean;
   pageTitle?: string; categoryIcon?: string; showCategory?: boolean; showPlan?: boolean;
   onOpen: (task: TaskView, invoker: HTMLElement) => void; onSelect: (key: string) => void;
   onComplete: (task: TaskView, refusal?: string) => Promise<void>; onReopen: (task: TaskView, refusal?: string) => Promise<void>;
@@ -22,10 +22,12 @@ export function TasksCompactRow({ task, rowKey, historic, selected, today, offse
   const [pending, setPending] = useState(false);
   const pendingRef = useRef(false);
   const { setNodeRef, setActivatorNodeRef, attributes, listeners, dragging, anyDragging } = useTaskDragRow(task, !preview && !pending && !task.done && rowKey === task.id, preview, rowKey);
-  const overdueDeadline = !task.done && !!task.deadline && task.deadline < today;
-  const overduePlan = !task.done && !!task.when && task.when !== "someday" && task.when < today;
-  const hasPlan = !!task.when && (showPlan || overduePlan || task.evening || task.time);
-  const hasMeta = showCategory && !!task.category || task.deadline || hasPlan || task.page || task.repeat || task.doneAt;
+  const deadlineInPast = !!task.deadline && task.deadline < today;
+  const overdueDeadline = !task.done && deadlineInPast;
+  const plannedInPast = !!task.when && task.when !== "someday" && task.when < today;
+  const overduePlan = !task.done && plannedInPast;
+  const hasPlan = !!task.when && (showPlan || plannedInPast || task.evening || task.time);
+  const hasMeta = showCategory && !!task.category || task.deadline || hasPlan || task.page || task.repeat;
   async function toggle(fromContext = false) {
     if (pendingRef.current || historic) return;
     pendingRef.current = true;
@@ -51,11 +53,10 @@ export function TasksCompactRow({ task, rowKey, historic, selected, today, offse
         <span className="tasks-compact-title text-table" dir="auto">{task.title}</span>
         {hasMeta && <span className="tasks-compact-meta text-caption">
           {showCategory && task.category && <span><TaskCategoryGlyph icon={categoryIcon} />{task.category}</span>}
-          {task.deadline && <span data-overdue={overdueDeadline ? "" : undefined}><Icon name="calendar-date" size={12} />{overdueDeadline ? "Deadline overdue" : "Deadline"} · {dayLabel(task.deadline)}</span>}
-          {hasPlan && <span data-overdue={overduePlan ? "" : undefined}>{overduePlan ? "Planned date overdue" : "Planned"} · {whenLabel(task.when, today)}{task.evening ? " · This Evening" : ""}{task.time ? ` · ${task.time}` : ""}</span>}
+          {task.deadline && <span data-overdue={overdueDeadline ? "" : undefined}><Icon name="calendar-date" size={12} />{deadlineInPast ? "Deadline overdue" : "Deadline"} · {dayLabel(task.deadline)}</span>}
+          {hasPlan && <span data-overdue={overduePlan ? "" : undefined}>{plannedInPast ? "Planned date overdue" : "Planned"} · {whenLabel(task.when, today)}{task.evening ? " · This Evening" : ""}{task.time ? ` · ${task.time}` : ""}</span>}
           {task.page && <span><Icon name="document-text" size={12} />{task.detachedAt ? "Source line removed" : "Note"}</span>}
           {task.repeat && <span><Icon name="restart" size={12} />Repeats</span>}
-          {task.done && task.updatedByName ? <span>Done by {task.updatedByName}</span> : task.doneAt ? <span>{doneTimeOf(task.doneAt, offsetMinutes)}</span> : null}
         </span>}
       </button>
     </div>

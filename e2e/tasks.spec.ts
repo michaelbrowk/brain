@@ -1228,17 +1228,35 @@ test.describe("completion day fixtures", () => {
     await expect(linkedDialog.getByText("The title comes from its source note.", { exact: true })).toHaveCount(0);
     await linkedDialog.getByRole("button", { name: "Close task", exact: true }).click();
 
-    await completeFromTasks(page, "Finished today", ids[0]);
     const workspace = page.getByTestId("tasks-surface");
     const inline = workspace.locator(`.tasks-workspace-group [data-row-key="${ids[0]}"]`);
+    const inlineTitles = workspace.locator(".tasks-workspace-group .tasks-compact-title");
+    await expect(inlineTitles).toHaveText(["Finished today", "Still to do", "Linked title"]);
+    const rowFrames = () => workspace.locator(".tasks-workspace-group [data-row-key]").evaluateAll((rows) => rows.map((row) => {
+      const bounds = row.getBoundingClientRect();
+      return { key: row.getAttribute("data-row-key"), y: bounds.y, height: bounds.height, metadata: row.querySelector(".tasks-compact-meta")?.textContent ?? null };
+    }));
+    const beforeCompletion = await rowFrames();
+    await expect(inline.locator(".tasks-compact-meta")).toHaveCount(0);
+    const [completion] = await Promise.all([
+      page.waitForResponse((response) => response.url().includes(`/api/tasks/${ids[0]}`) && response.request().method() === "PATCH"),
+      inline.getByRole("checkbox", { name: "Complete Finished today", exact: true }).click(),
+    ]);
+    expect(completion.status()).toBe(200);
     await expect(inline).toHaveAttribute("data-done", "");
+    await expect(inlineTitles).toHaveText(["Finished today", "Still to do", "Linked title"]);
+    await expect.poll(rowFrames).toEqual(beforeCompletion);
+    await expect(inline.locator(".tasks-compact-meta")).toHaveCount(0);
     await expect(inline.locator(".tasks-compact-title")).toHaveCSS("text-decoration-line", "line-through");
     await expect(inline.getByRole("checkbox", { name: "Restore Finished today", exact: true })).toBeChecked();
     await expect(workspace.locator(`.tasks-workspace-completed [data-row-key="${ids[0]}"]`)).toHaveCount(0);
     await page.reload();
     await expect(inline).toHaveAttribute("data-done", "");
+    await expect(inlineTitles).toHaveText(["Finished today", "Still to do", "Linked title"]);
+    await expect.poll(rowFrames).toEqual(beforeCompletion);
+    await expect(inline.locator(".tasks-compact-meta")).toHaveCount(0);
     await page.getByRole("navigation", { name: "Task categories", exact: true }).getByRole("button", { name: category, exact: true }).click();
-    await expect(workspace.locator(".tasks-workspace-group .tasks-compact-title")).toHaveText(["Still to do", "Finished today"]);
+    await expect(inlineTitles).toHaveText(["Finished today", "Still to do"]);
     await page.getByRole("navigation", { name: "Tasks views", exact: true }).getByRole("button", { name: "All tasks", exact: true }).click();
     await expect(inline).toBeVisible();
 

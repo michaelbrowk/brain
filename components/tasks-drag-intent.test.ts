@@ -41,6 +41,15 @@ describe("optimistic task placement", () => {
     const changed = planTaskMove(before, "b", { category: "Work", beforeId: "a", today });
     expect(taskPositionChanged(before, changed.tasks, "b", today)).toBe(true);
   });
+  it("detects a move across a completed sibling even when the open-task order is unchanged", () => {
+    const before = [task("a", { order: "a0" }), task("done", { order: "a1", done: true }), task("b", { order: "a2" })];
+    const moved = planTaskMove(before, "a", { category: "Work", beforeId: "b", today });
+    expect(ids(moved.tasks)).toEqual(["done", "a", "b"]);
+    expect(taskPositionChanged(before, moved.tasks, "a", today)).toBe(true);
+    const unchanged = planTaskMove(before, "a", { category: "Work", beforeId: "done", today });
+    expect(ids(unchanged.tasks)).toEqual(["a", "done", "b"]);
+    expect(taskPositionChanged(before, unchanged.tasks, "a", today)).toBe(false);
+  });
   it("restores failed placement without discarding concurrent text, dates, or completion", () => {
     const before = [task("a", { category: "Personal" }), task("b")];
     const optimistic = planTaskMove(before, "a", { category: "Work", beforeId: "b", today }).tasks;

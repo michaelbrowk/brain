@@ -55,6 +55,50 @@ describe("persistent task placement",()=>{
     expect(store.getTask(linked.id)?.category).toBeUndefined();
     expect(store.pageTasks(page.id)[0].order).toBe(store.getTask(linked.id)?.order);
   });
+  it("retains a completed task's position after another task moves and the store reloads",async()=>{
+    const{root,store}=await notebook();
+    const a=await store.createTask({title:"a",category:"Work",when:today});
+    const b=await store.createTask({title:"b",category:"Work",when:today,body:"Keep completed context"});
+    const c=await store.createTask({title:"c",category:"Work",when:today});
+    const d=await store.createTask({title:"d",category:"Work",when:today});
+    await store.moveTask(d.id,{category:"Work",beforeId:null,today});
+    const rank=store.getTask(b.id)?.order;
+    await store.updateTask(b.id,{done:true});
+    expect(store.getTask(b.id)?.order).toBe(rank);
+    const completed=await store.readTaskDetails(b.id);
+    const allIds=(instance:Store)=>instance.allTaskViews().sort((left,right)=>compareTaskOrder(left,right,today)).map(task=>task.id);
+    expect(allIds(store)).toEqual([a.id,b.id,c.id,d.id]);
+    await store.moveTask(d.id,{category:"Work",beforeId:a.id,today});
+    expect(allIds(store)).toEqual([d.id,a.id,b.id,c.id]);
+    expect((await orderFiles.readTaskOrder(root)).work).toHaveProperty(b.id);
+    const reloaded=new Store(root);await reloaded.init();
+    expect(allIds(reloaded)).toEqual([d.id,a.id,b.id,c.id]);
+    expect(await reloaded.readTaskDetails(b.id)).toEqual({...completed,task:{...completed.task,order:reloaded.getTask(b.id)?.order}});
+    await reloaded.moveTask(d.id,{category:"Work",beforeId:null,today});
+    const again=new Store(root);await again.init();
+    expect(allIds(again)).toEqual([a.id,b.id,c.id,d.id]);
+    expect(again.getTask(b.id)).toMatchObject({done:true,doneAt:completed.task.doneAt,order:expect.any(String)});
+  });
+  it.each(["Work","Other"])("restores an exact position before a completed task after moving to %s and reloading",async(category)=>{
+    const{root,store}=await notebook();
+    const a=await store.createTask({title:"a",category:"Work",when:today});
+    const b=await store.createTask({title:"b",category:"Work",when:today,body:"Keep completed context"});
+    const c=await store.createTask({title:"c",category:"Work",when:today});
+    const other=await store.createTask({title:"other",category:"Other",when:today});
+    await store.moveTask(c.id,{category:"Work",beforeId:null,today});
+    await store.updateTask(b.id,{done:true});
+    const completed=await store.readTaskDetails(b.id);
+    const allWorkIds=(instance:Store)=>instance.allTaskViews().filter(task=>task.category==="Work").sort((left,right)=>compareTaskOrder(left,right,today)).map(task=>task.id);
+    expect(allWorkIds(store)).toEqual([a.id,b.id,c.id]);
+    await store.moveTask(a.id,{category,beforeId:null,today});
+    const moved=new Store(root);await moved.init();
+    expect(allWorkIds(moved)).toEqual(category==="Work"?[b.id,c.id,a.id]:[b.id,c.id]);
+    await moved.moveTask(a.id,{category:"Work",beforeId:b.id,today});
+    const restored=new Store(root);await restored.init();
+    expect(allWorkIds(restored)).toEqual([a.id,b.id,c.id]);
+    expect(await restored.readTaskDetails(b.id)).toEqual(completed);
+    expect(ids(restored,"Other")).toEqual([other.id]);
+  });
   it("keeps original membership/order when the category write fails, and retries safely",async()=>{
     const{root,store}=await notebook();
     const a=await store.createTask({title:"a",category:"Work",body:"Keep"});
@@ -79,7 +123,7 @@ describe("persistent task placement",()=>{
     await expect(store.moveTask(task.id,{category:null,beforeId:null,today})).rejects.toThrow("disk failed");
     expect(store.getTask(task.id)).toEqual(task);
   });
-  it("rejects hidden/completed sources and missing, completed or foreign anchors before writing",async()=>{
+  it("rejects hidden/completed sources and missing, hidden or foreign anchors before writing",async()=>{
     const{store,root}=await notebook();const page=await store.createPage(null,"Hidden");await store.writePage(page.id,"- [ ] Hidden\n");
     const text=normalizeTaskText("Hidden");
     const hidden=await store.createTask({title:text,page:page.id,anchor:{text,hash:hashTaskText(text),ordinal:0,line:0}});
@@ -88,7 +132,7 @@ describe("persistent task placement",()=>{
     const done=await store.createTask({title:"Done",category:"Work"});await store.updateTask(done.id,{done:true});
     const foreign=await store.createTask({title:"Foreign",category:"Other"});
     for(const id of [hidden.id,done.id]) await expect(store.moveTask(id,{category:"Work",beforeId:null,today})).rejects.toMatchObject({name:"TaskValidationError"});
-    for(const beforeId of ["missing",done.id,foreign.id,hidden.id,open.id]) await expect(store.moveTask(open.id,{category:"Work",beforeId,today})).rejects.toMatchObject({name:"TaskValidationError"});
+    for(const beforeId of ["missing",foreign.id,hidden.id,open.id]) await expect(store.moveTask(open.id,{category:"Work",beforeId,today})).rejects.toMatchObject({name:"TaskValidationError"});
     expect(await orderFiles.readTaskOrder(root)).toEqual({});
   });
   it("serializes moves and preserves the category identity rather than its casing",async()=>{

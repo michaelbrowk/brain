@@ -146,21 +146,59 @@ describe("completion, history and keyboard", () => {
     ["Upcoming", "upcoming", "2026-09-14"], ["Someday", "someday", "someday"],
     ["All tasks", "all", TODAY], ["category", { category: "Work" }, TODAY],
   ] as const)("keeps a completed task inline in %s through a same-day reload", async (_label, list, when) => {
-    await mount([task("a", { category: " work ", when, order: "a0" }), task("b", { category: "Work", when, order: "a1" })], { list });
+    await mount([task("a", { category: " work ", when, order: "a1" }), task("b", { category: "Work", when, order: "a0" }), task("c", { category: "Work", when, order: "a2" })], { list });
+    expect(rowTitles()).toEqual(["b", "a", "c"]);
     await click(el('[data-row-key="a"] [role="checkbox"]'));
-    expect(rowTitles()).toEqual(["b", "a"]);
+    expect(rowTitles()).toEqual(["b", "a", "c"]);
     expect(el('[data-row-key="a"]').hasAttribute("data-done")).toBe(true);
     expect(el('[data-row-key="a"] [role="checkbox"]').getAttribute("aria-checked")).toBe("true");
     expect(el(".tasks-completed-toggle")).toBeNull();
     const saved = [...records];
     await act(async () => root.render(null)); resetTasksStore();
     await mount(saved, { list });
-    expect(rowTitles()).toEqual(["b", "a"]);
+    expect(rowTitles()).toEqual(["b", "a", "c"]);
     expect(el('[data-row-key="a"]').hasAttribute("data-done")).toBe(true);
     await click(el('[data-row-key="a"] [role="checkbox"]'));
     expect(patches().at(-1)?.body).toEqual({ done: false });
-    expect(rowTitles()).toEqual(["a", "b"]);
+    expect(rowTitles()).toEqual(["b", "a", "c"]);
     expect(el('[data-row-key="a"]').hasAttribute("data-done")).toBe(false);
+  });
+  it.each([undefined, "Misha"])("does not add completion metadata or an empty metadata line (author: %s)", async (updatedByName) => {
+    await mount([task("a", { when: TODAY, updatedByName })]);
+    const metadata = () => host.querySelector('[data-row-key="a"] .tasks-compact-meta');
+    expect(metadata()).toBeNull();
+    await click(el('[data-row-key="a"] [role="checkbox"]'));
+    expect(records[0]).toMatchObject({ done: true, doneAt: NOON.toISOString() });
+    expect(metadata()).toBeNull();
+    expect(host.textContent).not.toContain("Done by");
+    const saved = [...records];
+    await act(async () => root.render(null)); resetTasksStore();
+    await mount(saved);
+    expect(el('[data-row-key="a"]').hasAttribute("data-done")).toBe(true);
+    expect(metadata()).toBeNull();
+    expect(host.textContent).not.toContain("Done by");
+  });
+  it.each([
+    { when: "2026-09-12" },
+    { when: TODAY, deadline: "2026-09-12" },
+    { when: "2026-09-12", deadline: "2026-09-12" },
+  ])("keeps existing overdue metadata text after completion and reload: %j", async (dates) => {
+    await mount([task("a", dates)]);
+    const metadata = () => el('[data-row-key="a"] .tasks-compact-meta');
+    const count = metadata().children.length;
+    const content = metadata().textContent;
+    expect(count).toBeGreaterThan(0);
+    expect(metadata().querySelectorAll("[data-overdue]")).toHaveLength(count);
+    await click(el('[data-row-key="a"] [role="checkbox"]'));
+    expect(metadata().children).toHaveLength(count);
+    expect(metadata().textContent).toBe(content);
+    expect(metadata().querySelectorAll("[data-overdue]")).toHaveLength(0);
+    const saved = [...records];
+    await act(async () => root.render(null)); resetTasksStore();
+    await mount(saved);
+    expect(metadata().children).toHaveLength(count);
+    expect(metadata().textContent).toBe(content);
+    expect(metadata().querySelectorAll("[data-overdue]")).toHaveLength(0);
   });
   it("shows older completions only in Completed and never duplicates an inline completion", async () => {
     await mount([task("open", { when: TODAY }), task("today", { when: TODAY, done: true, doneAt: NOON.toISOString() }), task("yesterday", { when: TODAY, done: true, doneAt: "2026-09-12T12:00:00.000Z" })], { list: "all" });

@@ -85,21 +85,23 @@ export function TasksSurface({ list = null, onSelectList, onToast, refreshToken 
   const navigationCategories = useMemo(() => [...categories, { name: "" }], [categories]);
   const categoryFor = useCallback((name?: string) => categories.find((entry) => taskCategoryKey(entry.name) === taskCategoryKey(name || "")), [categories]);
   const matches = useCallback((task: TaskView) => view.kind === "category" ? taskCategoryKey(task.category || "") === taskCategoryKey(view.category) : view.list === "all" || listOf(task, today, offsetMinutes) === view.list, [view, today, offsetMinutes]);
-  const active = useMemo(() => state.tasks.filter((task) => !task.done && matches(task)).sort((a, b) => {
+  const visible = useMemo(() => state.tasks.filter((task) => (!task.done || listOf(task, today, offsetMinutes) !== "logbook") && matches(task)).sort((a, b) => {
     const late = (task: TaskView) => !!(task.deadline && task.deadline < today || task.when && task.when !== "someday" && task.when < today);
     return Number(late(b)) - Number(late(a)) || a.created.localeCompare(b.created);
-  }), [state.tasks, matches, today]);
+  }), [state.tasks, matches, today, offsetMinutes]);
   const groups = useMemo(() => {
     const result = new Map<string, { name: string; tasks: TaskView[] }>();
-    for (const task of active) { const key = taskCategoryKey(task.category || ""); const group = result.get(key); if (group) group.tasks.push(task); else result.set(key, { name: categoryFor(task.category)?.name || task.category || "No category", tasks: [task] }); }
-    return [...result.entries()].map(([key, group]) => ({ key, ...group, tasks: group.tasks.sort((a, b) => compareTaskOrder(a, b, today)) }));
-  }, [active, categoryFor, today]);
+    for (const task of visible) { const key = taskCategoryKey(task.category || ""); const group = result.get(key); if (group) group.tasks.push(task); else result.set(key, { name: categoryFor(task.category)?.name || task.category || "No category", tasks: [task] }); }
+    return [...result.entries()].map(([key, group]) => ({ key, ...group, tasks: group.tasks.sort((a, b) => Number(a.done) - Number(b.done) || compareTaskOrder(a, b, today)) }));
+  }, [visible, categoryFor, today]);
+  const inlineKeys = useMemo(() => new Set(visible.map((task) => task.id)), [visible]);
   const completed = useMemo(() => logbookRows(state.tasks, today, offsetMinutes).filter((row) => {
+    if (inlineKeys.has(row.key)) return false;
     if (view.kind === "category") return taskCategoryKey(row.task.category || "") === taskCategoryKey(view.category);
     if (view.list === "all" || view.list === "logbook") return true;
     if (view.list === "today") return !!row.task.doneAt && doneDayOf(row.task.doneAt, offsetMinutes) === today;
     return listOf({ ...row.task, done: false }, today, offsetMinutes) === view.list;
-  }), [state.tasks, today, offsetMinutes, view]);
+  }), [state.tasks, today, offsetMinutes, view, inlineKeys]);
   const drawn: TaskRow[] = useMemo(() => [...groups.flatMap((group) => group.tasks).map((task) => ({ key: task.id, task, untickable: true })), ...(!collapsed.completed ? completed : [])], [groups, completed, collapsed.completed]);
 
   const expandDragCategory = useCallback((category: string) => setCollapsed((current) => current[category] ? { ...current, [category]: false } : current), []);
@@ -184,11 +186,12 @@ export function TasksSurface({ list = null, onSelectList, onToast, refreshToken 
       if (event.altKey && event.shiftKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
         const focused = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-row-key]")?.dataset.rowKey : selectedId;
         const group = groups.find((entry) => entry.tasks.some((task) => task.id === focused));
-        if (!group || !focused) return;
+        const siblings = group?.tasks.filter((task) => !task.done) || [];
+        const index = siblings.findIndex((task) => task.id === focused);
+        if (!focused || index < 0) return;
         event.preventDefault();
-        const index = group.tasks.findIndex((task) => task.id === focused);
-        if (event.key === "ArrowUp" && index > 0) void placeTask(focused, { category: group.tasks[index].category || null, beforeId: group.tasks[index - 1].id, today });
-        else if (event.key === "ArrowDown" && index < group.tasks.length - 1) void placeTask(focused, { category: group.tasks[index].category || null, beforeId: group.tasks[index + 2]?.id || null, today });
+        if (event.key === "ArrowUp" && index > 0) void placeTask(focused, { category: siblings[index].category || null, beforeId: siblings[index - 1].id, today });
+        else if (event.key === "ArrowDown" && index < siblings.length - 1) void placeTask(focused, { category: siblings[index].category || null, beforeId: siblings[index + 2]?.id || null, today });
         return;
       }
       if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); const at = rows.findIndex((entry) => entry.key === selectedId); const next = rows[Math.max(0, Math.min(rows.length - 1, at + (event.key === "ArrowDown" ? 1 : -1)))]; if (next) { setSelectedId(next.key); surface.current?.querySelector<HTMLButtonElement>(`[data-row-key="${CSS.escape(next.key)}"] .tasks-compact-open`)?.focus(); } return; }
@@ -276,7 +279,7 @@ export function TasksSurface({ list = null, onSelectList, onToast, refreshToken 
   async function remove() { if (!editor?.task) return; const id = editor.task.id; await deleteTask(id); mutateTasks((entries) => entries.filter((entry) => entry.id !== id)); onToast?.("Task deleted"); }
   function row(entry: TaskRow, finished = false, preview = false) { return <TasksCompactRow preview={preview} key={entry.key} task={entry.task} rowKey={entry.key} historic={!entry.untickable} selected={selectedId === entry.key} today={today} offsetMinutes={offsetMinutes} reduce={reduce} pageTitle={entry.task.page ? pageTitleOf?.(entry.task.page) || pages.find((page) => page.id === entry.task.page)?.title : undefined} categoryIcon={categoryFor(entry.task.category)?.icon} showCategory={finished && view.kind !== "category"} showPlan={view.kind === "category" || view.list !== "today"} onOpen={openTask} onSelect={setSelectedId} onComplete={actions.completeTask} onReopen={actions.reopenTask} onOpenPage={onOpenPage} onDelete={requestDeleteTask} onContextActionSettled={restoreTaskContextFocus} />; }
   const label = view.kind === "category" ? categoryFor(view.category)?.name || view.category || "No category" : viewLabel(view);
-  return <TasksDragProvider tasks={groups.flatMap((group) => group.tasks)} disabled={movePending || categoryPending || !!editor || !!confirmation || state.loading || !!state.error} onActiveChange={setDragging} onExpandCategory={expandDragCategory} onMove={(id, intent) => { void placeTask(id, { category: intent.category, beforeId: intent.beforeId, today }); }} renderOverlay={(task) => <ul>{row({ key: task.id, task, untickable: true }, false, true)}</ul>}><section ref={surface} aria-label="Tasks" data-testid="tasks-surface" data-dragging={dragging ? "" : undefined} className="brain-tasks tasks-workspace">
+  return <TasksDragProvider tasks={groups.flatMap((group) => group.tasks).filter((task) => !task.done)} disabled={movePending || categoryPending || !!editor || !!confirmation || state.loading || !!state.error} onActiveChange={setDragging} onExpandCategory={expandDragCategory} onMove={(id, intent) => { void placeTask(id, { category: intent.category, beforeId: intent.beforeId, today }); }} renderOverlay={(task) => <ul>{row({ key: task.id, task, untickable: true }, false, true)}</ul>}><section ref={surface} aria-label="Tasks" data-testid="tasks-surface" data-dragging={dragging ? "" : undefined} className="brain-tasks tasks-workspace">
     <span className="sr-only" role="status" aria-live="polite">{moveAnnouncement}</span>
     <TasksRail view={view} categories={navigationCategories} onSelect={(next) => onSelectList?.(next)} onNew={() => openTask()} categoryActions={categoryActions} />
     <div className="tasks-narrow-navigation"><TasksNavigation view={view} categories={navigationCategories} onSelect={(next) => onSelectList?.(next)} categoryActions={categoryActions} /></div>

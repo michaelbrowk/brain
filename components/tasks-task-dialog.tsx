@@ -126,7 +126,6 @@ export function TasksTaskDialog({ task, category: initialCategory, when: initial
       </div>
       <DialogBody className="tasks-detail-body"><form id={formId} onSubmit={(event) => void submit(event)} noValidate>
         <fieldset disabled={pending || loading}>
-          {linked && <p className="tasks-detail-hint text-caption">The title comes from its source note.</p>}
           <div className="tasks-detail-properties">
             <div><span className="tasks-detail-label text-table">Category</span><TasksCategoryPicker value={category} categories={categories} onSelect={setCategory} onCreate={onCreateCategory} onOpenChange={(open) => layer("category", open)} /></div>
             <div><span className="tasks-detail-label text-table">When</span><TasksWhenPicker modal value={when} today={today} onPick={(value) => { setWhen(value); if (value.when === "someday") setDeadline(null); }} onOpenChange={(open) => layer("when", open)} ariaLabel="When" trigger={<Button type="button" variant="quiet" className="tasks-detail-property" aria-label={`When: ${whenLabel(when)}`}><Icon name="calendar-date" size={16} /><span>{whenLabel(when)}</span><Icon name="alt-arrow-down" size={14} /></Button>} /></div>

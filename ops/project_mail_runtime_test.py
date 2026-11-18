@@ -11,6 +11,7 @@ import unittest
 from project_mail_runtime import (
     LEGACY_REQUIRED_DIRECTORIES,
     LEGACY_REQUIRED_FILES,
+    MAIL_READER_RUNTIME_FILES,
     REQUIRED_DIRECTORIES,
     REQUIRED_FILES,
     RECIPIENT_RUNTIME_FILES,
@@ -273,13 +274,19 @@ class ProjectMailRuntimeTest(unittest.TestCase):
                 )
 
     def test_projects_previous_release_without_a_remote_image_runtime(self):
+        self._check_legacy_projection(REMOTE_IMAGE_RUNTIME_FILES)
+
+    def test_projects_previous_release_without_the_html_reader_helpers(self):
+        self._check_legacy_projection(MAIL_READER_RUNTIME_FILES)
+
+    def _check_legacy_projection(self, absent):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             owner = os.geteuid()
             group = os.getegid()
             source = self._source(root, owner, group)
             source.chmod(0o700)
-            for relative in REMOTE_IMAGE_RUNTIME_FILES:
+            for relative in absent:
                 parent = source / relative.parent
                 parent.chmod(0o700)
                 (source / relative).unlink()
@@ -303,7 +310,7 @@ class ProjectMailRuntimeTest(unittest.TestCase):
             }
             self.assertEqual(
                 projected,
-                set(REQUIRED_FILES) - set(REMOTE_IMAGE_RUNTIME_FILES),
+                set(REQUIRED_FILES) - set(absent),
             )
 
     def test_rejects_a_partial_remote_image_runtime(self):

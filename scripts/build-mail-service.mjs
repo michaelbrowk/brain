@@ -61,6 +61,9 @@ const mimeParserBundle = await build({
   target: "node22",
   format: "cjs",
   sourcemap: false,
+  // Keep the isolated parser, including its stylesheet reader, within the
+  // service's existing 8 MiB installation budget while retaining symbol names.
+  minifyWhitespace: true,
   legalComments: "none",
   logLevel: "info",
   metafile: true,

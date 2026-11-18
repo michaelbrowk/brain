@@ -296,13 +296,15 @@ export function validateMailThreadMutationInput(
  */
 export function validateMailThreadBatchInput(value: unknown): MailThreadBatchInput {
   const read = isPlainRecord(value) && Object.hasOwn(value, "read");
+  const reportOutside = isPlainRecord(value) && Object.hasOwn(value, "reportAlreadyOutside");
   if (
     !isRecordWithExactFields(
       value,
-      read ? ["accountId", "archive", "read", "threads"] : ["accountId", "archive", "threads"],
+      ["accountId", "archive", "threads", ...(read ? ["read"] : []), ...(reportOutside ? ["reportAlreadyOutside"] : [])],
     ) ||
     value.archive !== true ||
     (read && value.read !== true) ||
+    (reportOutside && value.reportAlreadyOutside !== true) ||
     !Array.isArray(value.threads) ||
     value.threads.length < 1 ||
     value.threads.length > MAIL_THREAD_BATCH_MAX
@@ -336,6 +338,7 @@ export function validateMailThreadBatchInput(value: unknown): MailThreadBatchInp
     threads: Object.freeze(threads),
     archive: true as const,
     ...(read ? { read: true as const } : {}),
+    ...(reportOutside ? { reportAlreadyOutside: true as const } : {}),
   });
 }
 
@@ -387,8 +390,8 @@ export function validateMailThreadBatchResult(
       }
       return Object.freeze({ threadId, status: "renewed", thread: ownThread(entry.thread) });
     }
-    if (entry.status === "stale" && isRecordWithExactFields(entry, ["status", "threadId"])) {
-      return Object.freeze({ threadId, status: "stale" });
+    if ((entry.status === "stale" || entry.status === "already_outside") && isRecordWithExactFields(entry, ["status", "threadId"])) {
+      return Object.freeze({ threadId, status: entry.status });
     }
     if (
       entry.status === "failed" &&

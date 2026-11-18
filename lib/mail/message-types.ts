@@ -306,6 +306,8 @@ export interface MailThreadBatchInput {
   readonly threads: readonly MailThreadBatchPress[];
   readonly archive: true;
   readonly read?: true;
+  /** Older strict clients receive stale for a row already outside the Inbox. */
+  readonly reportAlreadyOutside?: true;
 }
 
 /**
@@ -314,7 +316,8 @@ export interface MailThreadBatchInput {
  * `renewed` is a thread that got mail the press did not see: it is in the
  * Inbox as the new mail left it, nothing taken off it, and `thread` is the
  * copy that shows the new mail. `stale` is a thread the account no longer
- * finds where it was. `failed` was not done, or not reached before the
+ * finds where it was. An opted-in caller receives `already_outside` for
+ * a thread confirmed missing or outside the Inbox. `failed` was not done, or not reached before the
  * deadline, and says why.
  */
 export type MailThreadBatchItem =
@@ -330,6 +333,7 @@ export type MailThreadBatchItem =
       readonly thread: MailThreadListItem;
     }
   | { readonly threadId: string; readonly status: "stale" }
+  | { readonly threadId: string; readonly status: "already_outside" }
   | {
       readonly threadId: string;
       readonly status: "failed";

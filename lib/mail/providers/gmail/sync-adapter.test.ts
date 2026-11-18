@@ -11,6 +11,18 @@ import {
 const ACCOUNT_ID = "account-a11111111111111111111111111111111";
 
 describe("Gmail sync adapter projection", () => {
+  it("recognizes a missing thread when it is opened or archived", async () => {
+    const missing = new GmailApiError("gmail_not_found");
+    const client = {
+      getThread: vi.fn().mockRejectedValue(missing),
+      archiveThread: vi.fn().mockRejectedValue(missing),
+    } as unknown as GmailApiClient;
+    const adapter = new GmailMailSyncAdapter(ACCOUNT_ID, client);
+    const signal = new AbortController().signal;
+    await expect(adapter.getThread("gone", signal)).resolves.toBeNull();
+    await expect(adapter.archiveThread("gone", signal)).rejects.toMatchObject({ code: "mail_provider_thread_stale" });
+  });
+
   it("projects bounded reader text and hidden RFC reply metadata", () => {
     const message = messageFixture();
     const dto = gmailMessageToDto(ACCOUNT_ID, message);

@@ -1510,6 +1510,37 @@ test("@mobile Mail moves from list to reader and compose without zoom triggers",
   expect(sendBottom).toBeLessThanOrEqual(120);
 });
 
+for (const viewport of ["desktop", "@mobile"]) {
+  test(`${viewport} @release an email button opens its destination and leaves the message open`, async ({
+    page, context,
+  }) => {
+    const destination = "https://airline.example.test/boarding-pass";
+    await context.route(destination, (route) => route.fulfill({
+      contentType: "text/html", body: "<title>Test boarding pass</title>",
+    }));
+    await login(page);
+    await installMailRoutes(page, {
+      textBody: null,
+      htmlBody: `<a data-brain-href="${destination}"><span>View boarding pass</span></a>`,
+    });
+    await page.goto("/mail");
+    await enterSingleAccount(page);
+    await page.getByText(thread.subject, { exact: true }).click();
+    const frame = page.frameLocator('iframe[title="Sanitized HTML message"]');
+    const link = frame.getByRole("link", { name: "View boarding pass" });
+    await expect(link).toBeVisible();
+    const opened = context.waitForEvent("page");
+    if (viewport === "desktop") await link.press("Enter");
+    else await link.getByText("View boarding pass").tap();
+    const target = await opened;
+    await expect(target).toHaveURL(destination);
+    await expect(target).toHaveTitle("Test boarding pass");
+    expect(await target.evaluate(() => [window.opener, document.referrer])).toEqual([null, ""]);
+    await target.close();
+    await expect(link).toBeVisible();
+  });
+}
+
 test("@mobile HTML mail grows with its content without nested scrollbars", async ({
   page,
 }) => {

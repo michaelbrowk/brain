@@ -110,10 +110,16 @@ export function createMailHtmlDocument(input: {
   readonly cidSources: ReadonlyMap<string, string>;
   readonly remoteSources?: ReadonlyMap<string, string>;
 }): string {
+  // The sanitizer writes this marker itself. Original attributes are never
+  // copied into it. Decode only its HTML escaping and keep it out of the body.
+  const marker = /^<span data-brain-mail-css="([^"]*)"><\/span>/.exec(input.sanitizedHtml);
+  const senderCss = (marker?.[1] ?? "").replaceAll("&quot;", '"').replaceAll("&#39;", "'")
+    .replaceAll("&gt;", ">").replaceAll("&amp;", "&");
+  const body = marker ? input.sanitizedHtml.slice(marker[0].length) : input.sanitizedHtml;
   const html = capResponsiveImagesAtDeclaredWidth(
     bindVerifiedRemoteImages(
       bindVerifiedCidImages(
-        freePicturesFromNarrowerBoxes(input.sanitizedHtml),
+        freePicturesFromNarrowerBoxes(body),
         input.attachments,
         input.cidSources,
       ),
@@ -143,6 +149,7 @@ export function createMailHtmlDocument(input: {
     // `container-type` makes the root the query container `100cqw` below reads.
     `#brain-mail-content{box-sizing:border-box;width:100%;padding:${READER_GUTTER_PX}px;overflow-x:auto;overflow-wrap:anywhere;container-type:inline-size}`,
     "#brain-mail-content *{box-sizing:border-box}",
+    ":where(a[role=link]){color:LinkText;text-decoration:underline;cursor:pointer}",
     "#brain-mail-content div,#brain-mail-content p,#brain-mail-content blockquote,#brain-mail-content h1,#brain-mail-content h2,#brain-mail-content h3,#brain-mail-content h4,#brain-mail-content h5,#brain-mail-content h6,#brain-mail-content ul,#brain-mail-content ol{max-width:100%!important}",
     // A cell is a column, not prose. `anywhere` also lowers a column's
     // min-content to a single glyph, so a short label next to a greedy
@@ -193,7 +200,7 @@ export function createMailHtmlDocument(input: {
     "#brain-mail-content .brain-mail-image-placeholder{display:inline-block;max-width:100%;height:auto;vertical-align:top;background:rgba(128,128,128,.12);background:color-mix(in srgb,currentcolor 7%,transparent)}",
     "#brain-mail-content .brain-mail-image-alt{display:inline-block;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;vertical-align:top}",
   ].join("");
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${escapeAttribute(csp)}"><style>${responsiveStyle}</style></head><body><main id="brain-mail-content">${html}</main></body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${escapeAttribute(csp)}"><style>${responsiveStyle}${senderCss.includes("<") ? "" : senderCss}</style></head><body><main id="brain-mail-content">${html}</main></body></html>`;
 }
 
 /**

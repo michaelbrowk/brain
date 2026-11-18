@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -11,7 +11,7 @@ import type {
 } from "../ports";
 import type { MultiMailAccountStore } from "./account-store";
 import { AtomicMailBlobStore } from "./content-blob-store";
-import { SqliteMailContentCache } from "./content-cache";
+import { MAIL_CONTENT_FORMAT_VERSION, SqliteMailContentCache } from "./content-cache";
 import {
   MailContentWorkError,
   type MailContentWorkInput,
@@ -117,13 +117,88 @@ describe("production mail content runner", () => {
     expect(attachment).toEqual(Buffer.alloc(attachment.length));
   });
 
-  it("does not publish remote-image work when the clean plain alternative wins", async () => {
+  it.each(["available offline", "missing", "corrupt"] as const)(
+    "rebuilds an older message whose original is %s",
+    async (original) => {
+      const fixture = await createFixture(MAIL_CONTENT_FORMAT_VERSION - 1);
+      const raw = Buffer.from("Subject: cached invitation\r\n\r\nPlease join us");
+      const rawMime = descriptor(raw);
+      await fixture.cache.stageBlob(fixture.input.lease, rawMime, chunks(raw), fixture.now);
+      await fixture.cache.commitReady({
+        lease: fixture.input.lease,
+        rawMime,
+        text: null,
+        sanitizedHtml: null,
+        attachments: [],
+        now: fixture.now,
+      });
+      await fixture.cache.close();
+      const cache = new SqliteMailContentCache({
+        cacheRoot: fixture.cacheRoot,
+        accountId: ACCOUNT_ID,
+        blobStore: fixture.blobStore,
+      });
+      contentCaches.push(cache);
+      await cache.initialize();
+      await cache.collectGarbage();
+      if (original !== "available offline") await fixture.blobStore.remove(rawMime);
+      if (original === "corrupt") {
+        await writeFile(
+          path.join(fixture.blobStore.directoryPath, rawMime.sha256),
+          Buffer.alloc(raw.length),
+          { mode: 0o400 },
+        );
+      }
+      const claim = await cache.claim(MESSAGE_ID, fixture.now);
+      if (claim.kind !== "claimed") throw new Error("expected migration claim");
+      const create = vi.fn<MailContentSourceFactoryPort["create"]>((input) => {
+        if (original === "available offline") throw new Error("provider is offline");
+        return sourceFactoryFor(raw).create(input);
+      });
+      const text = Buffer.from("Please join us");
+      const renderedText = descriptor(text);
+      const runner = new ProductionMailContentWorkRunner({
+        sourceFactory: { create },
+        parser: {
+          isolation: { networkAccess: false, credentialAccess: false, sandboxVersion: 1 },
+          async parse(request) {
+            expect(await collect(request.rawMimeStream)).toEqual(raw);
+            return {
+              kind: "parsed",
+              artifacts: {
+                text: { descriptor: renderedText, data: text },
+                sanitizedHtml: null,
+                remoteImages: [],
+                attachments: [],
+              },
+            };
+          },
+        },
+        now: () => fixture.now,
+      });
+      await runner.run(
+        { ...fixture.input, cache, lease: claim.lease, deadlineAt: claim.lease.expiresAt },
+        new AbortController().signal,
+      );
+      expect(create).toHaveBeenCalledTimes(original === "available offline" ? 0 : 1);
+      await expect(cache.read(MESSAGE_ID)).resolves.toMatchObject({
+        contentFormatVersion: MAIL_CONTENT_FORMAT_VERSION,
+        rawMime,
+        text: renderedText,
+      });
+    },
+  );
+
+  it.each([
+    ["a damaged newsletter", "<p>Damaged \ufffd newsletter</p>", false],
+    ["an image-only ticket", '<span data-brain-mail-css=".bm-c-ticket{width:120px}"></span>', true],
+  ] as const)("queues remote images only when the reader selects %s", async (_name, prefix, selectHtml) => {
     const fixture = await createFixture();
     const raw = Buffer.from("raw MIME");
     const text = Buffer.from("Clean readable plain message");
     const remoteImageId = `remote-image-a${"7".repeat(32)}`;
     const html = Buffer.from(
-      `<p>Damaged \ufffd newsletter</p><img data-brain-remote-image="${remoteImageId}">`,
+      `${prefix}<img data-brain-remote-image="${remoteImageId}">`,
     );
     const runner = new ProductionMailContentWorkRunner({
       sourceFactory: sourceFactoryFor(raw),
@@ -146,9 +221,9 @@ describe("production mail content runner", () => {
 
     await runner.run(fixture.input, new AbortController().signal);
 
-    await expect(
-      fixture.cache.inspectRemoteImage(remoteImageId, fixture.now),
-    ).resolves.toBeNull();
+    const image = await fixture.cache.inspectRemoteImage(remoteImageId, fixture.now);
+    if (selectHtml) expect(image).toMatchObject({ state: "pending" });
+    else expect(image).toBeNull();
     await expect(fixture.cache.inspect(MESSAGE_ID)).resolves.toMatchObject({
       kind: "ready",
     });
@@ -508,7 +583,8 @@ describe("production mail content runner", () => {
   });
 });
 
-async function createFixture(): Promise<{
+async function createFixture(contentFormatVersion = MAIL_CONTENT_FORMAT_VERSION): Promise<{
+  readonly cacheRoot: string;
   readonly cache: SqliteMailContentCache;
   readonly blobStore: AtomicMailBlobStore;
   readonly input: MailContentWorkInput;
@@ -526,13 +602,14 @@ async function createFixture(): Promise<{
   messages.completeInitial(generation, 200);
   const blobStore = new AtomicMailBlobStore({ cacheRoot, accountId: ACCOUNT_ID });
   blobStores.push(blobStore);
-  const cache = new SqliteMailContentCache({ cacheRoot, accountId: ACCOUNT_ID, blobStore });
+  const cache = new SqliteMailContentCache({ cacheRoot, accountId: ACCOUNT_ID, blobStore, contentFormatVersion });
   contentCaches.push(cache);
   await cache.initialize();
   const now = Date.now();
   const claim = await cache.claim(MESSAGE_ID, now);
   if (claim.kind !== "claimed") throw new Error("content lease was not claimed");
   return {
+    cacheRoot,
     cache,
     blobStore,
     now,

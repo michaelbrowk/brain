@@ -395,7 +395,8 @@ describe("account mail message service", () => {
 
     await expect(
       fixture.service.updateThread(input, new AbortController().signal),
-    ).rejects.toMatchObject({ code: "mail_provider_response_invalid" });
+    ).rejects.toMatchObject({ code: "mail_provider_thread_stale" });
+    expect(fixture.cache.getThread("thread-a")).toBeNull();
     expect(replace).not.toHaveBeenCalled();
 
     await expect(
@@ -1743,7 +1744,7 @@ describe("account mail message service batch archive", () => {
     fixture.cache.close();
   });
 
-  it("writes no change record when nothing in the batch moved", async () => {
+  it("removes a confirmed missing thread from the Inbox and publishes the repair", async () => {
     const changes: MailServiceChange[] = [];
     const fixture = await seeded(
       {
@@ -1760,7 +1761,79 @@ describe("account mail message service batch archive", () => {
       signal(),
     );
     expect(result.results.map((item) => item.status)).toEqual(["renewed", "stale"]);
-    expect(changes).toEqual([]);
+    expect(changes).toHaveLength(1);
+    expect((await fixture.service.listThreads({ accountId: ACCOUNT_ID, limit: 20 })).items
+      .map(item => item.threadId)).toEqual(["thread-a"]);
+    fixture.cache.close();
+  });
+
+  it.each([[32, 95], [0, 2]])("repairs Inbox after %i archived and %i stale in a section", async (moved, missing) => {
+    const ids = Array.from({ length: moved + missing }, (_, i) => `thread-${i}`);
+    const gone = new Set(ids.slice(moved));
+    const getThread = vi.fn(async () => null);
+    const fixture = await seeded({
+      archiveThreads: async input => new Map(input.threads.map(({ threadId }) => [
+        threadId, gone.has(threadId)
+          ? { status: "stale", resolution: "missing" } as const
+          : { status: "done", thread: archivedFixture(threadId, false), markedRead: false } as const,
+      ])),
+      getThread,
+    }, []);
+    for (const id of ids) fixture.cache.replaceActiveThread(threadFixture(id, 1000));
+    for (let i = 0; i < ids.length; i += 50) {
+      const chunk = ids.slice(i, i + 50);
+      const result = await fixture.service.archiveThreads({
+        accountId: ACCOUNT_ID, archive: true, reportAlreadyOutside: true, threads: pressed(chunk),
+      }, signal());
+      expect(result.results.map(item => item.status)).toEqual(chunk.map(id => gone.has(id) ? "already_outside" : "done"));
+    }
+    expect(getThread).not.toHaveBeenCalled();
+    expect((await fixture.service.listThreads({ accountId: ACCOUNT_ID, limit: 100 })).items).toEqual([]);
+    fixture.cache.close();
+  });
+
+  it("keeps the repaired Inbox and new replies after publishing a partially built snapshot", async () => {
+    const ids = ["archived", "outside", "missing", "reply", "uncertain", "rekeyed"];
+    const fixture = await seeded({
+      archiveThreads: async () => new Map<string, MailProviderBatchOutcome>([
+        ["archived", { status: "applied", messageIds: ["message-archived"], markedRead: true }],
+        ["outside", { status: "stale" }], ["missing", { status: "stale", resolution: "missing" }],
+        ["reply", { status: "stale" }], ["uncertain", { status: "stale" }],
+        ["rekeyed", { status: "stale", resolution: "invalidated" }],
+      ]),
+      getThread: async id => id === "outside" ? archivedFixture(id, false)
+        : threadFixture(id, id === "reply" ? 2000 : 1000),
+    }, ids);
+    const generation = fixture.cache.beginInitial("200");
+    fixture.cache.putInitialPage(generation, ids.map(id => threadFixture(id, 1000)), null, "next");
+    const answer = await fixture.service.archiveThreads({
+      accountId: ACCOUNT_ID, archive: true, read: true, reportAlreadyOutside: true, threads: pressed(ids),
+    }, signal());
+    expect(answer.results.map(item => item.status)).toEqual([
+      "done", "already_outside", "already_outside", "renewed", "stale", "stale",
+    ]);
+    const inbox = () => fixture.cache.listThreads({ limit: 10 }).items.map(t => [t.threadId, t.lastMessageAt]);
+    expect(inbox()).toEqual([["reply", 2000], ["uncertain", 1000]]);
+    fixture.cache.putInitialPage(generation, [], "next", null);
+    fixture.cache.completeInitial(generation, 3000);
+    expect(inbox()).toEqual([["reply", 2000], ["uncertain", 1000]]);
+    fixture.cache.close();
+  });
+
+  it("retains an Inbox reply on stale read-back and keeps cached rows on a transport error", async () => {
+    const fixture = await seeded({
+      archiveThreads: async input => new Map(input.threads.map(({ threadId }) => [threadId, { status: "stale" }])),
+      getThread: async threadId => {
+        if (threadId === "thread-b") throw new MailProviderSyncError("mail_provider_unavailable");
+        return threadFixture(threadId, 2000);
+      },
+    }, ["thread-a", "thread-b"]);
+    const result = await fixture.service.archiveThreads({
+      accountId: ACCOUNT_ID, archive: true, threads: pressed(["thread-a", "thread-b"]),
+    }, signal());
+    expect(result.results.map(item => item.status)).toEqual(["renewed", "failed"]);
+    const rows = (await fixture.service.listThreads({ accountId: ACCOUNT_ID, limit: 5 })).items;
+    expect(rows.map(row => [row.threadId, row.lastMessageAt])).toEqual([["thread-a",2000],["thread-b",1000]]);
     fixture.cache.close();
   });
 

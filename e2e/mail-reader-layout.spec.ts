@@ -39,6 +39,34 @@ function readerDocument(emailHtml: string): string {
 }
 
 type CellMetrics = { readonly width: number; readonly lines: number };
+
+test("@release newsletter columns keep their styling and stack on a phone", async ({ page }) => {
+  const documentHtml = readerDocument(`<html><head><style>
+    .column { background-color:#e5f1f2; padding:12px }
+    @media (max-width:420px) { .column { display:block; width:100% } }
+  </style></head><body><div hidden>Inbox preview only</div>
+    <table width="100%"><tr><td class="column">Departure</td><td class="column">Arrival</td></tr></table>
+  </body></html>`);
+  for (const width of [600, 360]) {
+    await page.setViewportSize({ width, height: 700 });
+    await page.setContent(documentHtml);
+    await expect(page.getByText("Inbox preview only")).toBeHidden();
+    const first = page.getByRole("cell", { name: "Departure" });
+    const second = page.getByRole("cell", { name: "Arrival" });
+    await expect(first).toHaveCSS("background-color", "rgb(229, 241, 242)");
+    const a = await first.boundingBox();
+    const b = await second.boundingBox();
+    expect(a).not.toBeNull();
+    expect(b).not.toBeNull();
+    if (width === 600) {
+      expect(b!.y).toBeCloseTo(a!.y);
+      expect(b!.x).toBeGreaterThan(a!.x);
+    } else {
+      expect(b!.x).toBeCloseTo(a!.x);
+      expect(b!.y).toBeGreaterThanOrEqual(a!.y + a!.height - 1);
+    }
+  }
+});
 type FrameMetrics = {
   readonly cells: Record<string, CellMetrics | null>;
   readonly spacerGapPx: number | null;

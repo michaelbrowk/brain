@@ -5,7 +5,7 @@ import {
   type PublicMailAccountV3,
 } from "@/lib/mail/brain-mail-client";
 import type { MailThreadMutationInput } from "@/lib/mail/message-types";
-import { sanitizeSnippet } from "@/lib/mail/reader-content";
+import { textFromSanitizedHtml } from "@/lib/mail/reader-content";
 import {
   decodeSearchCursor,
   encodeSearchCursor,
@@ -87,27 +87,6 @@ function mcpAccount(account: PublicMailAccountV3) {
     canSend: account.capabilities.send,
     ...(sendBlockedReason === null ? {} : { sendBlockedReason }),
   };
-}
-
-/** The words in an HTML-only message, for the one shape the service's own
- *  extraction misses: an HTML part nested inside a multipart container with
- *  no text sibling. `html` here is already sanitizer output handed back by
- *  the client, so stripping its tags cannot expose anything active. Block
- *  boundaries become line breaks first, so paragraphs stay apart rather than
- *  running together, and each line is cleaned the way a snippet is: entities
- *  decoded, zero-width marks and image markers dropped. The markup itself is
- *  never in the answer. */
-function textFromSanitizedHtml(html: string): string | null {
-  const withLineBreaks = html.replace(
-    /<\/?(?:p|div|br|li|tr|h[1-6]|blockquote)\b[^>]*>/gi,
-    "\n",
-  );
-  const lines = withLineBreaks
-    .replace(/<[^>]*>/g, " ")
-    .split("\n")
-    .map((line) => sanitizeSnippet(line))
-    .filter((line) => line.length > 0);
-  return lines.length === 0 ? null : lines.join("\n");
 }
 
 const sleep = (ms: number) =>

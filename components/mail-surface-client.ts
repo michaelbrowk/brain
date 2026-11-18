@@ -29,6 +29,7 @@ import type {
 } from "@/lib/mail/content-types";
 import type { MailSendAttachment } from "@/lib/mail/send-attachment-codec";
 import {
+  MAIL_BATCH_OUTCOME_HEADER,
   MAIL_THREAD_STATE_CONTRACT_HEADER,
   MAIL_THREAD_STATE_CONTRACT_VALUE,
 } from "@/lib/mail/thread-contract";
@@ -586,6 +587,7 @@ export const defaultMailSurfaceClient: MailSurfaceClient = {
         headers: {
           "Content-Type": "application/json",
           ...mailThreadStateHeaders(),
+          [MAIL_BATCH_OUTCOME_HEADER]: "2",
         },
         body: JSON.stringify(input),
         signal,
@@ -1731,8 +1733,8 @@ function readThreadBatchResult(
     if (isExactRecord(entry, ["status", "thread", "threadId"]) && entry.status === "renewed") {
       return { threadId, status: "renewed", thread: ownThread(entry.thread) };
     }
-    if (isExactRecord(entry, ["status", "threadId"]) && entry.status === "stale") {
-      return { threadId, status: "stale" };
+    if (isExactRecord(entry, ["status", "threadId"]) && (entry.status === "stale" || entry.status === "already_outside")) {
+      return { threadId, status: entry.status };
     }
     if (
       isExactRecord(entry, ["errorCode", "status", "threadId"]) &&

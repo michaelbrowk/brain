@@ -1,3 +1,6 @@
+import type { MailContentAttachmentDto } from "./content-types";
+import { referencedInlineCidAttachments, referencedRemoteImageIds } from "./reader-html";
+
 /**
  * Pure text rules shared by every surface that shows mail text: the list
  * row, the reader's fallback preview, and the header-only preview. A rule
@@ -29,7 +32,6 @@ export function readableSanitizedMailHtml(value: string | null): string | null {
     .replace(/<[^>]*>/g, " ")
     .replace(/&(?:nbsp|zwnj|zwj|#x?0*200[bcdf]|#0*160);/gi, " ")
     .replace(/&(?:amp|lt|gt|quot|#39);/gi, "x")
-    .replace(/\s+/g, " ")
     .trim();
   if (visible.length === 0) {
     return /<img data-brain-(?:cid|remote-image)="[^"]+"/.test(value)
@@ -43,16 +45,18 @@ export function readableSanitizedMailHtml(value: string | null): string | null {
 export function preferSanitizedHtmlAlternative(
   textBody: string | null,
   htmlBody: string | null,
+  attachments: readonly MailContentAttachmentDto[] = [],
 ): boolean {
   if (htmlBody === null) return false;
   const visibleHtmlCharacters = countVisibleHtmlCharacters(htmlBody);
   if (textBody === null) {
-    return (
-      visibleHtmlCharacters > 0 ||
-      /<img data-brain-(?:cid|remote-image)="[^"]+"/.test(htmlBody)
-    );
+    return visibleHtmlCharacters > 0 || /<img data-brain-(?:cid|remote-image)="[^"]+"/.test(htmlBody);
   }
-  if (visibleHtmlCharacters < 8) return false;
+  if (
+    visibleHtmlCharacters < 8 &&
+    referencedRemoteImageIds(htmlBody).length === 0 &&
+    referencedInlineCidAttachments(htmlBody, attachments).length === 0
+  ) return false;
   const htmlReplacementCharacters = countOccurrences(htmlBody, "\ufffd");
   const textReplacementCharacters = countOccurrences(textBody, "\ufffd");
   if (
@@ -129,6 +133,38 @@ export function sanitizeSnippet(raw: string | null | undefined): string {
     .trim();
 }
 
+/** Extract plain text from sanitizer output. A forwarded plain-text copy also
+ * spells out link destinations so buttons still lead somewhere in the copy. */
+export function textFromSanitizedHtml(
+  html: string | null,
+  options: { includeLinkDestinations?: boolean } = {},
+): string | null {
+  if (html === null) return null;
+  let linkTarget = "";
+  const words = html.replace(/<[^>]+>/g, (tag) => {
+    if (/^<\/?(?:p|div|br|li|tr|h[1-6]|blockquote)\b/i.test(tag)) return "\n";
+    if (/^<\/(?:td|th)>$/i.test(tag)) return " ";
+    if (options.includeLinkDestinations) {
+      if (/^<a\b/i.test(tag)) {
+        linkTarget = tag.match(/ data-brain-href="([^"]+)"/)?.[1] ?? "";
+      } else if (tag === "</a>" && linkTarget) {
+        const suffix = ` (${linkTarget})`;
+        linkTarget = "";
+        return suffix;
+      }
+    }
+    return "";
+  });
+  const lines = words.split("\n").map((line) =>
+    expandEntities(line)
+      .replace(IMAGE_MARKER, " ")
+      .replace(/[\u200B-\u200D\uFEFF\u00AD]/g, "")
+      .replace(/\s+/gu, " ")
+      .trim(),
+  ).filter(Boolean);
+  return lines.length === 0 ? null : lines.join("\n");
+}
+
 export function looksLikeEncodedTransferBody(value: string): boolean {
   const tokens = value.match(/=[0-9a-f]{2}/gi)?.length ?? 0;
   if (
@@ -137,7 +173,9 @@ export function looksLikeEncodedTransferBody(value: string): boolean {
   ) {
     return true;
   }
-  const compact = value.replace(/\s/g, "");
+  // MIME can wrap a base64 token onto multiple lines. Spaces between
+  // ordinary words are part of the body and must not turn prose into a token.
+  const compact = value.trim().replace(/[\r\n]/g, "");
   return (
     compact.length >= 256 &&
     /^[a-z0-9+/]+={0,2}$/i.test(compact)

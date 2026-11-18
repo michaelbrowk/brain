@@ -237,7 +237,7 @@ export class GmailMailSyncAdapter implements MailProviderSyncPort {
     try {
       await this.client.markThreadRead(validateProviderId(threadId), read, signal);
     } catch (error) {
-      throw mapGmailError(error);
+      throw mapGmailThreadMutationError(error);
     }
   }
 
@@ -245,7 +245,7 @@ export class GmailMailSyncAdapter implements MailProviderSyncPort {
     try {
       await this.client.archiveThread(validateProviderId(threadId), signal);
     } catch (error) {
-      throw mapGmailError(error);
+      throw mapGmailThreadMutationError(error);
     }
   }
 
@@ -253,7 +253,7 @@ export class GmailMailSyncAdapter implements MailProviderSyncPort {
     try {
       await this.client.unarchiveThread(validateProviderId(threadId), signal);
     } catch (error) {
-      throw mapGmailError(error);
+      throw mapGmailThreadMutationError(error);
     }
   }
 
@@ -261,7 +261,7 @@ export class GmailMailSyncAdapter implements MailProviderSyncPort {
     try {
       await this.client.trashThread(validateProviderId(threadId), signal);
     } catch (error) {
-      throw mapGmailError(error);
+      throw mapGmailThreadMutationError(error);
     }
   }
 
@@ -269,7 +269,7 @@ export class GmailMailSyncAdapter implements MailProviderSyncPort {
     try {
       await this.client.untrashThread(validateProviderId(threadId), signal);
     } catch (error) {
-      throw mapGmailError(error);
+      throw mapGmailThreadMutationError(error);
     }
   }
 
@@ -286,7 +286,7 @@ export class GmailMailSyncAdapter implements MailProviderSyncPort {
         await this.client.markThreadNotSpam(safeThreadId, signal);
       }
     } catch (error) {
-      throw mapGmailError(error);
+      throw mapGmailThreadMutationError(error);
     }
   }
 
@@ -303,7 +303,7 @@ export class GmailMailSyncAdapter implements MailProviderSyncPort {
         await this.client.unstarThread(safeThreadId, signal);
       }
     } catch (error) {
-      throw mapGmailError(error);
+      throw mapGmailThreadMutationError(error);
     }
   }
 
@@ -471,7 +471,7 @@ export class GmailMailSyncAdapter implements MailProviderSyncPort {
       try {
         const thread = await this.getThread(threadId, signal);
         if (thread === null) {
-          outcomes.set(threadId, { status: "stale" });
+          outcomes.set(threadId, { status: "stale", resolution: "missing" });
           continue;
         }
         const named = new Set(threads.get(threadId)!.map((message) => message.messageId));
@@ -1057,6 +1057,13 @@ function validateProviderId(value: string): string {
     throw new MailProviderSyncError("mail_provider_response_invalid");
   }
   return value;
+}
+
+function mapGmailThreadMutationError(error: unknown): MailProviderSyncError {
+  if (error instanceof GmailApiError && error.code === "gmail_not_found") {
+    return new MailProviderSyncError("mail_provider_thread_stale");
+  }
+  return mapGmailError(error);
 }
 
 function mapGmailError(error: unknown): MailProviderSyncError {

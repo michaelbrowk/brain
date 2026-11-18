@@ -34,6 +34,7 @@ import {
   type MailMessageContent,
 } from "@/lib/mail/content-types";
 import { attachmentUrl } from "@/lib/mail/attachment-preview";
+import { mailLinkDestination } from "@/lib/mail/link-destination";
 import { isVerifiedAttachmentResponse } from "@/lib/mail/attachment-blobs";
 import {
   createMailHtmlDocument,
@@ -607,14 +608,7 @@ function SanitizedHtmlMessageFrame({ documentHtml }: { readonly documentHtml: st
   const [height, setHeight] = useState(1);
   const [scrollable, setScrollable] = useState(false);
 
-  useEffect(() => {
-    cleanupRef.current();
-    cleanupRef.current = () => {};
-    return () => {
-      cleanupRef.current();
-      cleanupRef.current = () => {};
-    };
-  }, [documentHtml]);
+  useEffect(() => () => cleanupRef.current(), []);
 
   const handleLoad = useCallback(() => {
     cleanupRef.current();
@@ -623,6 +617,30 @@ function SanitizedHtmlMessageFrame({ documentHtml }: { readonly documentHtml: st
     const content = frameDocument?.getElementById("brain-mail-content");
     if (!frame || !frameDocument || !content) return;
     const documentElement = frameDocument.documentElement;
+
+    // The parent handles the user's gesture. The message itself never gets
+    // a navigation target or permission to open a window.
+    const links = new AbortController();
+    for (const anchor of content.querySelectorAll<HTMLAnchorElement>("a[data-brain-href]")) {
+      const destination = mailLinkDestination(anchor.dataset.brainHref);
+      if (!destination) continue;
+      anchor.tabIndex = 0;
+      anchor.setAttribute("role", "link");
+      anchor.title = new URL(destination).host || destination;
+      const open = (event: MouseEvent | KeyboardEvent) => {
+        if (!event.isTrusted || event.defaultPrevented) return;
+        if ("key" in event) {
+          if (event.key !== "Enter" || event.repeat) return;
+        } else if (event.button !== (event.type === "auxclick" ? 1 : 0)) {
+          return;
+        }
+        event.preventDefault();
+        window.open(destination, "_blank", "noopener,noreferrer");
+      };
+      for (const name of ["click", "auxclick", "keydown"] as const) {
+        anchor.addEventListener(name, open, { signal: links.signal });
+      }
+    }
 
     const resize = () => {
       const frameChrome = Math.max(0, frame.offsetHeight - frame.clientHeight);
@@ -653,6 +671,7 @@ function SanitizedHtmlMessageFrame({ documentHtml }: { readonly documentHtml: st
     const animationFrame = frame.contentWindow?.requestAnimationFrame(resize) ?? null;
 
     cleanupRef.current = () => {
+      links.abort();
       observer?.disconnect();
       for (const image of images) {
         image.removeEventListener("load", resize);
@@ -705,7 +724,7 @@ function MailMessageContentView({
   const readyContent = state.kind === "ready" ? state.content : null;
   const readableHtml = readableSanitizedMailHtml(readyContent?.htmlBody ?? null);
   const readableText = readableMailBody(readyContent?.textBody ?? null);
-  const renderHtml = preferSanitizedHtmlAlternative(readableText, readableHtml);
+  const renderHtml = preferSanitizedHtmlAlternative(readableText, readableHtml, readyContent?.attachments);
   const renderedHtml = renderHtml ? readableHtml : null;
   const cidSources = useInlineCidSources(
     message,
@@ -871,7 +890,7 @@ function MailMessageContentView({
       ? createMailHtmlDocument({
           sanitizedHtml: readableHtml,
           attachments: content.attachments,
-          cidSources,
+          cidSources: cidSources ?? EMPTY_CID_SOURCES,
           remoteSources,
         })
       : null;
@@ -897,6 +916,7 @@ function MailMessageContentView({
         accountId={message.accountId}
         attachments={content.attachments}
         renderedHtml={renderedHtml}
+        resolvedCidSources={cidSources}
         onViewerOpenChange={onAttachmentViewerOpenChange}
       />
     </motion.div>
@@ -907,7 +927,7 @@ function useInlineCidSources(
   message: MailMessageDto,
   content: Extract<MailMessageContent, { state: "ready" }> | null,
   sanitizedHtml: string | null,
-): ReadonlyMap<string, string> {
+): ReadonlyMap<string, string> | null {
   const key = inlineCidContentKey(message, content, sanitizedHtml);
   const [state, setState] = useState<{
     readonly key: string;
@@ -993,7 +1013,7 @@ function useInlineCidSources(
     };
   }, [content, key, message.accountId, sanitizedHtml]);
 
-  return state.key === key ? state.sources : EMPTY_CID_SOURCES;
+  return state.key === key ? state.sources : null;
 }
 
 function useRemoteImageSources(

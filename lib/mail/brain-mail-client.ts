@@ -58,6 +58,7 @@ import {
   type MailAccountCapabilities,
 } from "./service/account-types";
 import {
+  MAIL_BATCH_OUTCOME_HEADER,
   MAIL_THREAD_STATE_CONTRACT_HEADER,
   MAIL_THREAD_STATE_CONTRACT_VALUE,
 } from "./thread-contract";
@@ -926,16 +927,19 @@ export function createBrainMailClient(options?: {
     },
     archiveThreads: async (input: MailThreadBatchInput, signal?: AbortSignal) => {
       const safeInput = validateMessageRequest(() => validateMailThreadBatchInput(input));
+      // Negotiate via a header: old services accept exactly the original JSON.
+      const { reportAlreadyOutside, ...body } = safeInput;
       return requestMailService(
         socketPath,
         requestTimeoutMs,
         THREAD_BATCH_PATH,
         "POST",
-        safeInput,
+        body,
         (value) => validateMailThreadBatchResult(value, safeInput),
         signal,
         // Fifty list rows: the widest answer a batch has.
         MAX_THREAD_LIST_RESPONSE_BYTES,
+        reportAlreadyOutside ? { [MAIL_BATCH_OUTCOME_HEADER]: "2" } : {},
       );
     },
     createDraft: async (

@@ -477,6 +477,15 @@ const PROVIDER_CACHE_BINDING_SCHEMA_SQL = `
     )
   ) STRICT;
 
+  CREATE TABLE IF NOT EXISTS imap_thread_locations (
+    account_id TEXT NOT NULL REFERENCES provider_cache_binding(account_id) ON DELETE CASCADE,
+    thread_id TEXT NOT NULL,
+    path TEXT NOT NULL CHECK(length(path) BETWEEN 1 AND 1024),
+    uid_validity INTEGER NOT NULL CHECK(uid_validity BETWEEN 1 AND 4294967295),
+    uid INTEGER NOT NULL CHECK(uid BETWEEN 1 AND 4294967295),
+    PRIMARY KEY(account_id, thread_id)
+  ) STRICT;
+
   CREATE TRIGGER IF NOT EXISTS reset_imap_snapshot_on_legacy_credential_rebind
   AFTER UPDATE OF credential_version ON background_sync_control
   WHEN OLD.credential_version IS NOT NULL
@@ -501,6 +510,17 @@ const PROVIDER_CACHE_BINDING_SCHEMA_SQL = `
      WHERE account_id = OLD.account_id;
   END;
 `;
+
+export interface ImapThreadLocation {
+  readonly path: string;
+  readonly uidValidity: bigint;
+  readonly uid: number;
+}
+
+export interface ImapLocationStore {
+  readImapLocation(threadId: string): ImapThreadLocation | undefined;
+  writeImapLocation(threadId: string, location: ImapThreadLocation | null): void;
+}
 
 export interface CachedProviderThread {
   readonly thread: MailThreadListItem;
@@ -895,6 +915,32 @@ export class SqliteMailMessageCache {
         .run(this.accountId, providerKind, transportBindingVersion);
       return Object.freeze({ reset });
     });
+  }
+
+  readImapLocation(threadId: string): ImapThreadLocation | undefined {
+    const row = this.requireDatabase().prepare(
+      "SELECT path, uid_validity, uid FROM imap_thread_locations WHERE account_id = ? AND thread_id = ?",
+    ).get(this.accountId, validateProviderId(threadId));
+    if (row === undefined) return undefined;
+    if (typeof row.path !== "string" || typeof row.uid !== "number" || typeof row.uid_validity !== "number") {
+      throw new MailCacheError("mail_cache_invalid");
+    }
+    return { path: row.path, uidValidity: BigInt(row.uid_validity), uid: row.uid };
+  }
+
+  writeImapLocation(threadId: string, location: ImapThreadLocation | null): void {
+    const id = validateProviderId(threadId);
+    const database = this.requireDatabase();
+    if (location === null) {
+      database.prepare("DELETE FROM imap_thread_locations WHERE account_id = ? AND thread_id = ?")
+        .run(this.accountId, id);
+      return;
+    }
+    database.prepare(
+      `INSERT INTO imap_thread_locations(account_id,thread_id,path,uid_validity,uid)
+       VALUES (?,?,?,?,?) ON CONFLICT(account_id,thread_id) DO UPDATE SET
+       path=excluded.path, uid_validity=excluded.uid_validity, uid=excluded.uid`,
+    ).run(this.accountId, id, location.path, location.uidValidity, location.uid);
   }
 
   readBackgroundSyncState(): MailCacheBackgroundSyncState {
@@ -2058,6 +2104,34 @@ export class SqliteMailMessageCache {
         throw new MailCacheError("mail_sync_stale");
       }
       this.upsertThread(generation, value);
+      // A rebuild may already have fetched this row before the mutation.
+      const staged = state.stagedGeneration;
+      if (staged !== null && staged !== generation && this.requireDatabase().prepare(
+        "SELECT 1 FROM threads WHERE account_id = ? AND generation = ? AND thread_id = ?",
+      ).get(this.accountId, staged, value.thread.threadId)) {
+        this.upsertThread(staged, value);
+      }
+    });
+  }
+
+  /** The provider no longer recognises this id. Remove its cached copies,
+   * including any staged snapshot that might otherwise republish it. */
+  forgetMissingThread(threadId: string): boolean {
+    const id = validateProviderId(threadId);
+    return this.transaction(() => {
+      const database = this.requireDatabase();
+      const copies = database.prepare(
+        "SELECT generation FROM threads WHERE account_id = ? AND thread_id = ?",
+      ).all(this.accountId, id);
+      for (const row of copies) {
+        const generation = Number(row.generation);
+        validateGeneration(generation);
+        this.deleteSearchThread(database, generation, id);
+      }
+      database.prepare("DELETE FROM threads WHERE account_id = ? AND thread_id = ?")
+        .run(this.accountId, id);
+      this.writeImapLocation(id, null);
+      return copies.length > 0;
     });
   }
 
@@ -2145,7 +2219,9 @@ export class SqliteMailMessageCache {
     }[],
   ): ReadonlyMap<string, MailThreadListItem> {
     return this.transaction(() => {
-      const generation = readableGeneration(this.readSyncState());
+      const state = this.readSyncState();
+      const generation = readableGeneration(state);
+      const staged = state.stagedGeneration ?? generation;
       if (generation < 1) throw new MailCacheError("mail_sync_stale");
       const database = this.requireDatabase();
       const updated = new Map<string, MailThreadListItem>();
@@ -2156,9 +2232,9 @@ export class SqliteMailMessageCache {
             .prepare(
               `UPDATE messages
                   SET in_inbox = 0${entry.read ? ", unread = 0" : ""}
-                WHERE account_id = ? AND generation = ? AND thread_id = ? AND message_id = ?`,
+                WHERE account_id = ? AND generation IN (?, ?) AND thread_id = ? AND message_id = ?`,
             )
-            .run(this.accountId, generation, threadId, validateProviderId(messageId));
+            .run(this.accountId, generation, staged, threadId, validateProviderId(messageId));
         }
         database
           .prepare(
@@ -2171,9 +2247,9 @@ export class SqliteMailMessageCache {
                       SELECT 1 FROM messages
                        WHERE account_id = threads.account_id AND generation = threads.generation
                          AND thread_id = threads.thread_id AND unread = 1)
-              WHERE account_id = ? AND generation = ? AND thread_id = ?`,
+              WHERE account_id = ? AND generation IN (?, ?) AND thread_id = ?`,
           )
-          .run(this.accountId, generation, threadId);
+          .run(this.accountId, generation, staged, threadId);
         const row = database
           .prepare(
             `SELECT thread_id, subject, participants_json, snippet, last_message_at,
@@ -2184,15 +2260,17 @@ export class SqliteMailMessageCache {
           )
           .get(this.accountId, generation, threadId);
         if (!row) throw new MailCacheError("mail_cache_invalid");
-        if (row.in_inbox === 0) {
-          database
-            .prepare(
-              `DELETE FROM thread_mailboxes
-                WHERE account_id = ? AND mailbox_id = 'inbox'
-                  AND generation = ? AND thread_id = ?`,
-            )
-            .run(this.accountId, generation, threadId);
-        }
+        database
+          .prepare(
+            `DELETE FROM thread_mailboxes
+              WHERE account_id = ? AND mailbox_id = 'inbox'
+                AND generation IN (?, ?) AND thread_id = ?
+                AND EXISTS (SELECT 1 FROM threads
+                  WHERE account_id = thread_mailboxes.account_id
+                    AND generation = thread_mailboxes.generation
+                    AND thread_id = thread_mailboxes.thread_id AND in_inbox = 0)`,
+          )
+          .run(this.accountId, generation, staged, threadId);
         updated.set(threadId, this.threadFromRow(row));
       }
       this.bumpSearchRevision(database, generation);

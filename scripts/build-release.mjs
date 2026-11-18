@@ -118,9 +118,9 @@ export const MAIL_RUNTIME_BUNDLED_AWAY = Object.freeze([
 export const MAIL_RUNTIME_LISTING = Object.freeze({
   ".": [
     "THIRD_PARTY_NOTICES.txt|f", "address-identity.js|f", "build.json|f",
-    "content-codec.js|f", "content-types.js|f",
+    "content-codec.js|f", "content-types.js|f", "link-destination.js|f",
     "draft-codec.js|f", "draft-types.js|f", "message-codec.js|f", "search-query.js|f",
-    "message-types.js|f", "ports.js|f", "reader-content.js|f", "providers|d",
+    "message-types.js|f", "ports.js|f", "reader-content.js|f", "reader-html.js|f", "providers|d",
     "raster-metadata.js|f", "recipients.js|f", "security.js|f",
     "send-attachment-codec.js|f", "send-state.js|f",
     "thread-contract.js|f", "service|d",
@@ -140,7 +140,7 @@ export const MAIL_RUNTIME_LISTING = Object.freeze({
     "content-coordinator.js|f", "content-source.js|f", "content-work-runner.js|f",
     "dns.js|f", "drafts.js|f", "http.js|f", "imap-idle.js|f", "imapflow-adapter.js|f",
     "limits.js|f",
-    "mail-html-sanitizer.js|f", "main.js|f", "message-cache.js|f",
+    "mail-html-sanitizer.js|f", "mail-html-sanitizer-styles.js|f", "main.js|f", "message-cache.js|f",
     "message-service-registry.js|f", "message-service.js|f", "mime-parser-client.js|f",
     "mime-parser-runtime.js|f", "mime-parser-worker.js|f", "mime-protocol.js|f",
     "outbound-attachments.js|f", "outbound-message.js|f", "outbound-store.js|f",

@@ -2,6 +2,7 @@ import { parse, serialize, type DefaultTreeAdapterMap } from "parse5";
 import { describe, expect, it } from "vitest";
 
 import { MAIL_RESOURCE_LIMITS } from "../security";
+import { createMailHtmlDocument } from "../reader-html";
 import {
   sanitizeMailHtml,
   sanitizeMailHtmlWithRemoteImages,
@@ -115,11 +116,11 @@ describe("mail HTML sanitizer", () => {
       BUDGET,
     );
 
-    expect(sanitized).toBe(
+    expect(sanitized).toContain(
       '<div style="font-family:Inter,ui-sans-serif,sans-serif;font-size:16px;line-height:29px">People often think you need to have that thing.</div>',
     );
     expect(sanitized).not.toMatch(
-      /3 animation rules|font-size:99px|Hidden template copy/,
+      /3 animation rules|Hidden template copy/,
     );
   });
 
@@ -198,6 +199,77 @@ describe("mail HTML sanitizer", () => {
     expect(result.html).toContain("Visibility pixel");
     expect(result.html).toContain("Overflow pixel");
     expect(result.html).not.toMatch(/https:\/\/|hidden\.example|visible\.example/);
+  });
+
+  it("preserves visible mastheads inside presentation tables and real hidden preheaders", () => {
+    const masthead = "https://cdn.example.test/header.jpg";
+    const result = sanitizeMailHtmlWithRemoteImages(
+      `<div hidden><p>Inbox preview</p></div><table aria-hidden="true"><tr><td>
+        <img aria-hidden="true" width="100%" alt="Masthead" src="${masthead}">
+        <img width="1" height="1" src="https://cdn.example.test/pixel.gif">
+      </td></tr></table>`, BUDGET, () => "remote-image-a" + "1".repeat(32),
+    );
+    expect(result.remoteImages.map((image) => image.sourceUrl)).toEqual([masthead]);
+    expect(result.html).toContain('alt="Masthead"');
+    expect(result.html).not.toContain("Inbox preview");
+  });
+
+  it("keeps safe class rules, mobile columns, and body presentation in the reader", () => {
+    const html = sanitizeMailHtml(
+      `<html dir="rtl"><head><style>
+        .title{color:#123456;font-family:'Georgia',serif;position:fixed}
+        .col + .col{background:#eeeeee}
+        @media screen and (max-width:420px){td.col{display:block!important;width:100%}}
+        @font-face{font-family:custom;src:url(https://cdn.example.test/font.woff)}
+        @import url(https://cdn.example.test/main.css);
+      </style></head><body bgcolor="#eeeeee" style="font-size:18px">
+      <p class="title ignored">Title</p><table><tr><td class="col">First</td><td class="col">Second</td></tr></table>
+      <font color="navy" face="Georgia" size="4">Footer</font></body></html>`, BUDGET,
+    )!;
+    expect(html).toContain('style="font-size:18px;background-color:#eeeeee" dir="rtl"');
+    expect(html).toContain('<font color="navy" face="Georgia" size="4">Footer</font>');
+    expect(html).toContain('class="bm-c-title"');
+    const doc = createMailHtmlDocument({ sanitizedHtml: html, attachments: [], cidSources: new Map() });
+    expect(doc).toContain("#brain-mail-content .bm-c-title{color:#123456;font-family:'Georgia',serif}");
+    expect(doc).toContain("#brain-mail-content .bm-c-col + .bm-c-col{background:#eeeeee}");
+    expect(doc).toContain("@media(max-width:420px){#brain-mail-content td.bm-c-col{display:block!important;width:100%}}");
+    expect(doc).not.toMatch(/data-brain-mail-css|cdn\.example|position:fixed|class="ignored"/);
+  });
+
+  it("keeps mobile and desktop image alternatives while suppressing persistently hidden classes", () => {
+    let sequence = 0;
+    const result = sanitizeMailHtmlWithRemoteImages(
+      `<style>.phone,.pixel{display:none}@media(max-width:420px){.phone{display:block}.desktop{display:none}}</style>
+      <div class="phone"><img width="160" src="https://cdn.example.test/phone.jpg"></div>
+      <div class="desktop"><img width="320" src="https://cdn.example.test/desktop.jpg"></div>
+      <div class="pixel"><img src="https://cdn.example.test/pixel.gif"></div>`,
+      BUDGET, () => "remote-image-a" + String(++sequence).padStart(32, "0"),
+    );
+    expect(result.remoteImages.map((image) => image.sourceUrl)).toEqual([
+      "https://cdn.example.test/phone.jpg", "https://cdn.example.test/desktop.jpg",
+    ]);
+  });
+
+  it("admits an inline-hidden mobile logo only when a winning viewport rule can show it", () => {
+    let sequence = 0;
+    const result = sanitizeMailHtmlWithRemoteImages(
+      `<style>
+        .never{display:none}.transparent{opacity:0}
+        @media(max-width:480px){
+          .logo{display:block!important}.size{width:200px;height:100px}
+          .normal{display:block}.appear{opacity:1!important}
+        }
+      </style>
+      <div class="logo" style="display:none"><img width="180" src="https://cdn.example.test/mobile.jpg"></div>
+      <div class="never size"><img src="https://cdn.example.test/display.gif"></div>
+      <div class="transparent logo"><img src="https://cdn.example.test/opacity.gif"></div>
+      <div class="appear" style="opacity:0;visibility:hidden"><img src="https://cdn.example.test/invisible.gif"></div>
+      <div class="normal" style="display:none"><img src="https://cdn.example.test/inline.gif"></div>
+      <div class="logo" style="display:none!important"><img src="https://cdn.example.test/important.gif"></div>`,
+      BUDGET, () => "remote-image-a" + String(++sequence).padStart(32, "0"),
+    );
+    expect(result.remoteImages.map((image) => image.sourceUrl)).toEqual(["https://cdn.example.test/mobile.jpg"]);
+    expect(result.html).toContain('style="display:none!important"');
   });
 
   it("keeps inline email tables on one row", () => {
@@ -288,9 +360,7 @@ describe("mail HTML sanitizer", () => {
     const result = sanitizeMailHtmlWithRemoteImages(
       [
         '<img hidden src="https://hidden.example.test/own-hidden.png" alt="Own hidden">',
-        '<img aria-hidden=" TRUE " src="https://hidden.example.test/own-aria.png" alt="Own aria">',
         '<div hidden><img width="600" height="400" src="https://hidden.example.test/ancestor-hidden.png" alt="Ancestor hidden"></div>',
-        '<section aria-hidden="true"><img src="https://hidden.example.test/unknown-ancestor.png" alt="Unknown ancestor"></section>',
         '<div style="DISPLAY:/**/none ! important"><img src="https://hidden.example.test/display.png" alt="Display hidden"></div>',
         '<div style="visibility:hidden"><img src="https://hidden.example.test/visibility.png" alt="Visibility hidden"></div>',
         '<div style="visibility:collapse"><img src="https://hidden.example.test/collapse.png" alt="Visibility collapse"></div>',
@@ -371,7 +441,7 @@ describe("mail HTML sanitizer", () => {
     // browser repair the markup, and the reader frame renders what we send.
     const letter = [
       '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">',
-      "<html><head><style>.hero{width:600px}</style></head><body>",
+      "<html><head><title>Newsletter</title></head><body>",
       // A row opened straight inside a cell, then the author's closing tags.
       '<table width="600"><tr><td><table><tr><td><tr><td>Headline</td></tr></td></tr></table>Beside the headline</td><td>Side column</td></tr></table>',
       // A stray `</td>` inside a nested table.

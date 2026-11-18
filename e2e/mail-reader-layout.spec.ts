@@ -14,6 +14,7 @@ import {
 import {
   githubActionsRunEmailHtml,
   githubActionsRunEmailWithTokensHtml,
+  githubActionsRunEmailWithLongTokensHtml,
   declaredGeometryDigestEmailHtml,
   declaredGeometryDigestRaster,
   paddedHeroEmailHtml,
@@ -69,6 +70,11 @@ test("@release newsletter columns keep their styling and stack on a phone", asyn
 });
 type FrameMetrics = {
   readonly cells: Record<string, CellMetrics | null>;
+  readonly tokens: Record<string, {
+    readonly cellWidth: number;
+    readonly firstUnreachableGlyph: number | null;
+    readonly endNeedsPan: boolean;
+  } | null>;
   readonly spacerGapPx: number | null;
   readonly overflowX: string;
   readonly pannablePx: number;
@@ -115,12 +121,33 @@ async function measure(
           ? { width: Math.round(cell.getBoundingClientRect().width * 10) / 10, lines: lineCount(cell) }
           : null;
       };
-      const innermostContaining = (text: string) => {
-        const hits = cells.filter((candidate) => candidate.textContent?.includes(text));
-        const cell = hits.find((candidate) => !hits.some((other) => other !== candidate && candidate.contains(other)));
-        return cell
-          ? { width: Math.round(cell.getBoundingClientRect().width * 10) / 10, lines: lineCount(cell) }
-          : null;
+      const tokenReachability = (marker: string) => {
+        const token = [...frameDocument.querySelectorAll("p,a")].find((el) => el.textContent?.includes(marker));
+        const text = token?.firstChild;
+        if (!token || text?.nodeType !== Node.TEXT_NODE || !text.textContent) return null;
+        const viewport = root.getBoundingClientRect();
+        const range = frameDocument.createRange();
+        const length = text.textContent.length;
+        root.scrollLeft = 0;
+        range.setStart(text, length - 1);
+        range.setEnd(text, length);
+        const endNeedsPan = range.getBoundingClientRect().right > viewport.right + 1;
+        let firstUnreachableGlyph: number | null = null;
+        for (let offset = 0; offset < length; offset++) {
+          range.setStart(text, offset);
+          range.setEnd(text, offset + 1);
+          const before = range.getBoundingClientRect();
+          if (before.right > viewport.right) root.scrollLeft += Math.ceil(before.right - viewport.right);
+          if (before.left < viewport.left) root.scrollLeft -= Math.ceil(viewport.left - before.left);
+          const rect = range.getBoundingClientRect();
+          const hit = frameDocument.elementFromPoint((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
+          if (!rect.width || rect.left < viewport.left - 1 || rect.right > viewport.right + 1 || hit !== token) {
+            firstUnreachableGlyph = offset;
+            break;
+          }
+        }
+        root.scrollLeft = 0;
+        return { firstUnreachableGlyph, endNeedsPan, cellWidth: token.closest("td")!.getBoundingClientRect().width };
       };
 
       const rerun = [...frameDocument.querySelectorAll("a")].find(
@@ -140,8 +167,10 @@ async function measure(
           cancelledBadge: byExactText("Cancelled"),
           plainLabel: byExactText("Queued"),
           rightAligned: byExactText("14 min"),
-          bareToken: innermostContaining("check_suite_focus"),
-          linkToken: innermostContaining("anchor=deadbeefcafe"),
+        },
+        tokens: {
+          plain: tokenReachability("check_suite_focus"),
+          linked: tokenReachability("anchor=deadbeefcafe"),
         },
         spacerGapPx,
         overflowX: getComputedStyle(root).overflowX,
@@ -188,32 +217,27 @@ page,
   }
 });
 
-test("@release an unbreakable token in a mail table stays reachable instead of clipped", async ({
-page,
-}) => {
-  await page.goto("/login");
-  const documentHtml = readerDocument(githubActionsRunEmailWithTokensHtml);
-
-  for (const width of READER_WIDTHS) {
-    const metrics = await measure(page, documentHtml, width);
-    // A token with nothing to break on cannot fit and cannot be shredded to a
-    // one-glyph column either. It widens the message, and the message pans.
-    expect(metrics.overflowX, `overflow-x at ${width}px`).toBe("auto");
-    expect(
-      metrics.pannablePx,
-      `nothing to pan to at ${width}px, so the token is clipped`,
-    ).toBeGreaterThan(0);
-    for (const key of ["bareToken", "linkToken"] as const) {
-      const cell = metrics.cells[key];
-      expect(cell, `${key} missing at ${width}px`).not.toBeNull();
-      expect(
-        cell!.width,
-        `${key} shredded to ${cell!.width}px at ${width}px`,
-      ).toBeGreaterThan(100);
+for (const fixture of [
+  { name: "URLs with natural line breaks", html: githubActionsRunEmailWithTokensHtml, needsPan: false },
+  { name: "unbreakable URL tokens", html: githubActionsRunEmailWithLongTokensHtml, needsPan: true },
+]) {
+  test(`@release ${fixture.name} in mail tables stay readable to the last character`, async ({ page }) => {
+    await page.goto("/login");
+    const documentHtml = readerDocument(fixture.html);
+    for (const width of READER_WIDTHS) {
+      const metrics = await measure(page, documentHtml, width);
+      expect(metrics.overflowX, `overflow-x at ${width}px`).toBe("auto");
+      if (fixture.needsPan) expect(metrics.pannablePx, `no overflow at ${width}px`).toBeGreaterThan(0);
+      for (const [kind, token] of Object.entries(metrics.tokens)) {
+        expect(token, `${kind} URL missing at ${width}px`).not.toBeNull();
+        expect(token!.cellWidth, `${kind} URL column collapsed at ${width}px`).toBeGreaterThan(100);
+        expect(token!.firstUnreachableGlyph, `${kind} URL clipped at ${width}px`).toBeNull();
+        if (fixture.needsPan) expect(token!.endNeedsPan, `${kind} URL fits at ${width}px`).toBe(true);
+      }
+      expect(metrics.heightSyncable, `height sync broke at ${width}px`).toBe(true);
     }
-    expect(metrics.heightSyncable, `height sync broke at ${width}px`).toBe(true);
-  }
-});
+  });
+}
 
 test("@release the sender's spacer cell still pushes a button to the far edge", async ({
 page,

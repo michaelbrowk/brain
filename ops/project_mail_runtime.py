@@ -34,7 +34,6 @@ REQUIRED_FILES = (
     Path("address-identity.js"),
     Path("content-codec.js"),
     Path("content-types.js"),
-    Path("link-destination.js"),
     Path("draft-codec.js"),
     Path("draft-types.js"),
     Path("message-codec.js"),
@@ -42,7 +41,6 @@ REQUIRED_FILES = (
     Path("message-types.js"),
     Path("ports.js"),
     Path("reader-content.js"),
-    Path("reader-html.js"),
     Path("raster-metadata.js"),
     Path("recipients.js"),
     Path("security.js"),
@@ -81,7 +79,6 @@ REQUIRED_FILES = (
     Path("service/imapflow-adapter.js"),
     Path("service/limits.js"),
     Path("service/mail-html-sanitizer.js"),
-    Path("service/mail-html-sanitizer-styles.js"),
     Path("service/main.js"),
     Path("service/message-cache.js"),
     Path("service/message-service-registry.js"),
@@ -111,11 +108,6 @@ SMTP_RUNTIME_FILES = (
 REMOTE_IMAGE_RUNTIME_FILES = (
     Path("reader-content.js"),
     Path("service/remote-image-fetcher.js"),
-)
-MAIL_READER_RUNTIME_FILES = (
-    Path("link-destination.js"),
-    Path("reader-html.js"),
-    Path("service/mail-html-sanitizer-styles.js"),
 )
 RECIPIENT_RUNTIME_FILES = (Path("recipients.js"),)
 LEGACY_REQUIRED_FILES = tuple(
@@ -241,12 +233,6 @@ def _required_runtime_layout(source: Path) -> tuple[tuple[Path, ...], tuple[Path
             for relative in required_files
             if relative not in REMOTE_IMAGE_RUNTIME_FILES
         )
-
-    reader_presence = [os.path.lexists(source / path) for path in MAIL_READER_RUNTIME_FILES]
-    if any(reader_presence) and not all(reader_presence):
-        raise UnsafeMailRuntime("mail reader runtime layout is incomplete")
-    if not any(reader_presence):
-        required_files = tuple(path for path in required_files if path not in MAIL_READER_RUNTIME_FILES)
 
     recipient_presence = tuple(
         os.path.lexists(source / relative)

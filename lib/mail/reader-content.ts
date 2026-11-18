@@ -1,6 +1,8 @@
 import type { MailContentAttachmentDto } from "./content-types";
 import { referencedInlineCidAttachments, referencedRemoteImageIds } from "./reader-html";
 
+export { mailLinkDestination } from "./link-destination";
+
 /**
  * Pure text rules shared by every surface that shows mail text: the list
  * row, the reader's fallback preview, and the header-only preview. A rule

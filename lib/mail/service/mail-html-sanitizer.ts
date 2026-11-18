@@ -9,8 +9,8 @@ import {
   type TreeAdapter,
 } from "parse5";
 
+import { mailLinkDestination } from "../reader-content";
 import { validateMailRemoteImageSourceUrl } from "../security";
-import { mailLinkDestination } from "../link-destination";
 
 import {
   applyTrackingValue, mailClassNames, mailPresentationSheet, TRACKED_CSS_PROPERTY,

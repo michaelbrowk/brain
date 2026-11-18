@@ -7,11 +7,10 @@ import path from "node:path";
 // already relies on for its output path.
 const FIXTURE_DIR = path.join(process.cwd(), "lib", "mail", "testing");
 
-/** Long enough that no reader column can hold it, with nothing to break on. */
-export const UNBREAKABLE_TEXT_TOKEN =
+const TEXT_URL =
   "https://example.test/example-org/example-repo/actions/runs/18446744073709551615/job/9223372036854775807?check_suite_focus=true";
 
-export const UNBREAKABLE_LINK_TOKEN =
+const LINK_URL =
   "https://example.test/example-org/example-repo/suites/29876543210987654321/artifacts/1357924680135792468?anchor=deadbeefcafe";
 
 /**
@@ -68,33 +67,37 @@ export const githubActionsRunEmailHtml = card([
 ]);
 
 /**
- * The same card with two cells no column can hold: an unbreakable token as
- * text, and one inside a link. Nothing GitHub sends looks like this, and plenty
- * of transactional mail does. It is the worst case for any rule that gives a
- * cell a min-content floor, so it is measured apart from the bug.
+ * A plain URL and a linked URL. Browsers can wrap ordinary URLs at punctuation.
+ * The second version adds a run of letters with no possible break in it, long
+ * enough to force horizontal overflow even at the widest reader under test.
  */
-export const githubActionsRunEmailWithTokensHtml = card([
-  rowUnit(
-    '<td align="center" style="padding:0"></td>',
-    '<td class="p-2" style="width:100%;padding:8px"><p class="mb-0" style="margin-bottom:0">Job</p></td>',
-    '<td class="pr-2 py-2" style="white-space:nowrap;padding:8px 8px 8px 0"><p class="mb-0" style="margin-bottom:0">Status</p></td>',
-  ),
-  rowUnit(
-    '<td align="center" style="padding:0"></td>',
-    '<td class="p-2" style="width:100%;padding:8px"><p class="mb-0" style="margin-bottom:0">check / typecheck</p></td>',
-    `<td class="pr-2 py-2" style="white-space:nowrap;padding:8px 8px 8px 0">${label("Failed")}</td>`,
-  ),
-  rowUnit(
-    '<td align="center" style="padding:0"></td>',
-    '<td class="p-2" style="width:100%;padding:8px"><p class="mb-0" style="margin-bottom:0">Run</p></td>',
-    `<td class="pr-2 py-2" style="padding:8px 8px 8px 0"><p class="mb-0" style="margin-bottom:0">${UNBREAKABLE_TEXT_TOKEN}</p></td>`,
-  ),
-  rowUnit(
-    '<td align="center" style="padding:0"></td>',
-    '<td class="p-2" style="width:100%;padding:8px"><p class="mb-0" style="margin-bottom:0">Artifact</p></td>',
-    `<td class="pr-2 py-2" style="padding:8px 8px 8px 0"><a href="https://example.test/artifact" style="display:inline-block">${UNBREAKABLE_LINK_TOKEN}</a></td>`,
-  ),
-]);
+export const githubActionsRunEmailWithTokensHtml = tokenCard("");
+export const githubActionsRunEmailWithLongTokensHtml = tokenCard("deadbeef".repeat(24));
+
+function tokenCard(suffix: string): string {
+  return card([
+    rowUnit(
+      '<td align="center" style="padding:0"></td>',
+      '<td class="p-2" style="width:100%;padding:8px"><p class="mb-0" style="margin-bottom:0">Job</p></td>',
+      '<td class="pr-2 py-2" style="white-space:nowrap;padding:8px 8px 8px 0"><p class="mb-0" style="margin-bottom:0">Status</p></td>',
+    ),
+    rowUnit(
+      '<td align="center" style="padding:0"></td>',
+      '<td class="p-2" style="width:100%;padding:8px"><p class="mb-0" style="margin-bottom:0">check / typecheck</p></td>',
+      `<td class="pr-2 py-2" style="white-space:nowrap;padding:8px 8px 8px 0">${label("Failed")}</td>`,
+    ),
+    rowUnit(
+      '<td align="center" style="padding:0"></td>',
+      '<td class="p-2" style="width:100%;padding:8px"><p class="mb-0" style="margin-bottom:0">Run</p></td>',
+      `<td class="pr-2 py-2" style="padding:8px 8px 8px 0"><p class="mb-0" style="margin-bottom:0">${TEXT_URL}${suffix}</p></td>`,
+    ),
+    rowUnit(
+      '<td align="center" style="padding:0"></td>',
+      '<td class="p-2" style="width:100%;padding:8px"><p class="mb-0" style="margin-bottom:0">Artifact</p></td>',
+      `<td class="pr-2 py-2" style="padding:8px 8px 8px 0"><a href="https://example.test/artifact" style="display:inline-block">${LINK_URL}${suffix}</a></td>`,
+    ),
+  ]);
+}
 
 /** GitHub's shared chrome: a 544px container around one bordered card. */
 function card(rows: readonly string[]): string {

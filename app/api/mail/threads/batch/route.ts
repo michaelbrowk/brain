@@ -5,6 +5,7 @@ import {
   runMailThreadApiAction,
   validateMailMutationRequest,
 } from "@/lib/mail/account-api-route";
+import { MAIL_BATCH_OUTCOME_HEADER } from "@/lib/mail/thread-contract";
 import type { MailThreadBatchInput } from "@/lib/mail/message-types";
 import { MAIL_SERVICE_HTTP_LIMITS } from "@/lib/mail/service/limits";
 
@@ -32,9 +33,12 @@ export async function POST(request: Request) {
   } catch (error) {
     return mailApiBodyError(error, "mail_request_invalid", 1);
   }
+  const batch = input as MailThreadBatchInput;
   return runMailThreadApiAction(request, () =>
     createBrainMailClient().archiveThreads(
-      input as MailThreadBatchInput,
+      request.headers.get(MAIL_BATCH_OUTCOME_HEADER) === "2"
+        ? { ...batch, reportAlreadyOutside: true }
+        : batch,
       request.signal,
     ),
   );

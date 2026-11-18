@@ -1,6 +1,8 @@
 export const MAIL_THREAD_STATE_CONTRACT_HEADER = "x-brain-mail-thread-state";
 export const MAIL_THREAD_STATE_CONTRACT_VALUE = "5";
 
+export const MAIL_BATCH_OUTCOME_HEADER = "x-brain-mail-batch-outcome";
+
 export type MailThreadStateContractTier = 1 | 2 | 3 | 4 | 5;
 
 const HIGHEST_TIER: MailThreadStateContractTier = 5;

@@ -53,12 +53,15 @@ export function MailAttachments({
   accountId,
   attachments,
   renderedHtml,
+  resolvedCidSources,
   onViewerOpenChange,
 }: {
   accountId: string;
   attachments: readonly MailContentAttachmentDto[];
   /** The sanitized HTML on screen, or null when the reader shows text. */
   renderedHtml: string | null;
+  /** Null while the inline fetches are pending. */
+  resolvedCidSources?: ReadonlyMap<string, string> | null;
   /** The viewer takes the window, so the shell has to step back from it. */
   onViewerOpenChange?: (open: boolean) => void;
 }) {
@@ -71,7 +74,7 @@ export function MailAttachments({
 
   useEffect(() => () => store.dispose(), [store]);
 
-  const listed = listedAttachments(attachments, renderedHtml);
+  const listed = listedAttachments(attachments, renderedHtml, resolvedCidSources);
   const previews: AttachmentPreview[] = [];
   const files: MailContentAttachmentDto[] = [];
   for (const attachment of listed) {

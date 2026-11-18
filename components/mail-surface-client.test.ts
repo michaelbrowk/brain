@@ -532,7 +532,7 @@ describe("defaultMailSurfaceClient system mailboxes", () => {
           apiVersion: 1,
           results: [
             { threadId: THREAD_ID, status: "done", thread: answered, markedRead: true },
-            { threadId: "thread_2", status: "stale" },
+            { threadId: "thread_2", status: "already_outside" },
             { threadId: "thread_3", status: "failed", errorCode: "mail_sync_unavailable" },
             {
               threadId: "thread_4",
@@ -566,7 +566,7 @@ describe("defaultMailSurfaceClient system mailboxes", () => {
         thread: expect.objectContaining({ unread: false }),
         markedRead: true,
       },
-      { threadId: "thread_2", status: "stale" },
+      { threadId: "thread_2", status: "already_outside" },
       { threadId: "thread_3", status: "failed", errorCode: "mail_sync_unavailable" },
       {
         threadId: "thread_4",
@@ -582,6 +582,7 @@ describe("defaultMailSurfaceClient system mailboxes", () => {
         headers: expect.objectContaining({ "x-brain-mail-thread-state": "5" }),
       }),
     );
+    expect(fetchMock.mock.calls[0]![1].headers).toHaveProperty("x-brain-mail-batch-outcome", "2");
     expect(JSON.parse(fetchMock.mock.calls[0]![1].body)).toEqual(input);
 
     // The longest batch a Done sends, each id with its press, fits the

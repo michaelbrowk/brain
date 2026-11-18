@@ -314,6 +314,26 @@ describe("Brain Mail message API routes", () => {
     expect(requests).toEqual([{ method: "POST", path: "/v1/threads/batch", body: input }]);
   });
 
+  it("negotiates verified absence across the web and socket without changing a legacy service's JSON", async () => {
+    const input = { accountId: ACCOUNT_ID, threads: presses([THREAD_ID]), archive: true };
+    const bodies: unknown[] = [];
+    process.env.BRAIN_MAIL_SOCKET_PATH = await startServer(async (request, response) => {
+      const optedIn = request.headers["x-brain-mail-batch-outcome"] === "2";
+      bodies.push(JSON.parse(await readBody(request)));
+      writeJson(response, 200, {
+        apiVersion: 1, results: [{ threadId: THREAD_ID, status: optedIn ? "already_outside" : "stale" }],
+      });
+    });
+    for (const optedIn of [false, true]) {
+      const request = jsonRequest("https://brain.test/api/mail/threads/batch", "POST", input, true);
+      if (optedIn) request.headers.set("x-brain-mail-batch-outcome", "2");
+      const response = await archiveThreads(request);
+      expect(response.status).toBe(200);
+      expect((await response.json()).results[0].status).toBe(optedIn ? "already_outside" : "stale");
+    }
+    expect(bodies).toEqual([input, input]);
+  });
+
   it("refuses a batch from another origin, in another type, too large, or of another shape before the socket", async () => {
     process.env.BRAIN_MAIL_SOCKET_PATH = "/tmp/brain-mail-never-opened.sock";
     const input = { accountId: ACCOUNT_ID, threads: presses([THREAD_ID]), archive: true };

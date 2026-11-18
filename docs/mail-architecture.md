@@ -163,28 +163,18 @@ writes `mail_imap_archive_create` with the account and a `reason` of
 answers; a socket that closed under the CREATE writes nothing, because
 nothing is known.
 
-A MOVE changes the message's UID, so the adapter remembers where it put each
-thread for its own lifetime and keeps the Brain thread id stable across the
-move. The destination UID comes from UIDPLUS `COPYUID` when the server offers
+A MOVE changes the message's UID. The adapter stores the destination folder,
+UIDVALIDITY and UID in the account cache and keeps the Brain thread id stable
+across the move. The destination UID comes from UIDPLUS `COPYUID` when the server offers
 it and from a Message-ID `SEARCH` in the destination when it does not — and
 that search must return exactly one hit. A Message-ID is not unique inside a
 mailbox, and returning the wrong copy means the next undo puts a different
 message back in the Inbox, so 0 or 2+ hits leave the thread with no handle.
 
-**The Inbox listing repairs itself without that memory. Undo does not.** The
-MOVE shrinks the Inbox, the next incremental poll sees a lower EXISTS, rejects
-its cursor, and the full rebuild that follows does not list the moved message.
-Undo needs the handle, so a runtime restart between the archive and the press
-leaves the message in a folder Brain does not yet list, with no way back from
-Brain. The window is seconds long and the map is the only record, which makes
-the hole narrow but real: a durable relocation record is what closes it. The
-press itself is answered with `mail_provider_thread_stale` — `409
-mail_thread_stale` at the service boundary — rather than a retryable 503,
-because no retry brings the handle back. The same code covers a thread another
-client moved or expunged, or whose mailbox was recreated under a new
-UIDVALIDITY, so the surface can say the undo is no longer available instead of
-offering a "Try again" that cannot work; the next sync rebuilds the list
-without the moved message.
+Once recorded, the destination survives a service restart. Undo validates the
+folder generation before moving the message back. A move made on an older
+release may have no recorded destination. If the provider cannot identify the
+message uniquely, Brain reports a stale reference and reconciles the listing.
 
 Each single mutation opens its own bounded session. A section Done does not:
 it is one batch per account (below), and on this adapter a batch is one
@@ -234,7 +224,7 @@ account's mutation gate once for the whole batch, uses the provider's own
 batch where it has one, takes what that leaves (a thread the cache cannot
 name every message of, one the IMAP adapter has moved) through the per-thread
 path inside the same request, and writes one `mutation` change record at the
-end, none when nothing moved. Per thread on that path the order is archive,
+end when a mutation or reconciliation changes the snapshot. Per thread on that path the order is archive,
 read back, the read flag only where the read back shows no mail the press did
 not see, then a second read back. A thread whose read back shows new mail the
 press did not see is put back in the Inbox in the same request (the read flag
@@ -246,6 +236,13 @@ answered `done` with the new mail in it, for Brain's take-back. The answer is
 { threadId, status: "renewed", thread } | { threadId, status: "stale" } |
 { threadId, status: "failed", errorCode }] }` in the order the threads were
 sent, `200` whenever the request itself was valid.
+Clients that send `x-brain-mail-batch-outcome: 2` can also receive
+`{ threadId, status: "already_outside" }` when the provider confirms absence
+or returns the thread outside the Inbox. Older clients receive `stale`.
+The header travels across both HTTP hops and the request body stays the same.
+An IMAP mailbox that changes UIDVALIDITY discards the old handle and reports
+`stale`, since the letter can still exist under a new UID. Confirmed changes
+are applied to the readable snapshot and existing copies in a pending rebuild.
 `errorCode` is the code a single mutation's error body would carry
 (`mail_sync_unavailable`, `mail_sync_rate_limited`,
 `mail_account_reauth_required`, `mail_thread_mutation_unsupported`), and
@@ -1474,7 +1471,7 @@ Current repository-staged Gmail receive pipeline:
    gate first, and the 30-second body deadline starts only after admission, so
    time spent waiting behind an older message cannot create a false timeout.
 
-Remote images, stylesheets, fonts, media, frames, forms, scripts, SVG, MathML, and active embeds are blocked. Protocol-relative URLs are remote. `data:` and `javascript:` resources are blocked. The sanitizer retains only a bounded presentation-only subset of inline CSS; URL-bearing, executable, layout-escape, and obfuscated CSS is discarded. A strict `cid:` reference may resolve only to an inline PNG, JPEG, GIF, or WebP attachment from the same message after MIME magic, container dimensions, frame geometry, aggregate byte, pixel, and frame verification. Explicit `Content-Disposition: attachment` is never promoted; a common CID part with no disposition may be normalized to inline. Admission counts `width × height × frames` and accumulates decoded pixels and frames across every inline part in the message.
+Remote images, stylesheets, fonts, media, frames, forms, scripts, SVG, MathML, and active embeds are blocked. Protocol-relative URLs are remote. `data:` and `javascript:` resources are blocked. The sanitizer retains bounded presentation rules from inline declarations, supported selectors and viewport-width media queries. It scopes those selectors to the message. URL-bearing, executable, layout-escape, and obfuscated CSS is discarded. A strict `cid:` reference may resolve only to an inline PNG, JPEG, GIF, or WebP attachment from the same message after MIME magic, container dimensions, frame geometry, aggregate byte, pixel, and frame verification. Explicit `Content-Disposition: attachment` is never promoted; a common CID part with no disposition may be normalized to inline. Admission counts `width × height × frames` and accumulates decoded pixels and frames across every inline part in the message.
 
 SVG, HTML, PDF, office documents, and unknown types are downloads. The server sets attachment disposition, `X-Content-Type-Options: nosniff`, same-origin CORP, an inert attachment CSP, a safe generated filename, and a private no-store policy. Original sender filenames are metadata only. Blob URLs are revoked on reader cleanup; queued and active CID requests are abortable.
 
@@ -1484,7 +1481,7 @@ Every preview download shares the body's budget. The service streams at most two
 
 A PDF's bytes come from the same store, checked against the 30 MiB cap before pdf.js (`pdfjs-dist`, Apache-2.0) sees them. The viewer loads pdf.js with a dynamic `import()` on the first PDF, so the app's bundle does not carry it. Each document runs in a same-origin module worker of its own, emitted by the bundler from the package's worker file and terminated with the document when the viewer moves on or closes, or as soon as the document fails. It is opened with XFA off, WebAssembly off, no `FontFace` added to the page, embedded images refused past 2^26 pixels and only errors logged; pdf.js 6 has no eval path to switch off. Pages are drawn to canvases only, at a pixel ratio of at most 2, never past 2^24 pixels a page nor 16,384 pixels a side (a taller or wider page is drawn at a lower resolution): no text, annotation, form or link layer, and no scripting. A page is measured (its size, no pixels) when it comes within a viewport of the visible part and released beyond two; of the measured pages, the ones nearest the page being read get canvases, at most eight holding at most 2^26 pixels between them, and pdf.js paints at most four at a time. The rest stay placeholders until the reader comes closer. The scroll lays out at most 1,000 pages and offers "Download to read the rest" after them, and holds a page's box within 20:1 either way. No cMap or standard-font URL is configured and WebAssembly is off, so a PDF that relies on a non-embedded CJK font or a JPEG 2000 image draws without it; Download is always beside the preview. A fetch failure or an unreadable file says "Couldn’t open this file", and an encrypted one "This PDF is password protected", each with Download.
 
-Links are retained only as inert sanitized destination metadata until the step-7 product decision defines the external-navigation interstitial.
+Links remain inert destination metadata inside the message. On load the reader validates each stored address (including cached letters), makes the link keyboard-focusable, and handles a user's click or Enter from the parent. An absolute HTTP(S) address opens in a separate tab with no opener or referrer. A mailto address invokes the browser's mail handler. The frame keeps its existing sandbox and CSP.
 
 Remote images are served to the reader only from the server-side privacy cache; the browser never contacts a third-party host. The cache is populated on two paths. The background path prefetches images for a small stable cohort of the newest Inbox messages on the sync schedule, deliberately detached from any open event, so a tracking pixel in those messages observes only the server address and sync timing. The on-open path is an owner-approved trade-off with Gmail-web semantics: opening a message records a durable content demand, and the server then fetches that message's images through the same SSRF-validated, budgeted fetcher. The sender's tracking pixel can observe the server's IP address and approximate open timing for messages the reader actually opens — accepted so opened mail renders with images — while the reader endpoint itself stays cache-only and never triggers an origin request.
 
@@ -1504,9 +1501,8 @@ The worker process, patched streaming MailParser/MailSplit limits, sanitizer,
 disk-backed cache, attachment streamer, and malicious corpus are implemented in
 the MIME content slice. The worker cannot share an OS identity, credential
 mount, network namespace, or database access with the transport edge. Content
-format version `9` forces a body cached under an older one to be reparsed
-before reader use: `8` retired pre-verification output, and `9` retired the
-sanitizer that repaired malformed markup differently from a browser. Verified inline CID raster rendering and private downloads are
+format version `10` reparses older bodies before reader use so previously
+opened messages also gain the updated image and stylesheet handling. Verified inline CID raster rendering and private downloads are
 implemented; remote images render from the server-side privacy cache as
 described above.
 

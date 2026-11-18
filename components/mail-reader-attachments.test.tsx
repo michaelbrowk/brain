@@ -179,13 +179,13 @@ function recordingFetch(files: readonly MailContentAttachmentDto[]) {
   return record;
 }
 
-async function renderLetter(htmlBody: string, attachments: readonly MailContentAttachmentDto[]) {
+async function renderLetter(htmlBody: string, attachments: readonly MailContentAttachmentDto[], textBody: string | null = null) {
   const content = {
     apiVersion: 1 as const,
     accountId: ACCOUNT_ID,
     messageId: message.messageId,
     state: "ready" as const,
-    textBody: null,
+    textBody,
     htmlBody,
     attachments,
   };
@@ -274,4 +274,19 @@ it("never has more than two attachment downloads out for a letter, and gets them
     photos.map((photo) => `${photo.filename}, 8 B`),
   );
   expect(host.querySelectorAll("a.brain-mail-chip")).toHaveLength(0);
+});
+
+it("renders the image version of a ticket and offers its file if the inline fetch fails", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 404 })));
+  const ticket = image("6", { filename: "ticket.png", disposition: "inline", contentId: "ticket" });
+  await renderLetter('<img data-brain-cid="ticket" alt="Ticket">', [ticket], "Open in HTML view");
+  await vi.waitFor(async () => {
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    const frame = host.querySelector("iframe")!;
+    expect(frame.srcdoc).toContain("Ticket");
+    expect(frame.srcdoc).not.toContain("<img src=");
+    expect(host.querySelector('a[download="ticket.png"]')?.getAttribute("href")).toBe(
+      `/api/mail/attachments/${ticket.attachmentId}?accountId=${ACCOUNT_ID}`,
+    );
+  });
 });

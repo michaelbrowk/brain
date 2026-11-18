@@ -30,7 +30,7 @@ const MAX_FILENAME_BYTES = 1024;
 const MAX_CONTENT_ID_BYTES = 998;
 
 /** Increment whenever parser output or sanitizer policy changes incompatibly. */
-export const MAIL_CONTENT_FORMAT_VERSION = 9;
+export const MAIL_CONTENT_FORMAT_VERSION = 10;
 
 /**
  * How long after an open the byte budget leaves a body alone. The reader asks
@@ -497,16 +497,19 @@ export class SqliteMailContentCache {
           return Object.freeze({ kind: "not_active" as const });
         }
         const row = contentState(database, this.accountId, messageId);
-        const preserveReadyRemoteImages =
+        const sameMessage =
           row !== null &&
-          row.state === "ready" &&
           row.source_generation === active.generation &&
-          row.source_thread_id === active.threadId &&
+          row.source_thread_id === active.threadId;
+        const cachedRaw = sameMessage
+          ? descriptorFromColumns(row.raw_sha256, row.raw_bytes)
+          : null;
+        const preserveReadyRemoteImages =
+          sameMessage &&
+          row.state === "ready" &&
           row.content_format_version !== this.contentFormatVersion;
         if (
-          row !== null &&
-          row.source_generation === active.generation &&
-          row.source_thread_id === active.threadId &&
+          sameMessage &&
           row.content_format_version === this.contentFormatVersion
         ) {
           if (row.state === "ready") {
@@ -550,7 +553,7 @@ export class SqliteMailContentCache {
                state, lease_token, lease_expires_at, raw_sha256, raw_bytes,
                text_sha256, text_bytes, html_sha256, html_bytes, failure_code,
                updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, 'fetching', ?, ?, NULL, NULL, NULL, NULL,
+             ) VALUES (?, ?, ?, ?, ?, ?, 'fetching', ?, ?, ?, ?, NULL, NULL,
                        NULL, NULL, NULL, ?)
              ON CONFLICT(account_id, provider_message_id) DO UPDATE SET
                source_thread_id = excluded.source_thread_id,
@@ -559,8 +562,8 @@ export class SqliteMailContentCache {
                content_format_version = excluded.content_format_version,
                state = 'fetching', lease_token = excluded.lease_token,
                lease_expires_at = excluded.lease_expires_at,
-               raw_sha256 = NULL, raw_bytes = NULL, text_sha256 = NULL,
-               text_bytes = NULL, html_sha256 = NULL, html_bytes = NULL,
+               raw_sha256 = excluded.raw_sha256, raw_bytes = excluded.raw_bytes,
+               text_sha256 = NULL, text_bytes = NULL, html_sha256 = NULL, html_bytes = NULL,
                failure_code = NULL, updated_at = excluded.updated_at`,
           )
           .run(
@@ -572,6 +575,8 @@ export class SqliteMailContentCache {
             this.contentFormatVersion,
             token,
             expiresAt,
+            cachedRaw?.sha256 ?? null,
+            cachedRaw?.bytes ?? null,
             timestamp,
           );
         database
@@ -615,6 +620,44 @@ export class SqliteMailContentCache {
           kind: "claimed" as const,
           lease,
         });
+      }),
+    );
+  }
+
+  /** Rebuilds derivatives from the original held by this message and lease. */
+  async stageCachedRaw(
+    leaseInput: MailContentLease,
+    now: number,
+  ): Promise<MailBlobDescriptor | null> {
+    const lease = validateLease(leaseInput, this.accountId);
+    const timestamp = validateTimestamp(now);
+    const descriptor = await this.serialized(async () => {
+      const row = assertLiveLease(
+        this.requireDatabase(), lease, timestamp, this.contentFormatVersion,
+      );
+      return descriptorFromColumns(row.raw_sha256, row.raw_bytes);
+    });
+    if (descriptor === null) return null;
+    return mapContentOperation(async () =>
+      this.blobStore.withMutationLease(async (blobLease) => {
+        // Checks both length and SHA-256 and discards corrupt bytes before a
+        // provider can try to publish a replacement under the same digest.
+        const disposition = await blobLease.discardCorrupt(descriptor);
+        const checkedAt = Math.max(timestamp, this.readCurrentTime());
+        return this.serialized(async () =>
+          this.transaction((database) => {
+            assertLiveLease(database, lease, checkedAt, this.contentFormatVersion);
+            if (disposition === "valid") {
+              stageDescriptor(database, lease, descriptor, checkedAt);
+              return descriptor;
+            }
+            database.prepare(
+              `UPDATE message_content SET raw_sha256 = NULL, raw_bytes = NULL
+                WHERE account_id = ? AND provider_message_id = ? AND lease_token = ?`,
+            ).run(this.accountId, lease.providerMessageId, lease.token);
+            return null;
+          }),
+        );
       }),
     );
   }
@@ -940,8 +983,7 @@ export class SqliteMailContentCache {
           .prepare(
             `UPDATE message_content
                 SET state = ?, lease_token = NULL, lease_expires_at = NULL,
-                    raw_sha256 = NULL, raw_bytes = NULL, text_sha256 = NULL,
-                    text_bytes = NULL, html_sha256 = NULL, html_bytes = NULL,
+                    text_sha256 = NULL, text_bytes = NULL, html_sha256 = NULL, html_bytes = NULL,
                     failure_code = ?, updated_at = ?
               WHERE account_id = ? AND provider_message_id = ?
                 AND source_generation = ? AND version = ?
@@ -1250,8 +1292,7 @@ export class SqliteMailContentCache {
     const room = validateReclaimBytes(roomBytes);
     return this.serialized(async () => {
       const database = this.requireDatabase();
-      const oldestKeptKey =
-        readyBodySizes(database, this.accountId, this.contentFormatVersion)[0]?.key ?? -1;
+      const oldestKeptKey = retainedBodySizes(database, this.accountId)[0]?.key ?? -1;
       const row = database
         .prepare(
           `SELECT cohort.provider_message_id,
@@ -2017,16 +2058,8 @@ export class SqliteMailContentCache {
       this.blobStore.collectGarbage(async () =>
         this.serialized(async () =>
           this.transaction((database) => {
-            deleteOrphanContent(
-              database,
-              this.accountId,
-              this.contentFormatVersion,
-            );
-            return referencedDescriptors(
-              database,
-              this.accountId,
-              this.contentFormatVersion,
-            );
+            deleteOrphanContent(database, this.accountId);
+            return referencedDescriptors(database, this.accountId);
           }),
         ),
       ),
@@ -2059,10 +2092,9 @@ export class SqliteMailContentCache {
               WHERE remote.account_id = ? AND remote.state = 'ready'
                 AND content.state = 'ready'
                 AND content.source_generation = sync.active_generation
-                AND content.content_format_version = ?
               ORDER BY remote.updated_at ASC, remote.remote_image_id ASC`,
           )
-          .all(this.accountId, this.contentFormatVersion);
+          .all(this.accountId);
         const reclaimable: MailBlobDescriptor[] = [];
         const reclaimableKeys = new Set<string>();
         let reclaimedBytes = 0;
@@ -2093,11 +2125,7 @@ export class SqliteMailContentCache {
               descriptor.bytes,
             );
           if (updated.changes !== 1) throw integrityFailed();
-          const stillReferenced = referencedDescriptors(
-            database,
-            this.accountId,
-            this.contentFormatVersion,
-          ).some(
+          const stillReferenced = referencedDescriptors(database, this.accountId).some(
             (reference) =>
               reference.sha256 === descriptor.sha256 &&
               reference.bytes === descriptor.bytes,
@@ -2114,20 +2142,18 @@ export class SqliteMailContentCache {
     );
   }
 
-  /** What the ready bodies of the active generation hold on disk. */
+  /** What retained bodies of the active generation hold on disk. */
   async readBodyCacheBytes(): Promise<number> {
     return this.serialized(async () =>
-      readyBodySizes(
-        this.requireDatabase(),
-        this.accountId,
-        this.contentFormatVersion,
-      ).reduce((total, body) => total + body.bytes, 0),
+      retainedBodySizes(this.requireDatabase(), this.accountId).reduce(
+        (total, body) => total + body.bytes, 0,
+      ),
     );
   }
 
   /**
    * Brings the account's bodies down to `maxBytes`, least recently used first
-   * (`readyBodySizes` says by which key), except that a body nobody opened
+   * (`retainedBodySizes` says by which key), except that a body nobody opened
    * whose raw message is past `privacyPrefetchMaxThreadBytes` goes before any
    * other. The prefetch never fetches one on purpose, so it is a thread the
    * provider sized too small. A body the owner opened keeps its place by when
@@ -2158,16 +2184,13 @@ export class SqliteMailContentCache {
     const openPinnedSince = evictedAt - MAIL_BODY_OPEN_PIN_MS;
     return this.serialized(async () =>
       this.transaction((database) => {
-        const bodies = readyBodySizes(
-          database,
-          this.accountId,
-          this.contentFormatVersion,
-        );
+        const bodies = retainedBodySizes(database, this.accountId);
         let remainingBytes = bodies.reduce((total, body) => total + body.bytes, 0);
         let evictedMessages = 0;
         const remove = database.prepare(
           `DELETE FROM message_content
-            WHERE account_id = ? AND provider_message_id = ? AND state = 'ready'`,
+            WHERE account_id = ? AND provider_message_id = ?
+              AND state <> 'fetching' AND raw_sha256 IS NOT NULL`,
         );
         const mark = database.prepare(
           `UPDATE message_content_privacy_cohort
@@ -2342,10 +2365,11 @@ function assertLiveLease(
   lease: MailContentLease,
   now: number,
   contentFormatVersion: number,
-): void {
+): Record<string, unknown> {
   const row = database
     .prepare(
       `SELECT content.version, content.content_format_version,
+              content.raw_sha256, content.raw_bytes,
               content.lease_token, content.lease_expires_at
          FROM message_content AS content
          JOIN sync_state AS sync ON sync.account_id = content.account_id
@@ -2370,6 +2394,7 @@ function assertLiveLease(
   ) {
     throw staleLease();
   }
+  return row;
 }
 
 function assertDescriptorsStaged(
@@ -2556,7 +2581,6 @@ function attachmentFromRow(row: Record<string, unknown>): CachedMailAttachment {
 function referencedDescriptors(
   database: DatabaseSync,
   accountId: string,
-  contentFormatVersion: number,
 ): readonly MailBlobDescriptor[] {
   const rows = database
     .prepare(
@@ -2568,9 +2592,8 @@ function referencedDescriptors(
           AND message.generation = content.source_generation
           AND message.message_id = content.provider_message_id
           AND message.thread_id = content.source_thread_id
-        WHERE content.account_id = ? AND content.state = 'ready'
+        WHERE content.account_id = ? AND content.raw_sha256 IS NOT NULL
           AND content.source_generation = sync.active_generation
-          AND content.content_format_version = ?
        UNION ALL
        SELECT content.text_sha256, content.text_bytes
          FROM message_content AS content
@@ -2582,7 +2605,6 @@ function referencedDescriptors(
           AND message.thread_id = content.source_thread_id
         WHERE content.account_id = ? AND content.state = 'ready'
           AND content.source_generation = sync.active_generation
-          AND content.content_format_version = ?
           AND content.text_sha256 IS NOT NULL
        UNION ALL
        SELECT content.html_sha256, content.html_bytes
@@ -2595,7 +2617,6 @@ function referencedDescriptors(
           AND message.thread_id = content.source_thread_id
         WHERE content.account_id = ? AND content.state = 'ready'
           AND content.source_generation = sync.active_generation
-          AND content.content_format_version = ?
           AND content.html_sha256 IS NOT NULL
        UNION ALL
        SELECT attachment.sha256, attachment.bytes
@@ -2611,7 +2632,6 @@ function referencedDescriptors(
           AND message.thread_id = content.source_thread_id
        WHERE attachment.account_id = ? AND content.state = 'ready'
           AND content.source_generation = sync.active_generation
-          AND content.content_format_version = ?
        UNION ALL
        SELECT remote.sha256, remote.bytes
          FROM message_content_remote_images AS remote
@@ -2627,21 +2647,15 @@ function referencedDescriptors(
         WHERE remote.account_id = ? AND remote.state = 'ready'
           AND content.state = 'ready'
           AND content.source_generation = sync.active_generation
-          AND content.content_format_version = ?
        UNION ALL
        SELECT sha256, bytes FROM message_content_staged_blobs WHERE account_id = ?`,
     )
     .all(
       accountId,
-      contentFormatVersion,
       accountId,
-      contentFormatVersion,
       accountId,
-      contentFormatVersion,
       accountId,
-      contentFormatVersion,
       accountId,
-      contentFormatVersion,
       accountId,
     );
   return Object.freeze(
@@ -2654,7 +2668,7 @@ function referencedDescriptors(
 }
 
 /**
- * Every ready body of the active generation with what it holds on disk, in
+ * Every retained body outside a live rebuild, including older formats, in
  * the order the byte budget gives them up: least recently used first, by one
  * key, when the letter was sent or last opened, whichever is later. An open
  * buys a body the same standing as a letter that arrived at that moment, and
@@ -2662,10 +2676,9 @@ function referencedDescriptors(
  * ones fill the budget and pushed each new letter out as it landed. A blob
  * two bodies share is counted for each, so the figure errs high.
  */
-function readyBodySizes(
+function retainedBodySizes(
   database: DatabaseSync,
   accountId: string,
-  contentFormatVersion: number,
 ): readonly {
   readonly messageId: string;
   readonly openedAt: number | null;
@@ -2705,12 +2718,12 @@ function readyBodySizes(
            ON demand.account_id = content.account_id
           AND demand.provider_message_id = content.provider_message_id
           AND demand.source_generation = content.source_generation
-        WHERE content.account_id = ? AND content.state = 'ready'
+        WHERE content.account_id = ? AND content.state <> 'fetching'
+          AND content.raw_sha256 IS NOT NULL
           AND content.source_generation = sync.active_generation
-          AND content.content_format_version = ?
         ORDER BY recency_key ASC, content.provider_message_id ASC`,
     )
-    .all(accountId, contentFormatVersion);
+    .all(accountId);
   return rows.map((row) => {
     if (
       typeof row.provider_message_id !== "string" ||
@@ -2737,28 +2750,24 @@ function readyBodySizes(
 function deleteOrphanContent(
   database: DatabaseSync,
   accountId: string,
-  contentFormatVersion: number,
 ): void {
   database
     .prepare(
       `DELETE FROM message_content AS content
         WHERE content.account_id = ?
-          AND (
-            content.content_format_version <> ? OR
-            NOT EXISTS (
-              SELECT 1
-                FROM sync_state AS sync
-                JOIN messages AS message
-                  ON message.account_id = sync.account_id
-                 AND message.generation = sync.active_generation
-               WHERE sync.account_id = content.account_id
-                 AND sync.active_generation = content.source_generation
-                 AND message.message_id = content.provider_message_id
-                 AND message.thread_id = content.source_thread_id
-            )
+          AND NOT EXISTS (
+            SELECT 1
+              FROM sync_state AS sync
+              JOIN messages AS message
+                ON message.account_id = sync.account_id
+               AND message.generation = sync.active_generation
+             WHERE sync.account_id = content.account_id
+               AND sync.active_generation = content.source_generation
+               AND message.message_id = content.provider_message_id
+               AND message.thread_id = content.source_thread_id
           )`,
     )
-    .run(accountId, contentFormatVersion);
+    .run(accountId);
 }
 
 function validateAttachments(

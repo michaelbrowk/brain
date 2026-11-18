@@ -22,6 +22,8 @@ import type {
   CachedProviderMessage,
   CachedProviderThread,
   MailCacheHydratableMailbox,
+  ImapThreadLocation as ThreadLocation,
+  ImapLocationStore,
 } from "../../service/message-cache";
 import {
   MailProviderSyncError,
@@ -68,11 +70,7 @@ const MAX_ABORT_TIMEOUT_MS = 0x7fff_ffff;
 // slices instead of one provider-sized buffer.
 const RAW_SOURCE_CHUNK_BYTES = MAX_IMAP_READ_LITERAL_BYTES;
 const INBOX_PATH = "INBOX";
-/**
- * How many relocated threads one adapter instance remembers. A relocation is
- * only needed until the next full Inbox rebuild drops the moved thread, so this
- * bound covers an undo of one section Done and then some.
- */
+/** Bounded fallback for adapters constructed without an account cache. */
 const MAX_TRACKED_RELOCATIONS = 256;
 /**
  * RFC 6851. The one command that relocates a message without a chance of
@@ -144,17 +142,6 @@ export interface ImapReadSessions {
   ): Promise<T>;
 }
 
-/**
- * Where one Brain thread's message currently lives. Absent from the relocation
- * map means the Inbox at the UID its thread id encodes, which is true for every
- * thread this adapter has not moved.
- */
-interface ThreadLocation {
-  readonly path: string;
-  readonly uidValidity: bigint;
-  readonly uid: number;
-}
-
 /** A batch's MOVE the server answered, and what it was asked to move. */
 interface LandedMove {
   readonly present: readonly {
@@ -204,21 +191,14 @@ interface ChangePageToken {
  *
  * `\Seen` and `\Flagged` are set in place. Archive, trash and junk are a MOVE
  * to a discovered mailbox, which changes the message's UID, so this adapter
- * remembers where it put a thread for as long as it lives.
- *
- * The Inbox listing repairs itself without that memory — a MOVE shrinks the
- * Inbox, the next incremental sync sees a lower EXISTS, rejects its cursor, and
- * the full rebuild that follows does not list the moved message any more. Undo
- * does not. It needs the handle, so a runtime restart between the archive and
- * the press leaves the message in a folder Brain does not yet list, with no way
- * back from here. The window the surface offers is seconds long and this map is
- * the only record of where the message went, so the hole is narrow and real: a
- * durable relocation record is what closes it.
+ * stores the destination in the account's cache. Every mutation validates
+ * the folder's UIDVALIDITY before addressing its UID, including after restart.
  */
 export class ImapMailSyncAdapter implements MailProviderSyncPort {
   private readonly account: StoredImapMailAccount;
   private readonly sessions: ImapReadSessions;
   private readonly pending = new Map<string, CachedProviderThread>();
+  private readonly locationStore?: ImapLocationStore;
   private readonly relocations = new Map<string, ThreadLocation>();
   private mailboxRoles: ReadonlyMap<ImapMailboxRole, string | null> | null = null;
   /** Where a CREATE would put an Archive on this server, read off the same LIST. */
@@ -283,7 +263,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
   constructor(
     account: StoredImapMailAccount,
     sessions: ImapReadSessions,
-    options: { readonly now?: () => number } = {},
+    options: { readonly now?: () => number; readonly locationStore?: ImapLocationStore } = {},
   ) {
     if (
       account.providerKind !== "imap" ||
@@ -294,6 +274,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
     this.account = account;
     this.sessions = sessions;
     this.now = options.now ?? Date.now;
+    this.locationStore = options.locationStore;
   }
 
   async getSyncAnchor(signal: AbortSignal): Promise<string> {
@@ -612,7 +593,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
   ): Promise<ReadonlyMap<string, MailProviderBatchOutcome>> {
     const outcomes = new Map<string, MailProviderBatchOutcome>();
     const inbox = input.threads.flatMap((thread) =>
-      SAFE_MESSAGE_ID.test(thread.threadId) && !this.relocations.has(thread.threadId)
+      SAFE_MESSAGE_ID.test(thread.threadId) && !this.relocated(thread.threadId)
         ? [{ threadId: thread.threadId, read: thread.read, location: this.locate(thread.threadId) }]
         : [],
     );
@@ -632,7 +613,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
         const uidValidity = validateUidValidity(mailbox.uidValidity);
         const live = inbox.filter((thread) => {
           if (thread.location.uidValidity === uidValidity) return true;
-          outcomes.set(thread.threadId, { status: "stale" });
+          outcomes.set(thread.threadId, { status: "stale", resolution: "invalidated" });
           return false;
         });
         if (live.length === 0) return null;
@@ -645,7 +626,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
         const present = live.flatMap((thread) => {
           const message = byUid.get(thread.location.uid);
           if (message === undefined) {
-            outcomes.set(thread.threadId, { status: "stale" });
+            outcomes.set(thread.threadId, { status: "stale", resolution: "missing" });
             return [];
           }
           return [{ ...thread, message }];
@@ -707,7 +688,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
         if (moved.result.uidMap !== undefined && !moved.result.uidMap.has(entry.location.uid)) {
           // UIDPLUS answered for the move and did not name this one: it was
           // gone before the MOVE reached it.
-          outcomes.set(entry.threadId, { status: "stale" });
+          outcomes.set(entry.threadId, { status: "stale", resolution: "missing" });
           continue;
         }
         let landed: ThreadLocation | null;
@@ -740,7 +721,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
         if (outcomes.has(entry.threadId)) continue;
         const mapped = moved.result.uidMap?.get(entry.location.uid);
         if (moved.result.uidMap !== undefined && mapped === undefined) {
-          outcomes.set(entry.threadId, { status: "stale" });
+          outcomes.set(entry.threadId, { status: "stale", resolution: "missing" });
           continue;
         }
         const landed =
@@ -768,7 +749,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
       ? { ...entry.message, flags: new Set([...(entry.message.flags ?? []), "\\Seen"]) }
       : entry.message;
     if (landed === null) {
-      this.relocations.delete(entry.threadId);
+      this.forget(entry.threadId);
       return {
         status: "done",
         thread: this.projectAt(entry.threadId, moved.target, message, null),
@@ -1116,6 +1097,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
     present: boolean,
     signal: AbortSignal,
   ): Promise<void> {
+    this.pending.delete(threadId);
     const location = this.locate(threadId);
     await this.run(signal, (client) =>
       withMailbox(client, location.path, false, async (mailbox) => {
@@ -1145,6 +1127,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
     destination: ImapMailboxRole | "inbox",
     signal: AbortSignal,
   ): Promise<void> {
+    this.pending.delete(threadId);
     const location = this.locate(threadId);
     if (destination !== "inbox" && this.roleRefusedFromCache(destination)) {
       // LIST has already answered for this account and the answer was no. A
@@ -1216,7 +1199,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
         // The move happened and the destination UID is unknowable on this
         // server. Report the new home without a handle, and forget the old
         // one so no later mutation writes to a UID that is no longer there.
-        this.relocations.delete(threadId);
+        this.forget(threadId);
         this.pending.set(
           threadId,
           this.projectAt(threadId, target, moved.message, null),
@@ -1380,14 +1363,29 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
     }
   }
 
+  private relocated(threadId: string): ThreadLocation | undefined {
+    return this.locationStore
+      ? this.locationStore.readImapLocation(threadId)
+      : this.relocations.get(threadId);
+  }
+
+  private forget(threadId: string): void {
+    this.locationStore?.writeImapLocation(threadId, null);
+    this.relocations.delete(threadId);
+  }
+
   private locate(threadId: string): ThreadLocation {
-    const relocated = this.relocations.get(threadId);
+    const relocated = this.relocated(threadId);
     if (relocated) return relocated;
     const identity = parseMessageId(threadId);
     return Object.freeze({ path: INBOX_PATH, ...identity });
   }
 
   private remember(threadId: string, location: ThreadLocation): void {
+    if (this.locationStore) {
+      this.locationStore.writeImapLocation(threadId, location);
+      return;
+    }
     this.relocations.delete(threadId);
     this.relocations.set(threadId, location);
     while (this.relocations.size > MAX_TRACKED_RELOCATIONS) {
@@ -1402,7 +1400,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
     location: ThreadLocation,
   ): void {
     if (validateUidValidity(mailbox.uidValidity) !== location.uidValidity) {
-      throw staleThread();
+      throw new MailProviderSyncError("mail_provider_thread_stale", null, "mailbox_rekeyed");
     }
   }
 

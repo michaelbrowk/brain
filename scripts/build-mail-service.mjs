@@ -61,6 +61,28 @@ const mimeParserBundle = await build({
   target: "node22",
   format: "cjs",
   sourcemap: false,
+  // Keep the isolated parser, including its stylesheet reader, within the
+  // service's existing 8 MiB installation budget while retaining symbol names.
+  minifyWhitespace: true,
+  legalComments: "none",
+  logLevel: "info",
+  metafile: true,
+});
+
+// Keep the reader and sanitizer at the module paths installed by the projector.
+// The standalone sanitizer shares the installed reader's link normalizer;
+// the isolated MIME worker above embeds its entire dependency tree.
+const readerBundle = await build({
+  entryPoints: ["lib/mail/reader-content.ts", "lib/mail/service/mail-html-sanitizer.ts"],
+  outbase: "lib/mail",
+  outdir: output,
+  bundle: true,
+  platform: "node",
+  target: "node22",
+  format: "cjs",
+  external: ["../reader-content", "../security", "./content-types"],
+  minifyWhitespace: true,
+  minifySyntax: true,
   legalComments: "none",
   logLevel: "info",
   metafile: true,
@@ -84,7 +106,7 @@ const smtpRuntimeBundle = await build({
   metafile: true,
   plugins: [sharedMailModulesPlugin(root)],
 });
-// Every module the bundle above inlined. The compiled copies tsc left behind
+// Remove the intermediate modules that those bundles inlined. The copies tsc left behind
 // are dead once the bundle exists, and a module in the tarball that the
 // projector never carries into /run is weight nothing checks.
 await Promise.all(
@@ -100,6 +122,7 @@ await writeFile(
       ...Object.keys(imapBundle.metafile.inputs),
       ...Object.keys(gmailOAuthBundle.metafile.inputs),
       ...Object.keys(mimeParserBundle.metafile.inputs),
+      ...Object.keys(readerBundle.metafile.inputs),
       ...Object.keys(smtpRuntimeBundle.metafile.inputs),
     ]),
   ]),

@@ -148,7 +148,11 @@ import {
   type BrainMailEvent,
 } from "@/lib/mail/mail-events";
 import { normalizeMailSearchQueryText } from "@/lib/mail/search-query";
-import { readableMailBody } from "@/lib/mail/reader-content";
+import {
+  readableMailBody,
+  readableSanitizedMailHtml,
+  textFromSanitizedHtml,
+} from "@/lib/mail/reader-content";
 import {
   deriveReplyAllRecipients,
   deriveReplyRecipients,
@@ -3840,7 +3844,9 @@ export function MailSurface({
           });
         }
         if (content.state === "ready") {
-          body = readableMailBody(content.textBody) ?? body;
+          body = readableMailBody(content.textBody)
+            ?? textFromSanitizedHtml(readableSanitizedMailHtml(content.htmlBody), { includeLinkDestinations: true })
+            ?? body;
           sourceHasAttachments ||= content.attachments.length > 0;
         }
       } catch {
@@ -3854,6 +3860,11 @@ export function MailSurface({
       ) {
         return;
       }
+      const notices = [];
+      if (!body) {
+        notices.push(latest.snippet ? "Only the message preview is included." : "The message body is unavailable.");
+      }
+      if (sourceHasAttachments) notices.push("Original attachments aren’t included.");
       openComposer({
         accountId,
         mode: "forward",
@@ -3864,9 +3875,7 @@ export function MailSurface({
         subject: forwardedSubject(latest.subject ?? detail.thread.subject),
         text: forwardedPlainText(latest, body),
         replyToMessageId: null,
-        notice: sourceHasAttachments
-          ? "Original attachments aren’t included."
-          : null,
+        notice: notices.length > 0 ? notices.join(" ") : null,
       });
     },
     [client, onToast, openComposer],
@@ -5208,16 +5217,14 @@ export function MailSurface({
       outcome: DoneOutcome,
       putBack: (threads: readonly MailThreadListItem[]) => void,
     ) => {
-      landSectionDone(outcome.changed);
+      landSectionDone([...outcome.changed, ...outcome.alreadyOutside]);
       putBack(outcome.stayed);
-      if (
-        outcome.stayed.length === 0 &&
-        outcome.changed.length === 0 &&
-        outcome.renewed.length === 0
-      ) {
-        return;
-      }
+      const allEligibleCleared = outcome.stayed.length === 0 && outcome.changed.length === 0 &&
+        outcome.renewed.length === 0;
+      if (allEligibleCleared && outcome.alreadyOutside.length === 0) return;
+      const cleared = allEligibleCleared && press.blocked === 0;
       const tail = [
+        ...(outcome.alreadyOutside.length > 0 ? [`${outcome.alreadyOutside.length} already outside the Inbox`] : []),
         ...(outcome.changed.length === 0
           ? []
           : [`${outcome.changed.length} changed on the server`]),
@@ -5230,7 +5237,7 @@ export function MailSurface({
            itself. */
         ...(press.blocked === 0 ? [] : [`${press.blocked} can’t leave`]),
       ];
-      if (outcome.moved.length === 0) {
+      if (outcome.moved.length + outcome.alreadyOutside.length === 0) {
         onToast?.(`Couldn’t clear ${press.label}`, {
           icon: "danger-triangle-linear",
           subtitle: [
@@ -5243,10 +5250,10 @@ export function MailSurface({
         });
         return;
       }
-      onToast?.(`${press.label} partly cleared`, {
+      onToast?.(cleared ? `${press.label} cleared` : `${press.label} partly cleared`, {
         icon: "check-linear",
         subtitle: [
-          `${outcome.moved.length} archived`,
+          ...(outcome.moved.length > 0 ? [`${outcome.moved.length} archived`] : []),
           ...(outcome.stayed.length === 0
             ? []
             : [`${outcome.stayed.length} stayed put`]),

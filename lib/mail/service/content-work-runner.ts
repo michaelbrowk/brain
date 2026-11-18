@@ -177,15 +177,34 @@ export class ProductionMailContentWorkRunner implements MailContentWorkRunnerPor
   }
 
   async run(input: MailContentWorkInput, signal: AbortSignal): Promise<void> {
-    let sourceLease: MailContentSourceLease | null = null;
     let artifacts: ParsedMailArtifactSet | null = null;
     try {
       signal.throwIfAborted();
-      sourceLease = await this.sourceFactory.create({
-        accountId: input.accountId,
-        blobStore: input.blobStore,
-        incomingBlobStore: input.cache.incomingBlobStore(input.lease),
-      });
+      const cachedRaw = await input.cache.stageCachedRaw(input.lease, this.readNow());
+      signal.throwIfAborted();
+      const raw = cachedRaw ?? (await this.fetchRaw(input, signal));
+      const parsed = await this.parse(input, raw, signal);
+      if (parsed.kind !== "parsed") throw parserFailure(parsed);
+      artifacts = parsed.artifacts;
+      artifacts = validateParsedMailArtifactSet(artifacts);
+      await publishParsedContent(input, raw, artifacts, this.readNow());
+    } catch (error) {
+      throw mapWorkError(error, signal);
+    } finally {
+      wipeArtifacts(artifacts);
+    }
+  }
+
+  private async fetchRaw(
+    input: MailContentWorkInput,
+    signal: AbortSignal,
+  ): Promise<MailBlobDescriptor> {
+    const sourceLease = await this.sourceFactory.create({
+      accountId: input.accountId,
+      blobStore: input.blobStore,
+      incomingBlobStore: input.cache.incomingBlobStore(input.lease),
+    });
+    try {
       const raw = await sourceLease.source.fetchRaw({
         accountId: input.accountId,
         providerMessageId: input.providerMessageId,
@@ -198,16 +217,9 @@ export class ProductionMailContentWorkRunner implements MailContentWorkRunnerPor
         emptyChunks(),
         this.readNow(),
       );
-      const parsed = await this.parse(input, raw.descriptor, signal);
-      if (parsed.kind !== "parsed") throw parserFailure(parsed);
-      artifacts = parsed.artifacts;
-      artifacts = validateParsedMailArtifactSet(artifacts);
-      await publishParsedContent(input, raw.descriptor, artifacts, this.readNow());
-    } catch (error) {
-      throw mapWorkError(error, signal);
+      return raw.descriptor;
     } finally {
-      wipeArtifacts(artifacts);
-      sourceLease?.destroy();
+      sourceLease.destroy();
     }
   }
 

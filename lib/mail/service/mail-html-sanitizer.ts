@@ -2,13 +2,20 @@ import { Parser } from "htmlparser2";
 import {
   defaultTreeAdapter,
   html,
+  parse,
   parseFragment,
   serialize,
   type DefaultTreeAdapterMap,
   type TreeAdapter,
 } from "parse5";
 
+import { mailLinkDestination } from "../reader-content";
 import { validateMailRemoteImageSourceUrl } from "../security";
+
+import {
+  applyTrackingValue, mailClassNames, mailPresentationSheet, TRACKED_CSS_PROPERTY,
+  visibilityVariants, type TrackingValue,
+} from "./mail-html-sanitizer-styles";
 
 const ALLOWED_TAGS = new Set([
   "a",
@@ -20,6 +27,7 @@ const ALLOWED_TAGS = new Set([
   "del",
   "div",
   "em",
+  "font",
   "h1",
   "h2",
   "h3",
@@ -203,19 +211,58 @@ function sanitizeMailHtmlInternal(
     }
   };
 
+  const document = browserTreeMarkup(source, budget);
+  const sheet = mailPresentationSheet(
+    document.styles, ALLOWED_TAGS, sanitizeCssValue,
+  );
+
+  const cssClasses = (value: string | undefined) => mailClassNames(value)
+    .filter((name) => sheet.classes.has(name)).map((name) => "bm-c-" + name);
+  const visibilityCache = new Map<string, ReturnType<typeof visibilityVariants>>();
+  const hidesRemoteImage = (tag: string, raw: Record<string, string>) => {
+    if (Object.hasOwn(raw, "hidden")) return true;
+    const inline = parseTrackingStyle(raw.style);
+    const isImage = tag === "img";
+    if (!sheet.tracking.size) return trackingStyleHides(raw, isImage, inline);
+    const key = tag + " " + mailClassNames(raw.class).filter(name => sheet.classes.has(name)).join(" ");
+    let variants = visibilityCache.get(key);
+    if (!variants) {
+      variants = visibilityVariants(sheet, tag, raw.class);
+      if (visibilityCache.size < 256) visibilityCache.set(key, variants);
+    }
+    if (!variants.length) return trackingStyleHides(raw, isImage, inline);
+    return variants.every(style => {
+      if (!inline.size) return trackingStyleHides(raw, isImage, style);
+      const effective = new Map(style);
+      for (const [property, declaration] of inline) applyTrackingValue(effective, property, declaration);
+      return trackingStyleHides(raw, isImage, effective);
+    });
+  };
+
+  // A presentation-only attribute contains no visible copy. The reader extracts
+  // this generated stylesheet before measuring or binding any images.
+  if (sheet.css) append(`<span data-brain-mail-css="${escapeHtml(sheet.css)}"></span>`);
+  const body = document.body;
+  const bodyAttributes = safePresentationAttributes("body", body, !!sheet.css);
+  const direction = normalizeDirection(body.dir);
+  if (direction) bodyAttributes.push(`dir="${direction}"`);
+  const bodyClasses = cssClasses(body.class);
+  if (sheet.usesBody) bodyClasses.push("bm-body");
+  if (bodyClasses.length) bodyAttributes.push(`class="${bodyClasses.join(" ")}"`);
+  const bodyHidesImages = hidesRemoteImage("body", body);
+  if (Object.hasOwn(body, "hidden")) return { html: null, remoteImages: [] };
+  if (bodyAttributes.length) append(`<div ${bodyAttributes.join(" ")}>`);
+
   const parser = new Parser(
     {
       onopentag(name, rawAttributes) {
         inTextRun = false;
         const normalizedName = name.toLowerCase();
         const ancestorSuppressesRemoteImages =
-          remoteImageSuppressionStack.at(-1)?.suppressed ?? false;
+          remoteImageSuppressionStack.at(-1)?.suppressed ?? bodyHidesImages;
         const suppressesRemoteImages =
           ancestorSuppressesRemoteImages ||
-          isRemoteImageSuppressedElement(
-            rawAttributes,
-            normalizedName === "img",
-          );
+          hidesRemoteImage(normalizedName, rawAttributes);
         if (!HTML_VOID_TAGS.has(normalizedName)) {
           remoteImageSuppressionStack.push({
             tag: normalizedName,
@@ -227,7 +274,7 @@ function sanitizeMailHtmlInternal(
           suppressedDepth++;
           return;
         }
-        if (DROP_CONTENT_TAGS.has(normalizedName)) {
+        if (DROP_CONTENT_TAGS.has(normalizedName) || Object.hasOwn(rawAttributes, "hidden")) {
           suppressedDepth = 1;
           return;
         }
@@ -235,6 +282,9 @@ function sanitizeMailHtmlInternal(
           emittedStack.push("");
           return;
         }
+
+        const classes = cssClasses(rawAttributes.class);
+        const classAttributes = classes.length ? [`class="${classes.join(" ")}"`] : [];
 
         if (normalizedName === "img") {
           const cid = normalizeCidSource(rawAttributes.src);
@@ -268,7 +318,8 @@ function sanitizeMailHtmlInternal(
                 const imageAttributes = [
                   `data-brain-remote-image="${remoteImageId}"`,
                   `alt="${escapeHtml(alternative ?? "")}"`,
-                  ...safePresentationAttributes(normalizedName, rawAttributes),
+                  ...classAttributes,
+                  ...safePresentationAttributes(normalizedName, rawAttributes, !!sheet.css),
                 ];
                 append(`<img ${imageAttributes.join(" ")}>`);
                 return;
@@ -282,7 +333,8 @@ function sanitizeMailHtmlInternal(
           const imageAttributes = [
             `data-brain-cid="${escapeHtml(cid)}"`,
             `alt="${escapeHtml(alternative ?? "")}"`,
-            ...safePresentationAttributes(normalizedName, rawAttributes),
+            ...classAttributes,
+            ...safePresentationAttributes(normalizedName, rawAttributes, !!sheet.css),
           ];
           append(
             `<img ${imageAttributes.join(" ")}>`,
@@ -290,9 +342,9 @@ function sanitizeMailHtmlInternal(
           return;
         }
 
-        const safeAttributes: string[] = [];
+        const safeAttributes: string[] = [...classAttributes];
         if (normalizedName === "a") {
-          const link = normalizeLink(rawAttributes.href);
+          const link = mailLinkDestination(rawAttributes.href);
           if (link !== null) {
             safeAttributes.push(`data-brain-href="${escapeHtml(link)}"`);
           }
@@ -306,7 +358,7 @@ function sanitizeMailHtmlInternal(
         const direction = normalizeDirection(rawAttributes.dir);
         if (direction !== null) safeAttributes.push(`dir="${direction}"`);
         safeAttributes.push(
-          ...safePresentationAttributes(normalizedName, rawAttributes),
+          ...safePresentationAttributes(normalizedName, rawAttributes, !!sheet.css),
         );
 
         append(`<${normalizedName}${safeAttributes.length ? ` ${safeAttributes.join(" ")}` : ""}>`);
@@ -350,12 +402,13 @@ function sanitizeMailHtmlInternal(
       recognizeSelfClosing: true,
     },
   );
-  parser.write(browserTreeMarkup(source, budget));
+  parser.write(document.markup);
   parser.end();
   while (emittedStack.length > 0) {
     const emitted = emittedStack.pop()!;
     if (emitted) append(`</${emitted}>`);
   }
+  if (bodyAttributes.length) append("</div>");
   const sanitized = output.join("").trim();
   return Object.freeze({
     html: sanitized.length === 0 ? null : sanitized,
@@ -371,24 +424,62 @@ function sanitizeMailHtmlInternal(
  * construction rules instead, and its serialization closes every element
  * explicitly, which the event sanitizer below then reads without repairing.
  *
- * The context is a body element in a no-quirks document because the reader
- * frame renders this output inside `<main>` of a `<!doctype html>` page: this
- * is the tree the frame itself would build from the raw markup. Head elements
- * land in place and are dropped as before. Scripting is off because the frame
+ * Full documents keep the body’s presentation. Fragments use a body context
+ * in the same no-quirks mode as the reader. Only sanitized stylesheet rules
+ * come out of the head. Scripting is off because the frame
  * runs none, which is also how the frame reads the inside of a `<noscript>`:
  * as markup, so an attribute value cannot end the element early.
  */
 function browserTreeMarkup(
   source: string,
   budget: MailHtmlSanitizerBudget,
-): string {
+): { markup: string; styles: string[]; body: Record<string, string> } {
   const treeAdapter = boundedTreeAdapter(budget);
-  const fragment = parseFragment(
-    defaultTreeAdapter.createElement("body", html.NS.HTML, []),
-    source,
-    { scriptingEnabled: false, treeAdapter },
-  );
-  return serialize(fragment, { scriptingEnabled: false, treeAdapter });
+  const options = { scriptingEnabled: false, treeAdapter };
+  let body: Record<string, string> = {};
+  let content: TreeParent;
+  let styleRoot: TreeParent;
+  if (/<(?:html|body)(?:\s|>)/i.test(source)) {
+    // Force the same no-quirks layout as the reader document, including for
+    // fragments from older senders which omit a standards-mode doctype.
+    const document = parse("<!doctype html>" + source, options);
+    const root = treeAdapter.getChildNodes(document).find(isElementNamed("html"))!;
+    const bodyElement = treeAdapter.getChildNodes(root).find(isElementNamed("body"));
+    if (!bodyElement) return { markup: "", styles: [], body };
+    body = Object.fromEntries(bodyElement.attrs.map(({ name, value }) => [name, value]));
+    const rootDir = root.attrs.find((attr) => attr.name === "dir")?.value;
+    if (rootDir && !body.dir) body.dir = rootDir;
+    content = bodyElement;
+    styleRoot = root;
+  } else {
+    content = parseFragment(defaultTreeAdapter.createElement("body", html.NS.HTML, []), source, options);
+    styleRoot = content;
+  }
+
+  const styles: string[] = [];
+  function collectStyles(parent: TreeParent) {
+    for (const node of treeAdapter.getChildNodes(parent)) {
+      if (!treeAdapter.isElementNode(node) || node.namespaceURI !== html.NS.HTML) continue;
+      if (node.tagName === "style") {
+        const type = node.attrs.find((attr) => attr.name === "type")?.value.trim().toLowerCase();
+        const media = node.attrs.find((attr) => attr.name === "media")?.value.trim().toLowerCase();
+        if ((!type || type === "text/css") && (!media || media === "all" || media === "screen")) {
+          for (const child of treeAdapter.getChildNodes(node)) {
+            if (treeAdapter.isTextNode(child)) styles.push(child.value);
+          }
+        }
+      } else if (node.tagName === "head" || !DROP_CONTENT_TAGS.has(node.tagName)) {
+        collectStyles(node);
+      }
+    }
+  }
+  if (/<style[\s>]/i.test(source)) collectStyles(styleRoot);
+  return { markup: serialize(content, options), styles, body };
+}
+
+function isElementNamed(tag: string) {
+  return (node: TreeChild): node is DefaultTreeAdapterMap["element"] =>
+    "tagName" in node && node.tagName === tag && node.namespaceURI === html.NS.HTML;
 }
 
 type TreeParent = DefaultTreeAdapterMap["parentNode"];
@@ -584,33 +675,26 @@ function closeRemoteImageSuppressionFrame(
   }
 }
 
-function isRemoteImageSuppressedElement(
+function trackingStyleHides(
   raw: Record<string, string>,
   isImage: boolean,
+  declarations: ReadonlyMap<string, TrackingValue>,
 ): boolean {
-  if (Object.hasOwn(raw, "hidden")) return true;
-  if (raw["aria-hidden"]?.trim().toLowerCase() === "true") return true;
-
-  const declarations = parseTrackingStyle(raw.style);
-  if (declarations.get("display") === "none") return true;
-  if (
-    declarations.get("visibility") === "hidden" ||
-    declarations.get("visibility") === "collapse"
-  ) {
-    return true;
-  }
-  if (declarations.get("content-visibility") === "hidden") return true;
-  if (isZeroOpacity(declarations.get("opacity"))) return true;
+  const value = (name: string) => declarations.get(name)?.value;
+  if (value("display") === "none") return true;
+  if (value("visibility") === "hidden" || value("visibility") === "collapse") return true;
+  if (value("content-visibility") === "hidden") return true;
+  if (isZeroOpacity(value("opacity"))) return true;
 
   const widths = [
     trackingPixelHtmlLength(raw.width),
-    trackingPixelCssLength(declarations.get("width")),
-    trackingPixelCssLength(declarations.get("max-width")),
+    trackingPixelCssLength(value("width")),
+    trackingPixelCssLength(value("max-width")),
   ].filter((value): value is number => value !== null);
   const heights = [
     trackingPixelHtmlLength(raw.height),
-    trackingPixelCssLength(declarations.get("height")),
-    trackingPixelCssLength(declarations.get("max-height")),
+    trackingPixelCssLength(value("height")),
+    trackingPixelCssLength(value("max-height")),
   ].filter((value): value is number => value !== null);
   const hasSmallWidth =
     widths.length > 0 && Math.min(...widths) <= 2;
@@ -643,22 +727,15 @@ function isRemoteImageSuppressedElement(
   );
 }
 
-function parseTrackingStyle(value: string | undefined): Map<string, string> {
-  const declarations = new Map<
-    string,
-    { readonly value: string; readonly important: boolean }
-  >();
+function parseTrackingStyle(value: string | undefined): Map<string, TrackingValue> {
+  const declarations = new Map<string, TrackingValue>();
   if (typeof value !== "string" || value.length > 8_192) return new Map();
   const withoutComments = value.replace(/\/\*[\s\S]*?\*\//g, "");
   for (const declaration of withoutComments.split(";").slice(0, 64)) {
     const separator = declaration.indexOf(":");
     if (separator < 1) continue;
     const property = declaration.slice(0, separator).trim().toLowerCase();
-    if (
-      !/^(?:display|visibility|content-visibility|opacity|width|height|max-width|max-height)$/.test(
-        property,
-      )
-    ) {
+    if (!TRACKED_CSS_PROPERTY.test(property)) {
       continue;
     }
     const important = /!\s*important\s*$/i.test(
@@ -669,16 +746,9 @@ function parseTrackingStyle(value: string | undefined): Map<string, string> {
       .replace(/!\s*important\s*$/i, "")
       .trim()
       .toLowerCase();
-    const previous = declarations.get(property);
-    if (previous?.important && !important) continue;
-    declarations.set(property, { value: candidate, important });
+    applyTrackingValue(declarations, property, { value: candidate, important });
   }
-  return new Map(
-    [...declarations].map(([property, declaration]) => [
-      property,
-      declaration.value,
-    ]),
-  );
+  return declarations;
 }
 
 function trackingPixelHtmlLength(value: string | undefined): number | null {
@@ -720,25 +790,6 @@ function isZeroOpacity(value: string | undefined): boolean {
   return Number.parseFloat(value) === 0;
 }
 
-function normalizeLink(value: string | undefined): string | null {
-  if (typeof value !== "string" || value.length > 2048) return null;
-  const candidate = value.trim();
-  if (/^\/\//.test(candidate)) return `https:${candidate}`;
-  if (!/^(?:https?:|mailto:)/i.test(candidate)) return null;
-  try {
-    const parsed = new URL(candidate);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:" && parsed.protocol !== "mailto:") {
-      return null;
-    }
-    if ((parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname.length === 0) {
-      return null;
-    }
-    return candidate;
-  } catch {
-    return null;
-  }
-}
-
 function normalizeTableSpan(value: string | undefined): string | null {
   if (typeof value !== "string" || !/^\d{1,3}$/.test(value)) return null;
   const parsed = Number(value);
@@ -752,6 +803,7 @@ function normalizeDirection(value: string | undefined): "ltr" | "rtl" | "auto" |
 function safePresentationAttributes(
   tag: string,
   raw: Record<string, string>,
+  preservePriority: boolean,
 ): string[] {
   const attributes: string[] = [];
   for (const key of ["width", "height"] as const) {
@@ -769,7 +821,14 @@ function safePresentationAttributes(
   const verticalAlign = normalizeKeyword(raw.valign, ["top", "middle", "bottom", "baseline"]);
   if (verticalAlign !== null) attributes.push(`valign="${verticalAlign}"`);
 
-  const style = sanitizeInlineStyle(raw.style, raw.bgcolor);
+  if (tag === "font") {
+    const color = raw.color && sanitizeCssColor(raw.color.trim());
+    const face = raw.face && sanitizeCssValue("font-family", raw.face);
+    if (color) attributes.push(`color="${escapeHtml(color)}"`);
+    if (face) attributes.push(`face="${escapeHtml(face)}"`);
+    if (/^(?:[1-7]|[+-][1-6])$/.test(raw.size ?? "")) attributes.push(`size="${raw.size}"`);
+  }
+  const style = sanitizeInlineStyle(raw.style, raw.bgcolor, preservePriority);
   if (style !== null) attributes.push(`style="${escapeHtml(style)}"`);
   return attributes;
 }
@@ -777,6 +836,7 @@ function safePresentationAttributes(
 function sanitizeInlineStyle(
   value: string | undefined,
   backgroundColor: string | undefined,
+  preservePriority: boolean,
 ): string | null {
   const declarations = new Map<
     string,
@@ -811,7 +871,7 @@ function sanitizeInlineStyle(
   }
   if (declarations.size === 0) return null;
   return [...declarations]
-    .map(([property, declaration]) => `${property}:${declaration.value}`)
+    .map(([property, declaration]) => `${property}:${declaration.value}${preservePriority && declaration.important ? "!important" : ""}`)
     .join(";");
 }
 
@@ -828,7 +888,9 @@ function sanitizeCssValue(property: string, value: string): string | null {
     return sanitizeCssColor(value);
   }
   if (property === "font-family") {
-    return /^[a-z0-9 ,.'"-]{1,160}$/i.test(value) ? collapseCssSpace(value) : null;
+    return value.length <= 160 && value.split(",").every(
+      (name) => /^(?:[a-z0-9 .-]+|'[a-z0-9 .-]+'|"[a-z0-9 .-]+")$/i.test(name.trim()),
+    ) ? collapseCssSpace(value) : null;
   }
   if (property === "font-size" || property === "line-height" || property === "letter-spacing") {
     return isCssLength(value, property === "line-height") ? value.toLowerCase() : null;
@@ -880,7 +942,7 @@ function sanitizeCssValue(property: string, value: string): string | null {
     direction: ["ltr", "rtl"],
     float: ["none", "left", "right"],
   };
-  const allowed = keywords[property];
+  const allowed = Object.hasOwn(keywords, property) ? keywords[property] : undefined;
   return allowed?.includes(value.toLowerCase()) ? value.toLowerCase() : null;
 }
 

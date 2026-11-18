@@ -290,6 +290,7 @@ function workInput(
     deadlineAt: Date.now() + 60_000,
     lane: { background: messageId === "prefetch" },
     cache: {
+      stageCachedRaw: async () => null,
       incomingBlobStore: () => ({}),
       stageBlob: async () => undefined,
       commitReady: async () => {

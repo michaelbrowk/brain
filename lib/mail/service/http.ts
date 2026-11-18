@@ -100,6 +100,7 @@ import {
   type MailContentService,
 } from "./content-coordinator";
 import {
+  MAIL_BATCH_OUTCOME_HEADER,
   MAIL_THREAD_STATE_CONTRACT_HEADER,
   mailThreadStateContractTier,
   projectMailThreadStateContract,
@@ -754,7 +755,10 @@ async function handleRequest(
           request,
           response,
           providerOperationDeadlineAt,
-          ({ signal }) => service.archiveThreads(input, signal),
+          ({ signal }) => service.archiveThreads(
+            request.headers[MAIL_BATCH_OUTCOME_HEADER] === "2" ? { ...input, reportAlreadyOutside: true } : input,
+            signal,
+          ),
         ),
       );
       return;

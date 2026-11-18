@@ -2083,12 +2083,27 @@ describe("MailSurface", () => {
     await vi.waitFor(() => expect(client.sendDraft).toHaveBeenCalled());
   });
 
-  it("forwards as a new plain-text message and states that attachments are omitted", async () => {
+  it.each([
+    ["plain text", readyContent, readyContent.textBody],
+    [
+      "HTML only",
+      {
+        ...readyContent,
+        textBody: null,
+        htmlBody: '<p>First paragraph.</p><p>-20 &amp; <b>details</b>.</p><a data-brain-href="https://example.test/pass">View pass</a>',
+      },
+      "First paragraph.\n-20 & details.\nView pass (https://example.test/pass)",
+    ],
+  ] as const)("forwards the complete %s message and states that attachments are omitted", async (_kind, content, expectedText) => {
     const attachedDetail: MailThreadDetail = {
       ...detail,
-      messages: [{ ...detail.messages[0]!, hasAttachments: true }],
+      messages: [{ ...detail.messages[0]!, textBody: null, hasAttachments: true }],
     };
-    const client = makeClient({ readThread: vi.fn().mockResolvedValue(attachedDetail) });
+    const client = makeClient({
+      readThread: vi.fn().mockResolvedValue(attachedDetail),
+      getMessageContent: vi.fn().mockResolvedValue(content),
+      requestMessageContent: vi.fn().mockResolvedValue(content),
+    });
     await act(async () =>
       root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
     );
@@ -2118,7 +2133,7 @@ describe("MailSurface", () => {
     const text = document.body.querySelector("textarea") as HTMLTextAreaElement;
     expect(subject.value).toBe("Fwd: Lunch this Friday?");
     expect(text.value).toContain("---------- Forwarded message ----------");
-    expect(text.value).toContain("Lunch at 12PM sounds great to me.");
+    expect(text.value).toContain(expectedText);
     await setInput(to, "reader@example.test");
     await click(findButton("Send"));
 
@@ -11447,6 +11462,36 @@ describe("MailSurface", () => {
       });
 
       const stale = () => new MailApiError(409, "mail_thread_stale");
+
+      it.each([
+        { label: "Seen", archived: 1, subtitle: "1 archived, 1 already outside the Inbox" },
+        { label: "Newsletters", archived: 0, subtitle: "2 already outside the Inbox" },
+      ])("reports confirmed removals in $label as cleared without an archive or Undo claim for them", async ({ label, archived, subtitle }) => {
+        const items = [0, 1].map((i) => unifiedThread({
+          accountId: accountA.accountId,
+          threadId: `item-${i}`,
+          category: label === "Newsletters" ? "newsletter" : "people",
+          unread: label === "Newsletters",
+          lastMessageAt: 1_700_000_000_000 - i,
+        }));
+        const archiveThreads = vi.fn().mockResolvedValue(items.map((thread, i) =>
+          i < archived ? { threadId: thread.threadId, status: "done", thread, markedRead: false }
+            : { threadId: thread.threadId, status: "already_outside" },
+        ));
+        const updateThread = vi.fn();
+        const onToast = vi.fn();
+        await act(async () => root.render(
+          <MailSurface client={unifiedClient(items, { archiveThreads, updateThread })}
+            onOpenSettings={() => {}} onToast={onToast} />,
+        ));
+        await settle();
+        await click(findButton(`Done — archive all 2 in ${label}`));
+        await closeWindow(onToast);
+        expect(onToast).toHaveBeenLastCalledWith(`${label} cleared`, expect.objectContaining({ subtitle }));
+        expect(onToast.mock.calls.at(-1)?.[1]?.actionLabel).toBeUndefined();
+        expect(updateThread).not.toHaveBeenCalled();
+        expect(document.body.querySelector(`section[aria-label="${label}"]`)).toBeNull();
+      });
 
       it("a thread that changed on the server under Done is named and kept out", async () => {
         // `mail_thread_stale`: the service says the letter is no longer what

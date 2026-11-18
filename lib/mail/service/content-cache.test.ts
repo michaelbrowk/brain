@@ -955,7 +955,20 @@ describe("active-message content metadata cache", () => {
     expect(await fixture.blobs.has(ready.rawMime)).toBe(true);
   });
 
-  it("reclaims ready content when the parser and sanitizer policy version changes", async () => {
+  it("does not reuse a retained original for the same provider id in a new generation", async () => {
+    const fixture = await createFixture({ active: true });
+    const previous = await publishRaw(fixture, Buffer.from("old generation"), 100);
+    const generation = fixture.messages.beginInitial("200");
+    fixture.messages.putInitialPage(generation, [threadFixture("thread-a", 2_000)], null, null);
+    fixture.messages.completeInitial(generation, 3_000);
+
+    const lease = await claimLease(fixture.content, "message-thread-a", 3_001);
+    expect(lease.sourceGeneration).not.toBe(previous.sourceGeneration);
+    await expect(fixture.content.stageCachedRaw(lease, 3_002)).resolves.toBeNull();
+    await expect(fixture.content.collectGarbage()).resolves.toContainEqual(previous.rawMime);
+  });
+
+  it("keeps the original through garbage collection and a failed rebuild without serving stale output", async () => {
     const fixture = await createFixture({ active: true });
     const ready = await publishRaw(fixture, Buffer.from("policy v1"), 100);
     expect(ready.contentFormatVersion).toBe(MAIL_CONTENT_FORMAT_VERSION);
@@ -965,15 +978,31 @@ describe("active-message content metadata cache", () => {
       cacheRoot: fixture.cacheRoot,
       accountId: ACCOUNT_ID,
       blobStore: fixture.blobs,
+      clock: () => fixture.clock.now,
       contentFormatVersion: MAIL_CONTENT_FORMAT_VERSION + 1,
     });
     contentCaches.push(upgraded);
     await upgraded.initialize();
 
     await expect(upgraded.read("message-thread-a")).resolves.toBeNull();
+    await expect(upgraded.collectGarbage()).resolves.toEqual([]);
+    await expect(upgraded.readBodyCacheBytes()).resolves.toBe(ready.rawMime.bytes);
     const next = await claimLease(upgraded, "message-thread-a", 200);
     expect(next.version).toBe(ready.version + 1);
-    await expect(upgraded.collectGarbage()).resolves.toEqual([ready.rawMime]);
+    await expect(upgraded.collectGarbage()).resolves.toEqual([]);
+    await expect(upgraded.stageCachedRaw(next, 201)).resolves.toEqual(ready.rawMime);
+    await upgraded.markFailure({
+      lease: next,
+      kind: "transient",
+      errorCode: "mail_mime_worker_dropped",
+      now: 202,
+    });
+    await expect(upgraded.collectGarbage()).resolves.toEqual([]);
+    const retry = await claimLease(upgraded, "message-thread-a", 203);
+    await expect(upgraded.stageCachedRaw(next, 204)).rejects.toMatchObject({
+      code: "mail_content_lease_stale",
+    });
+    await expect(upgraded.stageCachedRaw(retry, 204)).resolves.toEqual(ready.rawMime);
   });
 
   it("reuses verified remote images when the sanitizer policy version changes", async () => {
@@ -1026,6 +1055,7 @@ describe("active-message content metadata cache", () => {
     });
     contentCaches.push(upgraded);
     await upgraded.initialize();
+    await expect(upgraded.collectGarbage()).resolves.toEqual([]);
     const secondLease = await claimLease(
       upgraded,
       "message-thread-a",

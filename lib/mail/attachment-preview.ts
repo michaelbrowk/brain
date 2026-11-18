@@ -45,12 +45,13 @@ export function classifyAttachment(
 export function listedAttachments(
   attachments: readonly MailContentAttachmentDto[],
   renderedHtml: string | null,
+  resolvedCidSources: ReadonlyMap<string, string> | null = null,
 ): readonly MailContentAttachmentDto[] {
   if (renderedHtml === null) return attachments;
   const drawn = new Set(
-    referencedInlineCidAttachments(renderedHtml, attachments).map(
-      (attachment) => attachment.attachmentId,
-    ),
+    referencedInlineCidAttachments(renderedHtml, attachments)
+      .filter((attachment) => resolvedCidSources === null || resolvedCidSources.has(attachment.contentId!))
+      .map((attachment) => attachment.attachmentId),
   );
   if (drawn.size === 0) return attachments;
   return attachments.filter((attachment) => !drawn.has(attachment.attachmentId));

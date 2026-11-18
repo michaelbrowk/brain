@@ -254,6 +254,7 @@ export type DoneOutcome = {
   readonly stayed: readonly MailThreadListItem[];
   /** No longer what the list said they were, so neither of the above. */
   readonly changed: readonly MailThreadListItem[];
+  readonly alreadyOutside: readonly MailThreadListItem[];
   /** Got new mail after the press: not sent, or sent and taken back. */
   readonly renewed: readonly MailThreadListItem[];
   /** Accounts closed for the run, and why. */
@@ -304,6 +305,7 @@ type QueuedRun = {
   readonly moved: MailThreadListItem[];
   readonly stayed: MailThreadListItem[];
   readonly changed: MailThreadListItem[];
+  readonly alreadyOutside: MailThreadListItem[];
   readonly renewed: MailThreadListItem[];
   readonly closed: Map<string, DoneClosure>;
 };
@@ -425,6 +427,10 @@ export function doneQueue(failureOf: (error: unknown) => DoneFailure): DoneQueue
         run.stayed.push(thread);
         continue;
       }
+      if (answer.status === "already_outside") {
+        run.alreadyOutside.push(thread);
+        continue;
+      }
       if (answer.status === "stale") {
         run.changed.push(thread);
         continue;
@@ -499,6 +505,7 @@ export function doneQueue(failureOf: (error: unknown) => DoneFailure): DoneQueue
         moved: [],
         stayed: [],
         changed: [],
+        alreadyOutside: [],
         renewed: [],
         closed: new Map(),
       };

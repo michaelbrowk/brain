@@ -57,6 +57,7 @@ export interface MailSentScanPort {
 export interface MailProviderFactory {
   create(
     account: StoredMailAccount,
+    cache?: SqliteMailMessageCache,
   ): Promise<{
     readonly provider: MailProviderSyncPort;
     /** Absent for a provider whose Sent mail the cache already holds. */
@@ -536,7 +537,7 @@ export class MultiAccountMailMessageService implements MailMessageService {
         providerKind: account.providerKind,
         transportBindingVersion,
       });
-      const provider = await this.providerFactory.create(account);
+      const provider = await this.providerFactory.create(account, cache);
       destroyProvider = provider.destroy;
       return {
         credentialVersion: account.account.credentialRef.version,
@@ -614,12 +615,12 @@ export function createProductionMailProviderFactory(options: {
       store: options.store,
     });
   return Object.freeze({
-    async create(account: StoredMailAccount) {
+    async create(account: StoredMailAccount, cache?: SqliteMailMessageCache) {
       if (account.providerKind === "imap") {
         if (options.imapProviderFactory) {
-          return options.imapProviderFactory.create(account);
+          return options.imapProviderFactory.create(account, cache);
         }
-        const provider = new ImapMailSyncAdapter(account, imapSessions);
+        const provider = new ImapMailSyncAdapter(account, imapSessions, { locationStore: cache });
         return Object.freeze({ provider, sentScan: provider });
       }
       const tokenPort = new StoredGmailAccessTokenPort({

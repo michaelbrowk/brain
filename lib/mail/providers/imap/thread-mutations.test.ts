@@ -1,3 +1,7 @@
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { SqliteMailMessageCache, type ImapLocationStore } from "../../service/message-cache";
 import type { FetchMessageObject, MailboxObject } from "imapflow";
 import { describe, expect, it, vi } from "vitest";
 
@@ -686,23 +690,38 @@ describe("IMAP thread mutations", () => {
     ).rejects.toMatchObject({ code: "mail_provider_thread_stale" });
   });
 
-  it("refuses an undo it can no longer address instead of asking for a retry", async () => {
-    // The relocation map lives in the adapter. A runtime restart between the
-    // archive and the press hands the undo to a fresh adapter that believes
-    // the thread is still in the Inbox at the UID its id encodes — and it is
-    // not. No retry brings the handle back: the next sync rebuilds the list
-    // without the moved message, and the surface has to say so.
-    const server = serverFixture({
-      mailboxes: [{ path: "Archive", specialUse: "\\Archive" }],
-    });
-    await providerFor(server).provider.archiveThread("i77u1", signal());
-    const { provider: restarted } = providerFor(server);
-
-    await expect(
-      restarted.unarchiveThread("i77u1", signal()),
-    ).rejects.toMatchObject({ code: "mail_provider_thread_stale" });
-
-    expect(server.mailbox("Archive").messages.size).toBe(1);
+  it("returns an archived thread to Inbox after reopening the account cache and adapter", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "brain-imap-relocation-"));
+    const cacheRoot = path.join(root, "cache");
+    await mkdir(cacheRoot, { mode: 0o700 });
+    let cache = new SqliteMailMessageCache({ cacheRoot, accountId: ACCOUNT_ID });
+    try {
+      await cache.initialize();
+      cache.bindProviderCacheIdentity({ providerKind: "imap", transportBindingVersion: 1 });
+      const server = serverFixture({ mailboxes: [{ path: "Archive", specialUse: "\\Archive" }] });
+      await providerFor(server, undefined, cache).provider.archiveThread("i77u1", signal());
+      cache.close();
+      cache = new SqliteMailMessageCache({ cacheRoot, accountId: ACCOUNT_ID });
+      await cache.initialize();
+      const restarted = providerFor(server, undefined, cache).provider;
+      const archive = server.mailbox("Archive");
+      const originalValidity = archive.uidValidity;
+      archive.uidValidity += BigInt(1);
+      await expect(restarted.unarchiveThread("i77u1", signal())).rejects.toMatchObject({
+        code: "mail_provider_thread_stale",
+      });
+      expect(archive.messages.size).toBe(1);
+      archive.uidValidity = originalValidity;
+      await restarted.unarchiveThread("i77u1", signal());
+      expect(server.mailbox("Archive").messages.size).toBe(0);
+      expect((await restarted.getThread("i77u1", signal()))?.inInbox).toBe(true);
+      expect(cache.readImapLocation("i77u1")?.path).toBe("INBOX");
+      cache.bindProviderCacheIdentity({ providerKind: "imap", transportBindingVersion: 2 });
+      expect(cache.readImapLocation("i77u1")).toBeUndefined();
+    } finally {
+      cache.close();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("does not archive into a nested folder that happens to be called Archive", async () => {
@@ -902,7 +921,7 @@ describe("IMAP batch archive", () => {
       batch(["i77u1", "i78u2"]),
       signal(),
     );
-    expect(outcomes.get("i78u2")).toEqual({ status: "stale" });
+    expect(outcomes.get("i78u2")).toEqual({ status: "stale", resolution: "invalidated" });
     expect(server.commands.find((command) => command.name === "move")).toEqual({
       name: "move",
       mailbox: "INBOX",
@@ -1462,7 +1481,7 @@ function projected(message: FakeMessage): FetchMessageObject {
   } as FetchMessageObject;
 }
 
-function providerFor(server: FakeServer, now?: () => number) {
+function providerFor(server: FakeServer, now?: () => number, locationStore?: ImapLocationStore) {
   /* Every session is a TCP connect, a TLS handshake and an AUTH on the wire,
      so how many were opened is part of what a test can assert. */
   const opened = { count: 0 };
@@ -1480,7 +1499,7 @@ function providerFor(server: FakeServer, now?: () => number) {
     provider: new ImapMailSyncAdapter(
       accountFixture(),
       sessions,
-      now === undefined ? {} : { now },
+      { now, locationStore },
     ),
     opened,
   };

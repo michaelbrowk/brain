@@ -73,6 +73,10 @@ const ASKS: Readonly<Record<string, { listeners: number; asks: string; observers
 };
 
 const NEED_NOT_ASK: Readonly<Record<string, { listeners: number; why: string }>> = {
+  "components/mail-reader.tsx": {
+    listeners: 1,
+    why: "Enter activates the focused link inside the isolated message frame. The listener is bound to that link alone.",
+  },
   "components/shell.tsx": {
     listeners: 4,
     why: "The shell's own chords, its two undo keys, and the Escape that leaves Settings, which is bound only while Settings is the surface and unbound in the commit that starts its exit. The shell is what the canvases leave from, and it never leaves.",

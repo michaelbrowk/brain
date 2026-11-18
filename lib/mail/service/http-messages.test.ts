@@ -708,6 +708,12 @@ describe("brain-mail message HTTP surface", () => {
       { accountId: ACCOUNT_ID, threads, archive: true, read: true },
       expect.any(AbortSignal),
     );
+    await requestJson(socketPath, "POST", "/v1/threads/batch",
+      JSON.stringify({ accountId: ACCOUNT_ID, threads, archive: true }),
+      { "x-brain-mail-batch-outcome": "2" });
+    expect(messages.archiveThreads).toHaveBeenLastCalledWith(
+      { accountId: ACCOUNT_ID, threads, archive: true, reportAlreadyOutside: true }, expect.any(AbortSignal),
+    );
     // `batch` is the route's own name, never a thread id on the PATCH route.
     await expect(
       requestJson(socketPath, "GET", "/v1/threads/batch"),

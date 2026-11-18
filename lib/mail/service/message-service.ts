@@ -188,7 +188,7 @@ export type MailProviderBatchOutcome =
       readonly messageIds: readonly string[];
       readonly markedRead: boolean;
     }
-  | { readonly status: "stale" }
+  | { readonly status: "stale"; readonly resolution?: "missing" | "invalidated" }
   | { readonly status: "failed"; readonly error: unknown };
 
 export interface MailBackgroundSyncHealth {
@@ -466,11 +466,26 @@ export class AccountMailMessageService implements MailMessageService {
     const threadId = validateProviderId(mutation.threadId);
     return this.mutate(signal, async () => {
       signal.throwIfAborted();
-      await applyThreadMutation(this.provider, threadId, mutation, signal);
+      try {
+        await applyThreadMutation(this.provider, threadId, mutation, signal);
+      } catch (error) {
+        if (error instanceof MailProviderSyncError && error.code === "mail_provider_thread_stale") {
+          const current = await this.provider.getThread(threadId, signal);
+          if (this.reconcileStaleThread(threadId, current)) {
+            this.recordChange("mutation", MAIL_CHANGE_ALL_MAILBOXES);
+          }
+        }
+        throw error;
+      }
       signal.throwIfAborted();
       const refreshed = await this.provider.getThread(threadId, signal);
+      if (refreshed === null) {
+        if (this.reconcileStaleThread(threadId, null)) {
+          this.recordChange("mutation", MAIL_CHANGE_ALL_MAILBOXES);
+        }
+        throw new MailProviderSyncError("mail_provider_thread_stale");
+      }
       if (
-        refreshed === null ||
         refreshed.thread.accountId !== mutation.accountId ||
         refreshed.thread.threadId !== threadId
       ) {
@@ -506,7 +521,7 @@ export class AccountMailMessageService implements MailMessageService {
     this.assertAccount(batch.accountId);
     try {
       return await this.mutate(signal, () =>
-        this.archiveThreadsUnlocked(batch.threads, batch.read === true, signal),
+        this.archiveThreadsUnlocked(batch, signal),
       );
     } catch (error) {
       // The gate did not open before the deadline: nothing was reached.
@@ -531,10 +546,10 @@ export class AccountMailMessageService implements MailMessageService {
     guarantee does not rest on a take-back a closing page never sends.
   */
   private async archiveThreadsUnlocked(
-    presses: readonly MailThreadBatchPress[],
-    read: boolean,
+    batch: MailThreadBatchInput,
     signal: AbortSignal,
   ): Promise<MailThreadBatchResult> {
+    const { threads: presses, read = false } = batch;
     const threadIds = presses.map((press) => press.threadId);
     const pressOf = new Map(presses.map((press) => [press.threadId, press]));
     const flag = (threadId: string) => read && pressOf.get(threadId)!.unread;
@@ -596,7 +611,7 @@ export class AccountMailMessageService implements MailMessageService {
           threadId,
           error instanceof MailProviderSyncError &&
             error.code === "mail_provider_thread_stale"
-            ? { status: "stale" }
+            ? { status: "stale", ...(error.reason === "mailbox_rekeyed" ? { resolution: "invalidated" as const } : {}) }
             : { status: "failed", error },
         );
       }
@@ -629,12 +644,32 @@ export class AccountMailMessageService implements MailMessageService {
         if (outcome.markedRead) await this.provider.setThreadRead(threadId, false, signal);
         await this.provider.unarchiveThread(threadId, signal);
         const back = await this.provider.getThread(threadId, signal);
-        if (back === null || back.thread.threadId !== threadId) continue;
+        if (!back?.inInbox || back.thread.threadId !== threadId || back.thread.accountId !== this.accountId) continue;
         renewed.set(threadId, back.thread);
         this.cacheWrite(back);
         outcomes.delete(threadId);
       } catch {
         // Answered `done` below with the new mail in it.
+      }
+    }
+
+    const alreadyOutside = new Set<string>();
+    for (const threadId of toSend) {
+      const outcome = outcomes.get(threadId);
+      if (outcome?.status !== "stale") continue;
+      try {
+        const current = outcome.resolution
+          ? null
+          : await this.provider.getThread(threadId, signal);
+        if (this.reconcileStaleThread(threadId, current)) touched = true;
+        if (!current?.inInbox) {
+          // Rekeying invalidates an IMAP handle without proving the letter left the Inbox.
+          if (outcome.resolution !== "invalidated") alreadyOutside.add(threadId);
+        } else if (mailThreadHasNewMail(pressOf.get(threadId)!, current.thread)) {
+          renewed.set(threadId, current.thread);
+        }
+      } catch (error) {
+        outcomes.set(threadId, { status: "failed", error });
       }
     }
 
@@ -656,7 +691,10 @@ export class AccountMailMessageService implements MailMessageService {
       const kept = renewed.get(threadId);
       if (kept !== undefined) return Object.freeze({ threadId, status: "renewed", thread: kept });
       const outcome = outcomes.get(threadId)!;
-      if (outcome.status === "stale") return Object.freeze({ threadId, status: "stale" });
+      if (outcome.status === "stale") {
+        const status = batch.reportAlreadyOutside && alreadyOutside.has(threadId) ? "already_outside" : "stale";
+        return Object.freeze({ threadId, status });
+      }
       if (outcome.status === "failed") return failedItem(threadId, batchErrorCode(outcome.error));
       changed = true;
       if (outcome.status === "done") {
@@ -707,7 +745,7 @@ export class AccountMailMessageService implements MailMessageService {
     };
     await this.provider.archiveThread(threadId, signal);
     const archived = await readBack();
-    if (archived === null) return { status: "stale" };
+    if (archived === null) return { status: "stale", resolution: "missing" };
     if (!read || !archived.thread.unread || mailThreadHasNewMail(before, archived.thread)) {
       return { status: "done", thread: archived, markedRead: false };
     }
@@ -723,6 +761,15 @@ export class AccountMailMessageService implements MailMessageService {
       // The flag is on; the thread as the archive left it still answers.
     }
     return { status: "done", thread: after ?? archived, markedRead: true };
+  }
+
+  private reconcileStaleThread(threadId: string, current: CachedProviderThread | null): boolean {
+    if (current === null) return this.cache.forgetMissingThread(threadId);
+    if (current.thread.accountId !== this.accountId || current.thread.threadId !== threadId) {
+      throw new MailProviderSyncError("mail_provider_response_invalid");
+    }
+    this.cache.replaceActiveThread(current);
+    return true;
   }
 
   /** The provider has the change either way; a row the cache will not take

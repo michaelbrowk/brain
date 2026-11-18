@@ -1521,7 +1521,9 @@ for (const viewport of ["desktop", "@mobile"]) {
     await login(page);
     await installMailRoutes(page, {
       textBody: null,
-      htmlBody: `<a data-brain-href="${destination}"><span>View boarding pass</span></a>`,
+      htmlBody: `<table style="width:300px;background-color:#c60c30"><tbody><tr>
+        <td style="padding:10px 30px"><a data-brain-href="${destination}"><span>View boarding pass</span></a></td>
+        </tr></tbody></table>`,
     });
     await page.goto("/mail");
     await enterSingleAccount(page);
@@ -1529,15 +1531,21 @@ for (const viewport of ["desktop", "@mobile"]) {
     const frame = page.frameLocator('iframe[title="Sanitized HTML message"]');
     const link = frame.getByRole("link", { name: "View boarding pass" });
     await expect(link).toBeVisible();
-    const opened = context.waitForEvent("page");
-    if (viewport === "desktop") await link.press("Enter");
-    else await link.getByText("View boarding pass").tap();
-    const target = await opened;
-    await expect(target).toHaveURL(destination);
-    await expect(target).toHaveTitle("Test boarding pass");
-    expect(await target.evaluate(() => [window.opener, document.referrer])).toEqual([null, ""]);
-    await target.close();
-    await expect(link).toBeVisible();
+    const cell = frame.locator("td");
+    const edge = { position: { x: 3, y: 3 } };
+    const gestures = viewport === "desktop"
+      ? [() => cell.click(edge), () => link.getByText("View boarding pass").click(), () => link.press("Enter")]
+      : [() => cell.tap(edge)];
+    for (const activate of gestures) {
+      const opened = context.waitForEvent("page");
+      await activate();
+      const target = await opened;
+      await expect(target).toHaveURL(destination);
+      await expect(target).toHaveTitle("Test boarding pass");
+      expect(await target.evaluate(() => [window.opener, document.referrer])).toEqual([null, ""]);
+      await target.close();
+      await expect(link).toBeVisible();
+    }
   });
 }
 

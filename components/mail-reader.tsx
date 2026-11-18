@@ -602,6 +602,25 @@ export const CONTENT_MAX_REQUESTS = 3;
 export const CONTENT_TRANSIENT_POLLS_BEFORE_REQUEST = 3;
 const MAIL_FRAME_MAX_AUTO_HEIGHT = 16_000;
 
+// Many mail buttons paint a one-cell table and put only the label in the link.
+// Extend the pointer target to that cell when the link is its entire content.
+function mailLinkPointerTarget(link: HTMLAnchorElement): HTMLElement {
+  const cell = link.parentElement;
+  const view = link.ownerDocument.defaultView;
+  if (!view || !cell?.matches("td,th") || cell.childElementCount !== 1 ||
+    cell.textContent.trim() !== link.textContent.trim()) return link;
+
+  const painted = (element: Element) => {
+    const color = view.getComputedStyle(element).backgroundColor;
+    return color !== "transparent" && !/^rgba\([^)]*,\s*0\)$/.test(color);
+  };
+  const table = cell.closest("table");
+  if (painted(cell) || (table?.rows.length === 1 && table.rows[0]?.cells.length === 1 && painted(table))) {
+    return cell;
+  }
+  return link;
+}
+
 function SanitizedHtmlMessageFrame({ documentHtml }: { readonly documentHtml: string }) {
   const frameRef = useRef<HTMLIFrameElement>(null);
   const cleanupRef = useRef<() => void>(() => {});
@@ -627,6 +646,8 @@ function SanitizedHtmlMessageFrame({ documentHtml }: { readonly documentHtml: st
       anchor.tabIndex = 0;
       anchor.setAttribute("role", "link");
       anchor.title = new URL(destination).host || destination;
+      const pointerTarget = mailLinkPointerTarget(anchor);
+      if (pointerTarget !== anchor) pointerTarget.style.cursor = "pointer";
       const open = (event: MouseEvent | KeyboardEvent) => {
         if (!event.isTrusted || event.defaultPrevented) return;
         if ("key" in event) {
@@ -637,8 +658,9 @@ function SanitizedHtmlMessageFrame({ documentHtml }: { readonly documentHtml: st
         event.preventDefault();
         window.open(destination, "_blank", "noopener,noreferrer");
       };
-      for (const name of ["click", "auxclick", "keydown"] as const) {
-        anchor.addEventListener(name, open, { signal: links.signal });
+      anchor.addEventListener("keydown", open, { signal: links.signal });
+      for (const name of ["click", "auxclick"] as const) {
+        pointerTarget.addEventListener(name, open, { signal: links.signal });
       }
     }
 

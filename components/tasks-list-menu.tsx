@@ -272,11 +272,13 @@ function TasksListMenuBody({
 }
 
 /** The Tasks rail and the narrow Mail-style menu share one set of addresses.
- * Someday remains a scheduling choice; the complete history lives below the list. */
+ * Someday is parked work the reader still wants to look over, so it is an
+ * address here too; the complete history lives below the list. */
 export const TASKS_DESTINATIONS = [
   { list: "inbox", label: "Inbox", icon: "inbox" },
   { list: "today", label: "Today", icon: "calendar-date" },
   { list: "upcoming", label: "Upcoming", icon: "calendar" },
+  { list: "someday", label: "Someday", icon: "box-minimalistic" },
   { list: "all", label: "All tasks", icon: "checklist" },
 ] as const;
 
